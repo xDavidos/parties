@@ -247,6 +247,20 @@ private:
     std::chrono::steady_clock::time_point fps_last_update_{std::chrono::steady_clock::now()};
     std::chrono::steady_clock::time_point last_render_stall_log_{};
     uint32_t suppressed_render_stalls_ = 0;
+    // Delays sampling the video mailbox until just before the DWM latch the
+    // frame would make anyway. Times are QPC ticks.
+    struct LatchPacer {
+        HANDLE timer = nullptr;
+        int64_t target_vblank = 0;
+        int64_t sample = 0;
+        double cost = 0;
+        double miss_penalty = 0;
+
+        ~LatchPacer();
+        void before_sample(bool streams_active);
+        void after_frame();
+    };
+    LatchPacer latch_pacer_;
     // Last titlebar strings — SetInnerRML rebuilds the text element (and its
     // render geometry) even for identical content, so skip unchanged updates.
     Rml::String titlebar_fps_last_;

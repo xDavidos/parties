@@ -709,6 +709,7 @@ private:
 	HWND m_p_window_handle;
 	HANDLE m_p_fence_event;
 	HANDLE m_p_fence_event_screenshot;
+	HANDLE m_p_frame_latency_waitable;
 	uint64_t m_fence_value;
 	uint64_t m_fence_screenshot_value;
 	Rml::CompiledGeometryHandle m_precompiled_fullscreen_quad_geometry;

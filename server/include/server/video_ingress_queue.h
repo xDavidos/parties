@@ -34,6 +34,9 @@ public:
 
     std::vector<Pending> drain() { return queue_.drain(); }
 
+    template<typename Rep, typename Period>
+    void wait_for(const std::chrono::duration<Rep, Period>& timeout) { queue_.wait_for(timeout); }
+
 private:
     ThreadQueue<Pending> queue_;
 };
