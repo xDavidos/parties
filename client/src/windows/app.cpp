@@ -720,6 +720,79 @@ void App::render_pip_only() {
     if (FAILED(DwmFlush())) Sleep(16);
 }
 
+static int64_t qpc_ticks() {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return now.QuadPart;
+}
+
+static int64_t qpc_frequency() {
+    static const int64_t frequency = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return f.QuadPart;
+    }();
+    return frequency;
+}
+
+App::LatchPacer::~LatchPacer() {
+    if (timer) CloseHandle(timer);
+}
+
+void App::LatchPacer::before_sample(bool streams_active) {
+    const int64_t now = qpc_ticks();
+    const int64_t previous_target = std::exchange(target_vblank, 0);
+    sample = 0;
+    DWM_TIMING_INFO info{};
+    info.cbSize = sizeof(info);
+    if (!streams_active || FAILED(DwmGetCompositionTimingInfo(nullptr, &info)) ||
+        info.qpcRefreshPeriod == 0) {
+        cost = miss_penalty = 0;
+        return;
+    }
+    const auto period = static_cast<int64_t>(info.qpcRefreshPeriod);
+    const int64_t ms = qpc_frequency() / 1000;
+
+    // The latency waitable releases this frame once DWM latched the previous
+    // one, so waking about a refresh after its target means that frame missed.
+    if (previous_target != 0) {
+        const int64_t wake = now - previous_target;
+        if (wake > period / 2 && wake < period * 3 / 2)
+            miss_penalty = (std::min)(miss_penalty + ms / 2, static_cast<double>(period));
+    }
+    miss_penalty -= miss_penalty / 1024;
+
+    sample = now;
+    if (cost == 0) return;
+    const int64_t budget = static_cast<int64_t>(cost + miss_penalty) + ms * 3 / 2;
+    if (budget >= period) return;
+    if (!timer) {
+        timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                       TIMER_ALL_ACCESS);
+        if (!timer) return;
+    }
+
+    const int64_t ready = now + budget;
+    const int64_t phase = ((ready - static_cast<int64_t>(info.qpcVBlank)) % period + period) % period;
+    target_vblank = ready + period - phase;
+    const int64_t deadline = (std::min)(target_vblank - budget, now + period - ms);
+    const int64_t spin = ms / 2;
+    if (deadline - now > spin) {
+        LARGE_INTEGER due;
+        due.QuadPart = -((deadline - spin - now) * 10'000'000 / qpc_frequency());
+        if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE))
+            WaitForSingleObject(timer, INFINITE);
+    }
+    while (qpc_ticks() < deadline) YieldProcessor();
+    sample = qpc_ticks();
+}
+
+void App::LatchPacer::after_frame() {
+    if (sample == 0) return;
+    const auto elapsed = static_cast<double>(qpc_ticks() - sample);
+    cost = elapsed > cost ? elapsed : cost + (elapsed - cost) / 128;
+}
+
 static Rml::Element* find_share_thumbnail(Rml::ElementDocument* document, int target_index) {
     if (!document) return nullptr;
     const Rml::String element_id = "share-thumbnail-" + Rml::ToString(target_index);
@@ -740,6 +813,12 @@ void App::render_frame() {
         Sleep(16);
         return;
     }
+    bool streams_active;
+    {
+        std::lock_guard<std::mutex> slock(streams_mutex_);
+        streams_active = !video_streams_.empty();
+    }
+    latch_pacer_.before_sample(streams_active);
     const auto begin_complete = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::recursive_mutex> lock(ui_mutex_);
@@ -817,6 +896,7 @@ void App::render_frame() {
         if (pip_host_) pip_host_->render(core_.model_.stream_volume.get());
     }
     const auto frame_complete = std::chrono::steady_clock::now();
+    latch_pacer_.after_frame();
 
     const auto milliseconds = [](auto duration) {
         return std::chrono::duration<double, std::milli>(duration).count();
