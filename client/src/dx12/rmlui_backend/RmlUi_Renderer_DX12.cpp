@@ -866,7 +866,7 @@ RenderInterface_DX12::RenderInterface_DX12(void* p_window_handle, const Backend:
 	m_p_descriptor_heap_render_target_view_for_texture_manager{}, m_p_descriptor_heap_depth_stencil_view_for_texture_manager{},
 	m_p_descriptor_heap_shaders{}, m_p_descriptor_heap_depthstencil{}, m_p_depthstencil_resource{}, m_p_backbuffer_fence{}, m_p_fence_screenshot{},
 	m_p_adapter{}, m_p_copy_allocator{}, m_p_copy_command_list{}, m_p_allocator{}, m_p_offset_allocator_for_descriptor_heap_shaders{},
-	m_p_user_rtv_present{}, m_p_user_dsv_present{}, m_p_window_handle{}, m_p_fence_event{}, m_p_fence_event_screenshot{}, m_fence_value{},
+	m_p_user_rtv_present{}, m_p_user_dsv_present{}, m_p_window_handle{}, m_p_fence_event{}, m_p_fence_event_screenshot{}, m_p_frame_latency_waitable{}, m_fence_value{},
 	m_fence_screenshot_value{}, m_precompiled_fullscreen_quad_geometry{}
 {
 	static_assert(RenderInterface_DX12::NumPrograms == static_cast<size_t>(ProgramId::Count),
@@ -1183,6 +1183,11 @@ RenderInterface_DX12::operator bool() const
 bool RenderInterface_DX12::BeginFrame()
 {
 	RMLUI_ZoneScopedN("DirectX 12 - BeginFrame");
+
+	if (m_p_frame_latency_waitable)
+	{
+		WaitForSingleObjectEx(m_p_frame_latency_waitable, 100, FALSE);
+	}
 
 	auto* p_command_allocator = m_backbuffers_allocators.at(m_current_back_buffer_index);
 
@@ -4997,6 +5002,11 @@ void RenderInterface_DX12::Initialize_Swapchain(int width, int height) noexcept
 		m_is_use_tearing = true;
 	}
 
+	if (m_is_use_vsync)
+	{
+		flags_swapchain |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+	}
+
 	desc.Flags = flags_swapchain;
 
 	IDXGISwapChain1* p_swapchain1{};
@@ -5009,6 +5019,12 @@ void RenderInterface_DX12::Initialize_Swapchain(int width, int height) noexcept
 	RMLUI_DX_VERIFY_MSG(p_swapchain1->QueryInterface(IID_PPV_ARGS(&p_swapchain)), "failed to QueryInterface of IDXGISwapChain4");
 
 	m_p_swapchain = p_swapchain;
+
+	if (flags_swapchain & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)
+	{
+		RMLUI_DX_VERIFY_MSG(m_p_swapchain->SetMaximumFrameLatency(1), "failed to SetMaximumFrameLatency");
+		m_p_frame_latency_waitable = m_p_swapchain->GetFrameLatencyWaitableObject();
+	}
 
 	if (p_swapchain1)
 	{
@@ -5090,6 +5106,12 @@ void RenderInterface_DX12::Initialize_Allocator() noexcept
 void RenderInterface_DX12::Destroy_Swapchain() noexcept
 {
 	RMLUI_ZoneScopedN("DirectX 12 - Destroy_Swapchain");
+	if (m_p_frame_latency_waitable)
+	{
+		CloseHandle(m_p_frame_latency_waitable);
+		m_p_frame_latency_waitable = nullptr;
+	}
+
 	if (m_p_swapchain)
 	{
 		RMLUI_ATTR_ASSERT_VARIABLE auto ref_count = m_p_swapchain->Release();
