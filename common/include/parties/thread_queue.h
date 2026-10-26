@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <mutex>
 #include <condition_variable>
 #include <deque>
@@ -33,6 +34,12 @@ public:
         T item = std::move(queue_.front());
         queue_.pop_front();
         return item;
+    }
+
+    template<typename Rep, typename Period>
+    void wait_for(const std::chrono::duration<Rep, Period>& timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait_for(lock, timeout, [this] { return !queue_.empty(); });
     }
 
     std::vector<T> drain() {

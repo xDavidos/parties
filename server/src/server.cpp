@@ -120,7 +120,7 @@ void Server::run_until_stopped() {
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        quic_.video_ingress().wait_for(std::chrono::milliseconds(1));
     }
 
     quic_.stop();
