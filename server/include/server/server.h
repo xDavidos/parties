@@ -81,6 +81,8 @@ private:
             int64_t  outstanding = 0;
             int64_t  at_us = 0;
             uint32_t kbps = 0;
+            double   delivered_bps = 0.0;
+            bool     measured = false;
         };
         Coalescer report{50'000};
         std::unordered_map<uint32_t, ReportSnap> report_snaps;

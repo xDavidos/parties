@@ -360,7 +360,7 @@ void AppCore::tick()
 
     feed_video_sender_stats();
     video_sender_.tick(steady_now_us());
-    if (proto_gate_variant() == 3) {
+    if (proto_gate_cap()) {
         static uint32_t logged_caps = 0;
         const auto st = video_sender_.stats();
         if (st.proto_caps != logged_caps) {

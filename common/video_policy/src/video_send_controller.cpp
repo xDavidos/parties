@@ -22,8 +22,7 @@ bool proto_report_fresh(const video_send_detail::SharedCounters& c) {
 }
 
 bool proto_viewer_refuses(const video_send_detail::SharedCounters& c) {
-    const int v = proto_gate_variant();
-    if (v != 2 && v != 3) return false;
+    if (!proto_gate_admission()) return false;
     return proto_report_fresh(c) && c.report_queue_ms.load() > c.queue_budget_ms.load();
 }
 
@@ -234,7 +233,7 @@ void VideoSendController::tick(int64_t now_us) {
         window_sent_ = 0;
     }
 
-    if (proto_gate_variant() == 3 && proto_report_fresh(counters_) &&
+    if (proto_gate_cap() && proto_report_fresh(counters_) &&
         (!proto_last_cap_us_ || now_us - *proto_last_cap_us_ >= 500'000)) {
         const uint32_t kbps = counters_.report_delivery_kbps.load();
         const uint32_t queue_ms = counters_.report_queue_ms.load();

@@ -26,19 +26,31 @@ inline int proto_gate_variant() {
         if (s == "v2") return 2;
         if (s == "v3") return 3;
         if (s == "v4") return 4;
+        if (s == "v5") return 5;
+        if (s == "v6") return 6;
         return 0;
     }();
     return v;
 }
 
 inline const char* proto_gate_name() {
-    static const char* names[] = {"off", "v1", "v2", "v3", "v4"};
+    static const char* names[] = {"off", "v1", "v2", "v3", "v4", "v5", "v6"};
     return names[proto_gate_variant()];
 }
 
 inline bool proto_gate_reports() {
     const int v = proto_gate_variant();
-    return v >= 1 && v <= 3;
+    return (v >= 1 && v <= 3) || v == 5 || v == 6;
+}
+
+inline bool proto_gate_admission() {
+    const int v = proto_gate_variant();
+    return v == 2 || v == 3 || v == 5 || v == 6;
+}
+
+inline bool proto_gate_cap() {
+    const int v = proto_gate_variant();
+    return v == 3 || v == 6;
 }
 
 constexpr int64_t VIDEO_BACKLOG_MIN_THRESHOLD_BYTES = 64 * 1024;

@@ -1551,25 +1551,44 @@ void Server::forward_video_frame(const Session& sharer_session, const ParsedVide
                 }
                 max_backlog = (std::max)(max_backlog,
                     static_cast<uint32_t>((std::min<int64_t>)(out, 0xFFFFFFFFll)));
-                if (viewer_rate > 0.0) {
-                    const double q = static_cast<double>(out) / viewer_rate * 1000.0;
-                    max_queue_ms = (std::max)(max_queue_ms,
-                        static_cast<uint32_t>((std::min)(q, 65535.0)));
-                }
                 auto& snap = st.report_snaps[v->id];
                 if (snap.at_us == 0) {
                     snap = {retired, out, now, 0};
                 } else if (now - snap.at_us >= 250'000) {
+                    const uint64_t delivered = retired - snap.retired;
+                    const int64_t  dt = now - snap.at_us;
+                    snap.delivered_bps = static_cast<double>(delivered) * 1e6 / static_cast<double>(dt);
+                    snap.measured = true;
                     const bool backlogged = snap.outstanding >= 32 * 1024 && out >= 32 * 1024;
                     snap.kbps = backlogged
-                        ? static_cast<uint32_t>((retired - snap.retired) * 8 * 1000 /
-                                                static_cast<uint64_t>(now - snap.at_us))
+                        ? static_cast<uint32_t>(delivered * 8 * 1000 / static_cast<uint64_t>(dt))
                         : 0;
                     snap.retired = retired;
                     snap.outstanding = out;
                     snap.at_us = now;
                 }
-                if (snap.kbps > 0 && (min_kbps == 0 || snap.kbps < min_kbps)) min_kbps = snap.kbps;
+                if (proto >= 5) {
+                    const double rtt_ms = v->transport_stats.min_rtt().us() / 1000.0;
+                    double q = 0.0;
+                    if (snap.measured && snap.delivered_bps <= 0.0)
+                        q = out > 0 ? 65535.0 : 0.0;
+                    else {
+                        const double drain = snap.measured ? snap.delivered_bps : viewer_rate;
+                        if (drain > 0.0) q = static_cast<double>(out) / drain * 1000.0 - rtt_ms;
+                    }
+                    q = std::clamp(q, 0.0, 65535.0);
+                    max_queue_ms = (std::max)(max_queue_ms, static_cast<uint32_t>(q));
+                    const uint32_t kbps = q > 0.0 && snap.measured
+                        ? static_cast<uint32_t>(snap.delivered_bps * 8.0 / 1000.0) : 0;
+                    if (kbps > 0 && (min_kbps == 0 || kbps < min_kbps)) min_kbps = kbps;
+                } else {
+                    if (viewer_rate > 0.0) {
+                        const double q = static_cast<double>(out) / viewer_rate * 1000.0;
+                        max_queue_ms = (std::max)(max_queue_ms,
+                            static_cast<uint32_t>((std::min)(q, 65535.0)));
+                    }
+                    if (snap.kbps > 0 && (min_kbps == 0 || snap.kbps < min_kbps)) min_kbps = snap.kbps;
+                }
             }
             const uint16_t queue16 = static_cast<uint16_t>(max_queue_ms);
             uint8_t rr[12];
