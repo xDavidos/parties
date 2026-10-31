@@ -359,6 +359,17 @@ if(TARGET parties_update_core)
     add_executable(update_boot_test update_boot_test.cpp)
     target_link_libraries(update_boot_test PRIVATE parties_update_boot)
     add_test(NAME update_boot COMMAND update_boot_test)
+    if(PARTIES_UPDATE_TESTING)
+        # Runs the real Parties.exe against fake launchers in temporary install roots.
+        add_executable(update_fake_launcher WIN32 update_fake_launcher.cpp)
+        target_link_libraries(update_fake_launcher PRIVATE parties_update_boot)
+        add_executable(update_stub_test update_stub_test.cpp)
+        target_link_libraries(update_stub_test PRIVATE parties_update_boot bcrypt)
+        add_dependencies(update_stub_test parties_boot_stub update_fake_launcher)
+        add_test(NAME update_stub COMMAND update_stub_test
+            $<TARGET_FILE:parties_boot_stub> $<TARGET_FILE:update_fake_launcher>)
+        set_tests_properties(update_stub PROPERTIES TIMEOUT 300)
+    endif()
     # 100000 seeded random-walk sequences; about two minutes in a Debug build.
     set_tests_properties(update_probation PROPERTIES TIMEOUT 900)
 endif()
