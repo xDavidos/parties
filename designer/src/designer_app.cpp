@@ -9,6 +9,8 @@
 #include <client/lobby_model.h>
 #include <client/rml_elements.h>
 #include <client/server_list_model.h>
+#include <client/ui_layout_audit.h>
+#include <client/update_view.h>
 #include <client/video_element.h>
 #include <client/rml_binding.h>
 #include <parties/protocol.h>
@@ -230,6 +232,69 @@ struct DesignerApp::PartiesFixture {
 	parties::client::ContextWindowModel context_window;
 	int room_watch_request_count = 0;
 	int room_watched_user_id = 0;
+	std::optional<parties::update::link::Status> update_status;
+	std::vector<parties::update::link::Request> update_requests;
+
+	static bool IsUpdateSettings(const std::string& scenario) {
+		return scenario.rfind("settings-updates", 0) == 0;
+	}
+
+	// The launcher status each update scenario receives over the link.
+	static std::optional<parties::update::link::Status> UpdateStatus(const std::string& scenario) {
+		using namespace parties::update;
+		using namespace parties::update::link;
+		const auto version = [](const char* text) { return *Version::parse(text); };
+		Status status;
+		status.current = version("1.2.0.0");
+		if (scenario == "update-available") {
+			status.available = version("1.3.0.0");
+		} else if (scenario == "update-downloading") {
+			status.phase = Phase::Downloading;
+			status.percent = 42;
+		} else if (scenario == "update-ready") {
+			status.phase = Phase::ReadyToRestart;
+			status.available = version("1.3.0.0");
+		} else if (scenario == "update-rolled-back" || scenario == "update-data-restored") {
+			StatusNotice notice;
+			notice.from = version("1.3.0.0");
+			notice.to = version("1.2.0.0");
+			if (scenario == "update-data-restored") {
+				notice.kind = StatusNotice::Kind::DataRestored;
+				notice.preserved = "pre-restore-1.2.0.0-9f3c2a1b-g12.db";
+			}
+			status.notice = notice;
+		} else if (scenario == "settings-updates-feed-stale") {
+			status.phase = Phase::FeedStale;
+		} else if (scenario == "settings-updates-pinned" || scenario == "settings-updates-restore" ||
+			scenario == "settings-updates-impossible") {
+			status.phase = Phase::Pinned;
+			status.channel = Channel::Beta;
+			status.pinned_until = status.current;
+			const DowngradeEffect effect = scenario == "settings-updates-pinned" ? DowngradeEffect::None
+				: scenario == "settings-updates-restore" ? DowngradeEffect::RestoresBackup
+				: DowngradeEffect::Impossible;
+			status.downgrade = DowngradeOffer{version("1.1.0.0"), effect};
+		} else if (scenario != "settings-updates") {
+			return std::nullopt;
+		}
+		return status;
+	}
+
+	// What the visible update controls must have sent once ApplyDocumentFixture
+	// clicked them.
+	static std::vector<parties::update::link::Request> ExpectedUpdateRequests(const std::string& scenario) {
+		using namespace parties::update;
+		using namespace parties::update::link;
+		if (scenario == "update-available") return {CheckNow{}};
+		if (scenario == "update-ready") return {RestartToUpdate{}};
+		if (scenario == "update-rolled-back" || scenario == "update-data-restored") return {AcknowledgeNotice{}};
+		if (scenario == "settings-updates" || scenario == "settings-updates-feed-stale")
+			return {SetChannel{Channel::Beta, ChannelChoice::Wait}};
+		if (scenario == "settings-updates-pinned" || scenario == "settings-updates-restore")
+			return {SetChannel{Channel::Stable, ChannelChoice::Wait}, SetChannel{Channel::Beta, ChannelChoice::DowngradeNow}};
+		if (scenario == "settings-updates-impossible") return {SetChannel{Channel::Stable, ChannelChoice::Wait}};
+		return {};
+	}
 
 	static parties::client::ChannelUser User(const char* name, int id,
 		bool speaking = false, bool muted = false, bool streaming = false, int role = 3) {
@@ -329,7 +394,7 @@ struct DesignerApp::PartiesFixture {
 		}
 
 		lobby.is_connected = scenario != "launcher" && scenario != "party-modal" &&
-			scenario != "onboarding" && scenario != "recovery";
+			scenario != "onboarding" && scenario != "recovery" && scenario.rfind("update-", 0) != 0;
 		lobby.server_name = "Night Shift";
 		lobby.server_initials = "NS";
 		lobby.username = "tuxick";
@@ -442,7 +507,7 @@ struct DesignerApp::PartiesFixture {
 		lobby.router.reset();
 		const bool settings_scenario = scenario == "settings" || scenario == "settings-select-open" ||
 			scenario == "settings-screen-share" || scenario == "settings-hotkeys" ||
-			scenario == "settings-account" || scenario == "settings-camera";
+			scenario == "settings-account" || scenario == "settings-camera" || IsUpdateSettings(scenario);
 		if (settings_scenario)
 			lobby.router.go(parties::client::DocumentRoute::Settings);
 		else if (scenario == "chat" || scenario == "chat-segment-churn")
@@ -458,6 +523,17 @@ struct DesignerApp::PartiesFixture {
 			lobby.show_private_key = true;
 			lobby.identity_private_key = "8d99c2eed598508a94eb471d7334ee80d28a57139d1a7b7273e16105106fe0a4";
 			lobby.show_import_identity = true;
+		}
+		if (IsUpdateSettings(scenario))
+			lobby.router.select_settings(parties::client::SettingsSection::Updates);
+		update_status = UpdateStatus(scenario);
+		if (update_status) {
+			parties::client::show_update_status(lobby, *update_status);
+			lobby.on_update_action = [this](parties::client::UpdateAction action) {
+				if (auto request = parties::client::update_request(*update_status, action))
+					update_requests.push_back(*request);
+			};
+			lobby.on_apply_update = [this] { lobby.on_update_action(parties::client::UpdateAction::ClickPill); };
 		}
 		server_list.show_onboarding = scenario == "onboarding" || scenario == "recovery";
 		server_list.onboarding_step = scenario == "recovery" ? 1 : 0;
@@ -590,7 +666,8 @@ struct DesignerApp::PartiesFixture {
 			scenario != "stream-fps-overflow" &&
 			scenario != "member" && scenario != "share" && scenario != "audio-share" &&
 			scenario != "context-user" && scenario != "context-channel" &&
-			scenario != "room-camera" && scenario != "streams-camera" && scenario != "settings-camera")
+			scenario != "room-camera" && scenario != "streams-camera" && scenario != "settings-camera" &&
+			!UpdateStatus(scenario))
 			return false;
 		Populate(scenario);
 		if (scenario == "context-user" || scenario == "context-channel")
@@ -661,6 +738,17 @@ struct DesignerApp::PartiesFixture {
 
 	void ApplyDocumentFixture(Rml::ElementDocument* document, const std::string& scenario) {
 		if (!document) return;
+		if (update_status) {
+			// Click every update control the scenario shows, through the real
+			// data events, so validation can compare what reached the launcher.
+			document->GetContext()->Update();
+			for (const char* id : {"titlebar-update", "update-notice-dismiss", "settings-update-stable",
+				"settings-update-beta", "settings-update-switch-now"}) {
+				Rml::Element* control = document->GetElementById(id);
+				if (control && control->IsVisible(true))
+					control->DispatchEvent("click", Rml::Dictionary{});
+			}
+		}
 		if (scenario == "room") {
 			document->GetContext()->Update();
 			Rml::ElementList cards;
@@ -739,6 +827,59 @@ struct DesignerApp::PartiesFixture {
 		}
 	}
 
+	bool ValidateUpdateFixture(Rml::ElementDocument* document, const std::string& scenario) const {
+		auto visible = [document](const char* id) {
+			Rml::Element* element = document->GetElementById(id);
+			return element && element->IsVisible(true);
+		};
+		// Text of the visible children only: data-if keeps hidden alternatives in the DOM.
+		auto shown_text = [document](const char* id) {
+			Rml::String text;
+			Rml::Element* element = document->GetElementById(id);
+			for (int i = 0; element && i < element->GetNumChildren(); ++i) {
+				Rml::Element* child = element->GetChild(i);
+				if (child->IsVisible(true)) text += child->GetInnerRML();
+			}
+			return text;
+		};
+		auto contains = [](const Rml::String& text, const char* part) { return text.find(part) != Rml::String::npos; };
+
+		const char* pill_text = scenario == "update-available" ? "Update v1.3.0.0"
+			: scenario == "update-downloading" ? "Downloading 42%"
+			: scenario == "update-ready" ? "Restart to update" : nullptr;
+		const bool notice = scenario == "update-rolled-back" || scenario == "update-data-restored";
+		const bool offers_switch = scenario == "settings-updates-pinned" || scenario == "settings-updates-restore";
+		const bool held = offers_switch || scenario == "settings-updates-impossible";
+
+		bool valid = visible("titlebar-update") == (pill_text != nullptr) &&
+			(!pill_text || shown_text("titlebar-update") == pill_text) &&
+			visible("update-notice") == notice &&
+			(!notice || contains(shown_text("update-notice"), "didn't start correctly, so you're back on 1.2.0.0")) &&
+			(scenario != "update-data-restored" ||
+				contains(shown_text("update-notice"), "pre-restore-1.2.0.0-9f3c2a1b-g12.db"));
+		if (IsUpdateSettings(scenario)) {
+			Rml::Element* stable = document->GetElementById("settings-update-stable");
+			Rml::Element* beta_segment = document->GetElementById("settings-update-beta");
+			const Rml::String hold = shown_text("settings-update-hold");
+			const Rml::String status = document->GetElementById("settings-update-status")
+				? document->GetElementById("settings-update-status")->GetInnerRML() : Rml::String();
+			valid = valid && visible("settings-nav-updates") && visible("settings-updates-page") &&
+				stable && beta_segment && stable->IsClassSet("active") == !held &&
+				beta_segment->IsClassSet("active") == held &&
+				visible("settings-update-hold") == held &&
+				visible("settings-update-switch-now") == offers_switch &&
+				(!held || contains(hold, "Parties stays on 1.2.0.0 until Beta catches up.")) &&
+				(scenario != "settings-updates-restore" || contains(hold, "separate backup file")) &&
+				(scenario != "settings-updates" || status == "Up to date") &&
+				(scenario != "settings-updates-feed-stale" || contains(status, "paused"));
+		}
+		const bool requests_valid = update_requests == ExpectedUpdateRequests(scenario);
+		if (!valid || !requests_valid)
+			std::fprintf(stderr, "[Designer] Update UI validation failed for %s: layout=%d requests=%d (sent %zu)\n",
+				scenario.c_str(), valid ? 1 : 0, requests_valid ? 1 : 0, update_requests.size());
+		return valid && requests_valid && parties::client::AuditUIControlLayout(document, scenario.c_str());
+	}
+
 	bool ValidateDocumentFixture(Rml::ElementDocument* document, const std::string& scenario,
 		int viewport_width) const {
 		if (!document)
@@ -812,6 +953,11 @@ struct DesignerApp::PartiesFixture {
 				return false;
 			}
 		}
+
+		if (update_status && !ValidateUpdateFixture(document, scenario))
+			return false;
+		if (update_status && !IsUpdateSettings(scenario))
+			return true;
 
 		if (scenario == "launcher") {
 			Rml::ElementList icons;
@@ -986,7 +1132,7 @@ struct DesignerApp::PartiesFixture {
 
 		if (scenario == "settings" || scenario == "settings-select-open" ||
 			scenario == "settings-screen-share" || scenario == "settings-hotkeys" ||
-			scenario == "settings-account" || scenario == "settings-camera" ||
+			scenario == "settings-account" || scenario == "settings-camera" || IsUpdateSettings(scenario) ||
 			scenario == "chat" || scenario == "chat-segment-churn") {
 			Rml::Element* settings_route = document->GetElementById("route-settings");
 			Rml::Element* chat_route = document->GetElementById("route-chat");
@@ -1010,7 +1156,9 @@ struct DesignerApp::PartiesFixture {
 					? settings_nav->GetBox().GetSize(Rml::BoxArea::Border).x : 0.0f;
 				// The Camera page exists only where the platform can capture one.
 				const bool camera_page = lobby.camera_available.get();
-				valid = settings_nav && visible_nav_items == (camera_page ? 5u : 4u) &&
+				// The Updates page exists only while the launcher reports status.
+				const bool updates_page = lobby.update_managed.get();
+				valid = settings_nav && visible_nav_items == 4u + (camera_page ? 1u : 0u) + (updates_page ? 1u : 0u) &&
 					(!camera_page || document->GetElementById("settings-nav-camera")) &&
 					document->GetElementById("settings-nav-audio") &&
 					document->GetElementById("settings-nav-screen-share") &&

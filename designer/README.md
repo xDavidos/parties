@@ -93,6 +93,14 @@ fixtures feed deterministic frames through `VideoElement`; the `share` fixture
 uses the same path for target thumbnails so the picker cards are covered by
 automated rendering as well.
 
+The launcher-managed update UI has its own fixtures: `update-available`,
+`update-downloading`, `update-ready`, `update-rolled-back`, `update-data-restored`,
+`settings-updates`, `settings-updates-pinned`, `settings-updates-restore`,
+`settings-updates-impossible`, and `settings-updates-feed-stale`. Each one feeds a
+launcher status through the same `show_update_status` the client uses, clicks
+every visible update control, and fails unless the expected link requests come
+out and the control layout audit passes.
+
 Capture the primary regression set with:
 
 ```powershell
