@@ -5,12 +5,19 @@
 // real ones are never touched. Every process the test starts runs in a job
 // object, and "done" means the job has no process left.
 //
+// The "bridge-" scenarios run the setup the way the legacy in-app updater
+// does: as parties_client.exe in a portable folder, started with
+// --update-cleanup while the old app still holds its instance mutex.
+//
 // usage: update_setup_test --launcher <exe> --stub <exe> --fake-app <exe> [--only <name>]
 //        update_setup_test --launcher <exe> --stub <exe> --fake-app <exe> --real-client <exe>
+//        update_setup_test --no-updater-in <client exe>
 
 #include "build_info.h"
 #include "build_store.h"
+#include "data_test_support.h"
 #include "file_io.h"
+#include "testing.h"
 
 #include <client/settings_schema.h>
 #include <parties/crypto.h>
@@ -96,10 +103,11 @@ std::map<std::string, std::string> tree(const fs::path& dir) {
     return out;
 }
 
-// A process tree in its own job object.
+// A process tree in its own job object, started in `cwd` (default: the exe's folder).
 class Run {
 public:
-    Run(const fs::path& exe, const std::vector<std::wstring>& args, const std::map<std::wstring, std::wstring>& env) {
+    Run(const fs::path& exe, const std::vector<std::wstring>& args, const std::map<std::wstring, std::wstring>& env,
+        const fs::path& cwd = {}) {
         job_ = CreateJobObjectW(nullptr, nullptr);
         std::wstring cmd = L"\"" + exe.wstring() + L"\"";
         for (const auto& a : args) cmd += L" " + quote(a);
@@ -109,8 +117,8 @@ public:
         STARTUPINFOW si{sizeof si};
         PROCESS_INFORMATION pi{};
         if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE,
-                            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, block.data(), exe.parent_path().c_str(),
-                            &si, &pi)) {
+                            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, block.data(),
+                            (cwd.empty() ? exe.parent_path() : cwd).c_str(), &si, &pi)) {
             check(false, "cannot start " + utf8(exe));
             return;
         }
@@ -217,6 +225,7 @@ public:
         install = root_ / "Programs" / "Parties";
         data = root_ / "Parties";
         start_menu = root_ / "Start Menu";
+        desktop = root_ / "Desktop";
         recycle_log = root_ / "recycled.txt";
         key_parent = L"Software\\PartiesTest\\Setup-" + widen(unique);
         key = key_parent + L"\\Uninstall\\Parties";
@@ -229,7 +238,7 @@ public:
         fs::remove_all(root_, ec);
     }
 
-    fs::path root_, install, data, start_menu, recycle_log;
+    fs::path root_, install, data, start_menu, desktop, recycle_log;
     std::wstring key_parent, key, ns;
     std::map<std::string, std::string> extra_env{{"PARTIES_FAKE_RUN_MS", "700"}};
 
@@ -285,6 +294,7 @@ public:
         }
         out[L"PARTIES_TEST_UNINSTALL_KEY"] = key;
         out[L"PARTIES_TEST_START_MENU"] = start_menu.wstring();
+        out[L"PARTIES_TEST_DESKTOP"] = desktop.wstring();
         out[L"PARTIES_TEST_RECYCLE_LOG"] = recycle_log.wstring();
         out[L"PARTIES_TEST_TIMING"] = widen(kTiming);
         for (const auto& [k, v] : extra_env) out[widen(k)] = widen(v);
@@ -710,6 +720,332 @@ void pin_survives_gc() {
     check(markers(w, "3.0.0.0") == runs_before + 1, "the pin started the current good build");
 }
 
+// --- The bridge from the portable zip ---
+
+constexpr unsigned char kLegacyKey = 0x42;
+
+// The legacy updater's swap: the packed setup as parties_client.exe, the
+// previous app as parties_client.old.exe, and the portable database with its
+// last writes still in -wal, as ExitProcess leaves it.
+struct Portable {
+    fs::path dir, carrier, old_exe, db;
+    std::string db_bytes, wal_bytes;
+
+    Portable(const World& w, const fs::path& setup, const std::string& name, unsigned char identity) {
+        dir = w.root_ / name;
+        fs::create_directories(dir);
+        carrier = dir / "parties_client.exe";
+        old_exe = dir / "parties_client.old.exe";
+        db = dir / "parties_client.db";
+        fs::copy_file(setup, carrier, fs::copy_options::overwrite_existing);
+        fs::copy_file(g_fake_app, old_exe, fs::copy_options::overwrite_existing);
+        write_legacy_db(db, identity);
+        db_bytes = bytes_of(db);
+        wal_bytes = bytes_of(wal());
+    }
+
+    fs::path wal() const { return fs::path(db) += "-wal"; }
+    bool untouched() const { return bytes_of(db) == db_bytes && bytes_of(wal()) == wal_bytes; }
+
+    static void write_legacy_db(const fs::path& db, unsigned char identity) {
+        data_test::RawDb raw(db);
+        sqlite3_db_config(raw.get(), SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, nullptr);
+        raw.exec("PRAGMA journal_mode=WAL;");
+        raw.exec(data_test::legacy_v1_schema(true));
+        raw.exec("INSERT INTO identity (id, seed_phrase, public_key, secret_key) VALUES (1, 'words', " +
+                 data_test::key_blob(identity) + ", " + data_test::key_blob(0x77) + ")");
+        raw.exec("INSERT INTO saved_servers (name, host, port, fingerprint) VALUES ('Home', 'home.example', 7800, 'AA'), "
+                 "('Work', 'work.example', 7801, 'BB')");
+        raw.exec("INSERT INTO tofu_certs (host, port, fingerprint) VALUES ('home.example', 7800, 'AA'), "
+                 "('work.example', 7801, 'BB')");
+    }
+};
+
+bool has_identity(const fs::path& db, unsigned char identity) {
+    return count_rows(db, "SELECT count(*) FROM identity WHERE public_key = " + data_test::key_blob(identity)) == 1;
+}
+
+std::vector<fs::path> legacy_backups(const World& w) {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(w.data / "backups", ec))
+        if (e.path().filename().string().starts_with("legacy-")) out.push_back(e.path());
+    return out;
+}
+
+fs::path self_path() {
+    wchar_t buffer[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+    return buffer;
+}
+
+std::string setup_log() { return read_file(fs::temp_directory_path() / "PartiesSetup.log").value_or(""); }
+
+// Holds the portable app's instance mutex the way the old process does until
+// it exits, and records whether anything was installed before it let go.
+std::unique_ptr<Run> hold_instance(const World& w, std::chrono::milliseconds hold) {
+    const fs::path result = w.root_ / "holder-result.txt";
+    auto holder = std::make_unique<Run>(
+        fs::path(self_path()),
+        std::vector<std::wstring>{L"--hold-instance", w.ns, std::to_wstring(hold.count()), result.wstring(),
+                                  (w.install / kStubFile).wstring(), w.db().wstring()},
+        w.env());
+    const std::wstring name = L"Local\\" + w.ns + L".Client.Instance";
+    for (auto deadline = std::chrono::steady_clock::now() + 10s; std::chrono::steady_clock::now() < deadline;) {
+        if (HANDLE m = OpenMutexW(SYNCHRONIZE, FALSE, name.c_str())) {
+            CloseHandle(m);
+            return holder;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    check(false, "the old app's stand-in never took the instance mutex");
+    return holder;
+}
+
+int hold_instance_main(int argc, char** argv) {
+    const std::wstring name = L"Local\\" + widen(argv[2]) + L".Client.Instance";
+    CreateMutexW(nullptr, TRUE, name.c_str());
+    Sleep(static_cast<DWORD>(std::stoul(argv[3])));
+    bool untouched = true;
+    for (int i = 5; i < argc; ++i) untouched &= !fs::exists(widen(argv[i]));
+    write_bytes(widen(argv[4]), untouched ? "untouched" : "written");
+    ExitProcess(0);
+}
+
+std::vector<std::wstring> handoff_args(const Portable& p) { return {L"--update-cleanup", p.old_exe.wstring()}; }
+
+// The carrier started like the legacy updater or a double-click starts it: from the portable folder.
+std::optional<DWORD> run_carrier(const World& w, const Portable& p, std::vector<std::wstring> args,
+                                 std::map<std::wstring, std::wstring> extra_env = {}) {
+    args.push_back(L"--silent");
+    for (const auto& r : w.roots()) args.push_back(r);
+    auto env = w.env();
+    for (const auto& [k, v] : extra_env) env[k] = v;
+    return Run(p.carrier, args, env, p.dir).finish();
+}
+
+void check_installed_with_portable_data(const World& w, const Build& b, const Portable& p, uint32_t schema) {
+    auto s = w.state();
+    check(s && s->good == b.id(), "the bundled build is installed as good");
+    check(fs::exists(w.install / kStubFile), "the stub is installed");
+    auto main = read_link(w.start_menu / "Parties.lnk");
+    check(main && fs::path(main->target) == w.install / kStubFile, "the Start menu shortcut starts the stub");
+    check(has_identity(w.db(), kLegacyKey), "the live database holds the portable identity");
+    check(count_rows(w.db(), "SELECT count(*) FROM saved_servers") == 2, "both saved servers were imported");
+    check(count_rows(w.db(), "SELECT count(*) FROM tofu_certs") == 2, "both TOFU pins were imported");
+    check(count_rows(w.db(), "SELECT version FROM parties_schema") == schema, "the app migrated the imported data");
+    check(p.untouched(), "the portable database and its -wal are byte for byte the same");
+    check(bytes_of(p.carrier) == bytes_of(w.root_ / ("PartiesSetup-" + b.entry.version.to_string() + ".exe")),
+          "the carrier stays in the portable folder as parties_client.exe");
+    check(!fs::exists(p.old_exe), "parties_client.old.exe is gone");
+    auto backups = legacy_backups(w);
+    check(backups.size() == 1 && has_identity(backups[0], kLegacyKey),
+          "one legacy backup keeps the portable database as it was");
+}
+
+void bridge_handoff() {
+    World w("bridge-handoff");
+    Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+    Portable p(w, w.setup_for(a), "Portable Parties", kLegacyKey);
+    auto holder = hold_instance(w, 1500ms);
+    check(run_carrier(w, p, handoff_args(p)) == 0u, "the carrier exited 0");
+    check(read_file(w.root_ / "holder-result.txt") == "untouched",
+          "nothing was installed or imported while the old app held its mutex");
+    check_installed_with_portable_data(w, a, p, 2);
+    check(fs::exists(w.install / "state" / "boot-record.json"), "the app was started through the stub");
+    check(w.log().find("app reported healthy") != std::string::npos, "the app reported healthy to the launcher");
+    check(markers(w, "1.0.0.0") == 1, "the app ran once on the imported data");
+}
+
+void bridge_rerun_forwards() {
+    World w("bridge-rerun");
+    Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+    Portable p(w, w.setup_for(a), "Portable Parties", kLegacyKey);
+    check(run_carrier(w, p, handoff_args(p)) == 0u, "the handoff exited 0");
+    const auto install_before = tree(w.install);
+    const auto state_before = read_file(w.install / "state" / "supervisor.json");
+    const auto menu_before = tree(w.start_menu);
+    const auto backups_before = legacy_backups(w);
+    // Every launcher start commits its own state, so the install is compared
+    // on a run that only installs.
+    check(run_carrier(w, p, {L"--no-launch"}) == 0u, "the carrier started again exited 0");
+    check(read_file(w.install / "state" / "supervisor.json") == state_before, "supervisor.json is byte for byte the same");
+    check(tree(w.install) == install_before, "the install root holds the same files with the same bytes");
+    check(tree(w.start_menu) == menu_before, "the shortcuts are byte for byte the same");
+    check(legacy_backups(w) == backups_before, "no new legacy backup");
+    check(run_carrier(w, p, {}) == 0u, "the carrier double-clicked exited 0");
+    check(read_file(w.install / "state" / "boot-record.json").has_value() && markers(w, "1.0.0.0") == 2,
+          "the carrier started the installed app again through the stub");
+    check(w.state() && w.state()->good == a.id(), "the same build is still good");
+    check(legacy_backups(w) == backups_before, "still no new legacy backup");
+    check(p.untouched(), "the portable database is still byte for byte the same");
+}
+
+void bridge_double_click_keeps_running_app() {
+    World w("bridge-running");
+    w.extra_env["PARTIES_FAKE_RUN_MS"] = "120000";
+    Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+    Portable p(w, w.setup_for(a), "Portable Parties", kLegacyKey);
+    std::vector<std::wstring> args = handoff_args(p);
+    args.push_back(L"--silent");
+    for (const auto& r : w.roots()) args.push_back(r);
+    Run running(p.carrier, args, w.env(), p.dir);
+    check(running.exit_code() == 0u, "the handoff exited 0");
+    check(wait_for_log(w, "app reported healthy", 30s), "the installed app is up");
+    const auto state_before = read_file(w.install / "state" / "supervisor.json");
+    const auto started = std::chrono::steady_clock::now();
+    check(run_carrier(w, p, {}) == 0u, "the double-clicked carrier exited 0");
+    check(std::chrono::steady_clock::now() - started < 10s, "it returned at once");
+    check(!running.wait_empty(1s), "the running app was not closed");
+    check(w.log().find("asked to quit") == std::string::npos, "the launcher was never asked to quit");
+    check(read_file(w.install / "state" / "supervisor.json") == state_before, "the install was not touched");
+}
+
+void bridge_manual_setup_finds_shortcuts() {
+    using namespace std::chrono_literals;
+    World w("bridge-manual");
+    Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+    const fs::path setup = w.setup_for(a);
+    // As on a real machine: the portable exe lives in the Start menu Programs
+    // folder itself, next to a Parties.lnk that starts it.
+    fs::create_directories(w.start_menu);
+    fs::create_directories(w.desktop);
+    fs::copy_file(g_fake_app, w.start_menu / "parties_client.exe");
+    Portable::write_legacy_db(w.start_menu / "parties_client.db", kLegacyKey);
+    Portable other(w, setup, "Old Desktop Copy", 0x99);
+    const auto now = fs::file_time_type::clock::now();
+    for (const char* suffix : {"", "-wal"}) {
+        fs::last_write_time(w.start_menu / (std::string("parties_client.db") + suffix), now - 1h);
+        fs::last_write_time(fs::path(other.db) += suffix, now - 2h);
+    }
+    const std::string menu_db = bytes_of(w.start_menu / "parties_client.db");
+    const std::string other_db = bytes_of(other.db);
+    check(make_pin(w.start_menu / "Parties.lnk", L"\"" + (w.start_menu / "parties_client.exe").wstring() + L"\"", L"x"),
+          "made the portable Start menu shortcut");
+    check(make_pin(w.desktop / "Parties.lnk", L"\"" + other.carrier.wstring() + L"\"", L"x"),
+          "made the portable Desktop shortcut");
+    check(w.setup(setup) == 0u, "setup exited 0");
+    check(has_identity(w.db(), kLegacyKey), "the Start menu copy's identity was imported");
+    check(count_rows(w.db(), "SELECT count(*) FROM saved_servers") == 2, "its servers were imported");
+    check(count_rows(w.db(), "SELECT version FROM parties_schema") == 2, "the app migrated the imported data");
+    auto main = read_link(w.start_menu / "Parties.lnk");
+    check(main && fs::path(main->target) == w.install / kStubFile, "the Start menu shortcut now starts the stub");
+    bool kept_other = false;
+    for (const fs::path& b : legacy_backups(w)) kept_other |= has_identity(b, 0x99);
+    check(kept_other, "the Desktop copy's identity is kept in backups");
+    check(bytes_of(w.start_menu / "parties_client.db") == menu_db && bytes_of(other.db) == other_db,
+          "both portable databases are byte for byte the same");
+    check(fs::exists(w.start_menu / "parties_client.exe") && fs::exists(other.old_exe),
+          "a manual setup leaves the portable copies' files alone");
+    check(markers(w, "1.0.0.0") == 1, "the app ran on the imported data");
+}
+
+void bridge_existing_data_is_kept() {
+    World w("bridge-existing");
+    Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+    const fs::path setup = w.setup_for(a);
+    install_and_run(w, a);
+    const fs::path live_wal = fs::path(w.db()) += "-wal";
+    const std::string live_before = bytes_of(w.db()), wal_before = bytes_of(live_wal);
+    Portable p(w, setup, "Portable Parties", kLegacyKey);
+    auto args = handoff_args(p);
+    args.push_back(L"--no-launch");
+    check(run_carrier(w, p, args) == 0u, "the carrier exited 0");
+    check(bytes_of(w.db()) == live_before && bytes_of(live_wal) == wal_before,
+          "the live database is byte for byte the same");
+    check(!has_identity(w.db(), kLegacyKey), "nothing was imported");
+    auto backups = legacy_backups(w);
+    check(backups.size() == 1 && has_identity(backups[0], kLegacyKey), "the portable database is kept in backups");
+    check(p.untouched(), "the portable database is byte for byte the same");
+    check(!fs::exists(p.old_exe), "parties_client.old.exe is gone");
+    const std::string sentence = "A copy of your older Parties data was saved in " + utf8(w.data / "backups") + ".";
+    check(setup_log().find(sentence) != std::string::npos, "setup told the user where the older data went");
+    check(run_carrier(w, p, {L"--no-launch"}) == 0u, "the carrier started again exited 0");
+    check(legacy_backups(w).size() == 1, "starting the carrier again keeps no second copy");
+    check(bytes_of(w.db()) == live_before, "the live database is still the same");
+}
+
+void bridge_kill_at_every_step() {
+    for (int step = 1; step <= 8; ++step) {
+        World w("bridge-kill-" + std::to_string(step));
+        Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+        Portable p(w, w.setup_for(a), "Portable Parties", kLegacyKey);
+        const std::string at = " (killed at step " + std::to_string(step) + ")";
+        auto code = run_carrier(w, p, handoff_args(p), {{L"PARTIES_KILL_AT", std::to_wstring(step)}});
+        check(code == testing::kKilledAtEffect, "the carrier was killed" + at);
+        check(p.untouched(), "the portable database is untouched after the kill" + at);
+        if (step < 8) check(fs::exists(p.old_exe), "parties_client.old.exe stays until the move is done" + at);
+        check(run_carrier(w, p, {}) == 0u, "the carrier started again exited 0" + at);
+        check_installed_with_portable_data(w, a, p, 2);
+        check(markers(w, "1.0.0.0") == 1, "the installed app ran on the imported data" + at);
+    }
+}
+
+void bridge_old_app_hangs() {
+    World w("bridge-hang");
+    Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+    Portable p(w, w.setup_for(a), "Portable Parties", kLegacyKey);
+    auto holder = hold_instance(w, 60s);
+    auto args = handoff_args(p);
+    args.push_back(L"--test-portable-wait-ms=500");
+    check(run_carrier(w, p, args) == 0u, "the carrier exited 0 although the old app never exited");
+    check(has_identity(w.db(), kLegacyKey), "the portable data was imported anyway");
+    check(p.untouched(), "the portable database is byte for byte the same");
+    check(!fs::exists(w.install / "state" / "boot-record.json"), "Parties was not started next to the old app");
+    check(setup_log().find("Close the older Parties window, then start Parties from the Start menu.") != std::string::npos,
+          "setup told the user to close the old window");
+}
+
+// The real client after a handoff: it opens the imported portable database,
+// migrates it to its own schema and reports healthy through stub and launcher.
+int bridge_real_client(const fs::path& client) {
+    g_scenario = "bridge-real-client";
+    World w("bridge-real");
+    const auto schema = parties::client::schema::kCurrent;
+    Build r = w.build("0.0.0.1", client, false, static_cast<uint32_t>(schema.version));
+    r.entry.data_compat_floor = static_cast<uint32_t>(schema.compat_floor);
+    Portable p(w, w.setup_for(r), "Portable Parties", kLegacyKey);
+    // The real client's instance mutex is not namespaced, so the harness
+    // starts it itself with --allow-multiple-instances instead of letting the
+    // carrier start it next to a developer's own Parties.
+    auto args = handoff_args(p);
+    args.push_back(L"--no-launch");
+    check(run_carrier(w, p, args) == 0u, "the carrier exited 0");
+    w.extra_env["PARTIES_TEST_EXIT_AFTER_HEALTHY_MS"] = "8000";
+    Run run(w.install / kStubFile,
+            {L"--data-root=" + w.data.wstring(), L"--test-namespace=" + w.ns, L"--", L"--allow-multiple-instances"},
+            w.env());
+    check(run.finish(180s) == 0u, "the stub exited 0");
+    check(w.log().find("app reported healthy") != std::string::npos, "the real client reported healthy");
+    check_installed_with_portable_data(w, r, p, static_cast<uint32_t>(schema.version));
+    std::cout << "  imported identity, 2 servers and 2 TOFU pins; parties_schema version "
+              << count_rows(w.db(), "SELECT version FROM parties_schema") << "\n";
+    std::cout << "bridge real-client smoke: " << (g_failures ? "FAILED" : "pass") << "\n";
+    return g_failures ? 1 : 0;
+}
+
+// The in-app updater is gone from the client: none of its strings remain in
+// the exe, nor its class in the PDB next to it.
+int no_updater_in(const fs::path& client) {
+    g_scenario = "no-updater";
+    const std::string exe = bytes_of(client);
+    fs::path pdb = client;
+    pdb.replace_extension(".pdb");
+    const std::string symbols = bytes_of(pdb);
+    auto contains = [](const std::string& bytes, std::string_view text) {
+        std::string wide;
+        for (char c : text) wide += {c, '\0'};
+        return bytes.find(text) != std::string::npos || bytes.find(wide) != std::string::npos;
+    };
+    check(exe.size() > 1'000'000 && !symbols.empty(), "read the client exe and its PDB");
+    check(contains(exe, "Parties"), "the scan finds a string the client has");
+    for (const char* text : {"api.github.com", "parties_client.old.exe", "--update-cleanup", "Expand-Archive"})
+        check(!contains(exe, text) && !contains(symbols, text), std::string("the client has no \"") + text + "\"");
+    check(!contains(symbols, "AutoUpdater"), "the PDB has no AutoUpdater symbol");
+    std::cout << "no-updater-in " << utf8(client) << ": " << (g_failures ? "FAILED" : "pass") << "\n";
+    return g_failures ? 1 : 0;
+}
+
 int real_client(const fs::path& client) {
     g_scenario = "real-client";
     World w("real");
@@ -749,6 +1085,8 @@ int real_client(const fs::path& client) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc >= 5 && std::string(argv[1]) == "--hold-instance") return hold_instance_main(argc, argv);
+    if (argc == 3 && std::string(argv[1]) == "--no-updater-in") return no_updater_in(argv[2]);
     std::optional<std::string> only;
     std::optional<fs::path> client;
     for (int i = 1; i + 1 < argc; ++i) {
@@ -764,7 +1102,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (!parties::crypto_init() || FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 2;
-    if (client) return real_client(*client);
+    if (client) return only == "bridge-" ? bridge_real_client(*client) : real_client(*client);
 
     const std::vector<std::pair<std::string, std::function<void()>>> scenarios{
         {"a fresh-install", fresh_install},
@@ -777,10 +1115,17 @@ int main(int argc, char** argv) {
         {"g uninstall-recycles", uninstall_recycles_data_on_request},
         {"h uninstall-while-running", uninstall_stops_running_app},
         {"i pin-survives-gc", pin_survives_gc},
+        {"bridge-a handoff", bridge_handoff},
+        {"bridge-b rerun-forwards", bridge_rerun_forwards},
+        {"bridge-b double-click-keeps-running-app", bridge_double_click_keeps_running_app},
+        {"bridge-c manual-setup-shortcuts", bridge_manual_setup_finds_shortcuts},
+        {"bridge-d existing-data-kept", bridge_existing_data_is_kept},
+        {"bridge-e kill-at-every-step", bridge_kill_at_every_step},
+        {"bridge-f old-app-hangs", bridge_old_app_hangs},
     };
     std::printf("%-28s %s\n", "scenario", "result");
     for (const auto& [name, run] : scenarios) {
-        if (only && name.find(*only) == std::string::npos) continue;
+        if (only ? name.find(*only) == std::string::npos : name.starts_with("bridge-")) continue;
         g_scenario = name;
         const int before = g_failures;
         const auto started = std::chrono::steady_clock::now();

@@ -435,6 +435,17 @@ if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
         --fake-app $<TARGET_FILE:update_fake_app>)
     add_test(NAME update_setup COMMAND update_setup_test ${update_setup_args})
     set_tests_properties(update_setup PROPERTIES TIMEOUT 900)
+    # The move from the portable zip: the setup as the zip's parties_client.exe,
+    # started the way the legacy in-app updater starts it.
+    add_test(NAME update_bridge COMMAND update_setup_test ${update_setup_args} --only bridge-)
+    set_tests_properties(update_bridge PROPERTIES TIMEOUT 900)
+    if(TARGET parties_client)
+        add_test(NAME update_bridge_no_updater COMMAND update_setup_test --no-updater-in $<TARGET_FILE:parties_client>)
+        # Needs a GPU, like update_e2e_smoke.
+        add_test(NAME update_bridge_smoke COMMAND update_setup_test ${update_setup_args}
+            --real-client $<TARGET_FILE:parties_client> --only bridge-)
+        set_tests_properties(update_bridge_smoke PROPERTIES TIMEOUT 300)
+    endif()
     # Needs a GPU, like update_e2e_smoke.
     if(TARGET parties_client)
         add_test(NAME update_e2e_setup_smoke COMMAND update_setup_test ${update_setup_args}
