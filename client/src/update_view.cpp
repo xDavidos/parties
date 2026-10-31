@@ -15,17 +15,19 @@ using update::link::Phase;
 using update::link::Status;
 using update::link::StatusNotice;
 
-enum class Pill { None, Available, Downloading, Ready };
+enum class Pill { None, Downloading, Ready };
 
 Pill pill_for(const Status& s) {
     switch (s.phase) {
     case Phase::Downloading:    return Pill::Downloading;
     case Phase::ReadyToRestart: return Pill::Ready;
-    case Phase::Idle:
-    case Phase::Checking:       return s.available && *s.available > s.current ? Pill::Available : Pill::None;
     default:                    return Pill::None;
     }
 }
+
+// Outside a download or a staged build, the launcher reports a newer version
+// only when it cannot stage it: that build needs a newer launcher.
+bool blocked(const Status& s) { return pill_for(s) == Pill::None && s.available && *s.available > s.current; }
 
 std::tm local_time(std::chrono::system_clock::time_point at) {
     const std::time_t t = std::chrono::system_clock::to_time_t(at);
@@ -63,8 +65,10 @@ std::string status_line(const Status& s) {
     switch (s.phase) {
     case Phase::Checking:
         return "Checking for updates";
-    case Phase::Downloading:
-        return s.percent ? "Downloading the update (" + std::to_string(*s.percent) + "%)" : "Downloading the update";
+    case Phase::Downloading: {
+        const std::string what = s.available ? "Downloading " + s.available->to_string() : "Downloading the update";
+        return s.percent ? what + " · " + std::to_string(*s.percent) + "%" : what;
+    }
     case Phase::ReadyToRestart:
         return s.available ? "Version " + s.available->to_string() + " is ready. It installs when you restart."
                            : "An update is ready. It installs when you restart.";
@@ -76,7 +80,9 @@ std::string status_line(const Status& s) {
     case Phase::Pinned:
         break;
     }
-    if (pill_for(s) == Pill::Available) return "Version " + s.available->to_string() + " is available";
+    if (blocked(s))
+        return "Version " + s.available->to_string() +
+               " is out, but Parties can't install it automatically. Download the latest Parties installer to get it.";
     return "Up to date";
 }
 
@@ -138,7 +144,6 @@ void show_update_status(LobbyModel& model, const Status& status, std::chrono::sy
 std::optional<update::link::Request> update_request(const Status& status, UpdateAction action) {
     switch (action) {
     case UpdateAction::ClickPill:
-        if (pill_for(status) == Pill::Available) return update::link::CheckNow{};
         if (pill_for(status) == Pill::Ready) return update::link::RestartToUpdate{};
         return std::nullopt;
     case UpdateAction::ChooseStable:

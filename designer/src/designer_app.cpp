@@ -246,10 +246,11 @@ struct DesignerApp::PartiesFixture {
 		const auto version = [](const char* text) { return *Version::parse(text); };
 		Status status;
 		status.current = version("1.2.0.0");
-		if (scenario == "update-available") {
+		if (scenario == "settings-updates-blocked") {
 			status.available = version("1.3.0.0");
-		} else if (scenario == "update-downloading") {
+		} else if (scenario == "update-downloading" || scenario == "settings-updates-downloading") {
 			status.phase = Phase::Downloading;
+			status.available = version("1.3.0.0");
 			status.percent = 42;
 		} else if (scenario == "update-ready") {
 			status.phase = Phase::ReadyToRestart;
@@ -289,10 +290,10 @@ struct DesignerApp::PartiesFixture {
 	static std::vector<parties::update::link::Request> ExpectedUpdateRequests(const std::string& scenario) {
 		using namespace parties::update;
 		using namespace parties::update::link;
-		if (scenario == "update-available") return {CheckNow{}};
 		if (scenario == "update-ready") return {RestartToUpdate{}};
 		if (scenario == "update-rolled-back" || scenario == "update-data-restored") return {AcknowledgeNotice{}};
-		if (scenario == "settings-updates" || scenario == "settings-updates-feed-stale")
+		if (scenario == "settings-updates" || scenario == "settings-updates-feed-stale" ||
+			scenario == "settings-updates-blocked" || scenario == "settings-updates-downloading")
 			return {SetChannel{Channel::Beta, ChannelChoice::Wait}};
 		if (scenario == "settings-updates-pinned" || scenario == "settings-updates-restore")
 			return {SetChannel{Channel::Stable, ChannelChoice::Wait}, SetChannel{Channel::Beta, ChannelChoice::DowngradeNow}};
@@ -848,8 +849,8 @@ struct DesignerApp::PartiesFixture {
 		};
 		auto contains = [](const Rml::String& text, const char* part) { return text.find(part) != Rml::String::npos; };
 
-		const char* pill_text = scenario == "update-available" ? "Update v1.3.0.0"
-			: scenario == "update-downloading" ? "Downloading 42%"
+		const char* pill_text =
+			scenario == "update-downloading" || scenario == "settings-updates-downloading" ? "Downloading 42%"
 			: scenario == "update-ready" ? "Restart to update" : nullptr;
 		const bool notice = scenario == "update-rolled-back" || scenario == "update-data-restored";
 		const bool offers_switch = scenario == "settings-updates-pinned" || scenario == "settings-updates-restore";
@@ -876,7 +877,9 @@ struct DesignerApp::PartiesFixture {
 				(scenario != "settings-updates-restore" ||
 					(contains(hold, "backup made on Oct 30") && contains(hold, "separate backup file"))) &&
 				(scenario != "settings-updates" || status == "Up to date") &&
-				(scenario != "settings-updates-feed-stale" || contains(status, "paused"));
+				(scenario != "settings-updates-feed-stale" || contains(status, "paused")) &&
+				(scenario != "settings-updates-blocked" || contains(status, "Version 1.3.0.0 is out")) &&
+				(scenario != "settings-updates-downloading" || contains(status, "Downloading 1.3.0.0 · 42%"));
 		}
 		const bool requests_valid = update_requests == ExpectedUpdateRequests(scenario);
 		if (!valid || !requests_valid)

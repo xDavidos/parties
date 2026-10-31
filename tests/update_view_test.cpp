@@ -140,11 +140,13 @@ void pill() {
     check(!model.update_available.get() && model.update_status_line.get() == "Up to date",
           "nothing in the titlebar when up to date");
 
-    Status available = base();
-    available.available = v("1.3.0.0");
-    show_update_status(model, available);
-    check(model.update_available.get() && model.update_version.get() == "v1.3.0.0", "a newer build shows its pill");
-    check(sends(available, UpdateAction::ClickPill, CheckNow{}), "the available pill starts the update");
+    Status blocked = base();
+    blocked.available = v("1.3.0.0");
+    show_update_status(model, blocked);
+    check(!model.update_available.get() && !update_request(blocked, UpdateAction::ClickPill),
+          "a newer build the launcher cannot stage gets no titlebar pill");
+    check(contains(model.update_status_line.get(), "Version 1.3.0.0 is out, but Parties can't install it automatically"),
+          "Settings says a newer build exists that needs the installer");
 
     Status same = base();
     same.available = v("1.2.0.0");
@@ -153,10 +155,16 @@ void pill() {
 
     Status downloading = base();
     downloading.phase = Phase::Downloading;
+    downloading.available = v("1.3.0.0");
     downloading.percent = 42;
     show_update_status(model, downloading);
     check(model.update_downloading.get() && model.update_percent.get() == 42, "download progress is shown");
+    check(model.update_status_line.get() == "Downloading 1.3.0.0 · 42%", "Settings names the build being downloaded");
     check(!update_request(downloading, UpdateAction::ClickPill), "clicking progress sends nothing");
+    downloading.available.reset();
+    downloading.percent.reset();
+    show_update_status(model, downloading);
+    check(model.update_status_line.get() == "Downloading the update", "a download without details still reads right");
 
     Status ready = base();
     ready.phase = Phase::ReadyToRestart;

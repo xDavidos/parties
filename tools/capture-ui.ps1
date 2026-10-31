@@ -25,9 +25,10 @@ $lobbyScenarios = @(
     "stream-single", "stream-fps-overflow", "streams", "member", "settings",
     "settings-select-open", "settings-screen-share", "settings-hotkeys",
     "settings-account", "share", "audio-share", "chat", "chat-segment-churn",
-    "update-available", "update-downloading", "update-ready", "update-rolled-back",
+    "update-downloading", "update-ready", "update-rolled-back",
     "update-data-restored", "settings-updates", "settings-updates-pinned",
-    "settings-updates-restore", "settings-updates-impossible", "settings-updates-feed-stale"
+    "settings-updates-restore", "settings-updates-impossible", "settings-updates-feed-stale",
+    "settings-updates-blocked", "settings-updates-downloading"
 )
 if ($Profile -eq "iphone-17-pro") {
     # Sending a screen or application is unavailable on iOS, so those two
