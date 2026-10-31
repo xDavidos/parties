@@ -4,6 +4,7 @@ find_package(RapidJSON CONFIG REQUIRED)
 # parties_common (OpenSSL) or anything else beyond the C++ library and RapidJSON.
 add_library(parties_update_boot STATIC
     src/sha256_digest.cpp
+    src/boot.cpp
 )
 target_include_directories(parties_update_boot PUBLIC include)
 target_link_libraries(parties_update_boot PRIVATE rapidjson)
