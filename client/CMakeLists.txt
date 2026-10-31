@@ -127,6 +127,7 @@ else()
         src/windows/main.cpp
         src/windows/app.cpp
         src/windows/data_location.cpp
+        src/windows/legacy_import.cpp
         src/windows/system_diagnostics.cpp
         src/windows/stream_audio_capture.cpp
         src/windows/ui_manager.cpp

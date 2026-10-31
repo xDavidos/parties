@@ -2,6 +2,7 @@
 #include <client/auto_updater.h>
 #include <client/data_location.h>
 #include <client/exit_codes.h>
+#include <client/legacy_import.h>
 #include <client/sqlite_file.h>
 #include <client/win32_single_instance.h>
 #include <parties/version.h>
@@ -26,6 +27,8 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <system_error>
+#include <vector>
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -360,6 +363,22 @@ int main(int argc, char* argv[]) {
     LOG_INFO("{} Client v{}", parties::APP_NAME, parties::APP_VERSION);
     LOG_INFO("Data directory: {}", utf8_path(data.data_dir));
     parties::alloctrack::start_reporting(10);
+
+#ifdef PARTIES_RETAIL
+    {
+        // Portable zip builds kept the database next to the exe or in whatever
+        // folder they were started from.
+        std::error_code ec;
+        std::vector<std::filesystem::path> legacy_dirs{std::filesystem::current_path(ec)};
+        wchar_t exe_path[32768]{};
+        const DWORD exe_length = GetModuleFileNameW(nullptr, exe_path, 32768);
+        if (exe_length > 0 && exe_length < 32768)
+            legacy_dirs.push_back(std::filesystem::path(exe_path).parent_path());
+        const LegacyImportResult imported = import_legacy_data(data, legacy_dirs);
+        if (imported.status == LegacyImportResult::Status::Failed)
+            return refuse_to_start(ExitCode::DataUnavailable, data.db_path(), imported.error);
+    }
+#endif
 
     App app;
     const Settings::OpenResult opened = app.open_data(data.settings_paths());
