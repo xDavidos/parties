@@ -1040,10 +1040,13 @@ void App::attach_supervisor(std::unique_ptr<SupervisorLink> link) {
 }
 
 // The launcher judges a new build by this report: the lobby document is
-// loaded and the render thread has presented a frame of it.
+// loaded and the render thread has presented a frame of it. A window minimized
+// or hidden to the tray during startup never presents, and must not get a
+// working build rolled back.
 void App::poll_supervisor() {
     if (!supervisor_) return;
-    if (!supervisor_->healthy_reported() && doc_ && first_frame_presented_.load(std::memory_order_acquire))
+    if (!supervisor_->healthy_reported() && doc_ &&
+        (first_frame_presented_.load(std::memory_order_acquire) || ui_.is_render_suspended()))
         supervisor_->report_healthy(static_cast<uint32_t>(schema::kCurrent.version));
     if (supervisor_->poll()) {
         const update::link::Status& status = *supervisor_->status();
