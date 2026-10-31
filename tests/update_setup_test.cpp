@@ -542,6 +542,19 @@ void fresh_install() {
     check(session && session->ended_clean, "the launcher session ended clean");
 }
 
+// setup_for() packs the Beta manifest, as release.yml's setup job does, and the
+// install still follows Stable. A revocation reaches it because every revoke
+// writes both channels (update_e2e_test adv-beta-only-revoked).
+void adv_setup_channel() {
+    World w("advchan");
+    Build a = w.build("1.0.0.0");
+    install_and_run(w, a);
+    auto s = w.state();
+    std::cout << "embedded manifest channel: beta; installed state channel: "
+              << (s ? std::string(channel_name(s->channel)) : "(none)") << std::endl;
+    check(s && s->channel == Channel::Stable, "a setup built from the Beta manifest leaves the user on Stable");
+}
+
 void rerun_is_noop() {
     World w("rerun");
     Build a = w.build("1.0.0.0");
@@ -1106,6 +1119,7 @@ int main(int argc, char** argv) {
 
     const std::vector<std::pair<std::string, std::function<void()>>> scenarios{
         {"a fresh-install", fresh_install},
+        {"adv-setup-channel", adv_setup_channel},
         {"b rerun-is-noop", rerun_is_noop},
         {"c newer-is-staged", newer_is_staged},
         {"c newer-staged-build-wins", newer_staged_build_wins},

@@ -235,6 +235,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                                   nullptr, nullptr, wc.hInstance, nullptr);
     apply_shell_identity(window);
 
+    bool fault_alias = false;
     peer.send(link::Healthy{build.schema});
     if (fault == "crash-after-health") {
         Sleep(100);
@@ -242,15 +243,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     // Switches to Beta and waits, then takes "switch now" once it is offered.
-    if (fault == "wait-then-downgrade")
+    if (fault == "downgrade-then-stable") fault_alias = true;
+    if (fault == "wait-then-downgrade" || fault_alias)
         peer.send(link::Request{link::SetChannel{Channel::Beta, link::ChannelChoice::Wait}});
     const std::string status_log = env("PARTIES_FAKE_STATUS_LOG");
     bool restart_asked = false;
     bool downgrade_asked = false;
     // These faults assert on what the check told the app, so the app stays
     // until the check of its channel answers, however long that takes.
-    const bool until_checked = fault == "run-until-checked" || fault == "wait-then-downgrade";
-    const Channel channel = fault == "wait-then-downgrade" ? Channel::Beta : Channel::Stable;
+    const bool until_checked = fault == "run-until-checked" || fault == "wait-then-downgrade" || fault_alias;
+    const Channel channel = fault == "wait-then-downgrade" || fault_alias ? Channel::Beta : Channel::Stable;
     bool checking = false;
     bool answered = false;
     const auto started = std::chrono::steady_clock::now();
@@ -274,11 +276,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             if (status->phase == link::Phase::Checking) checking = true;
             else if (checking && status->channel == channel) answered = true;
         }
-        if (auto* status = std::get_if<link::Status>(&*m); status && fault == "wait-then-downgrade" &&
+        if (auto* status = std::get_if<link::Status>(&*m); status && (fault == "wait-then-downgrade" || fault_alias) &&
                                                           !downgrade_asked && status->phase == link::Phase::Pinned &&
                                                           status->downgrade) {
             downgrade_asked = true;
             peer.send(link::Request{link::SetChannel{Channel::Beta, link::ChannelChoice::DowngradeNow}});
+            // ADV2: the user changes their mind right away and picks Stable again.
+            if (fault_alias) peer.send(link::Request{link::SetChannel{Channel::Stable, link::ChannelChoice::Wait}});
         }
         if (auto* status = std::get_if<link::Status>(&*m); status && !restart_asked &&
                                                           status->phase == link::Phase::ReadyToRestart) {

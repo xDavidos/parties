@@ -7,7 +7,7 @@
 // launcher terminated right before its n-th effect, then restarted, and must
 // reach the same outcome without losing the identity or any preserved copy.
 //
-// usage: update_e2e_test --launcher <exe> --fake-app <exe> [--only <name>] [--no-kill]
+// usage: update_e2e_test --launcher <exe> --fake-app <exe> --manifest-tool <exe> [--only <name>] [--no-kill]
 //        update_e2e_test --launcher <exe> --real-client <exe>
 
 #include "build_info.h"
@@ -24,6 +24,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <format>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -54,7 +55,7 @@ constexpr DWORD kKilled = 0xDEAD;
 // One policy second is 10 ms: health deadline 2 s, confirm 6 s, clean exit after 0.3 s.
 constexpr const char* kTiming = "10,200,600,30";
 
-fs::path g_launcher, g_fake_app;
+fs::path g_launcher, g_fake_app, g_manifest_tool;
 bool g_verbose = false;
 int g_failures = 0;
 
@@ -67,7 +68,7 @@ std::wstring widen(std::string_view s) { return {s.begin(), s.end()}; }
 
 SigningKey test_key() {
     SigningKey k;
-    k.key_id = "parties-e2e-test";
+    k.key_id = "47ac18c9b12dc1be";  // what parties_manifest_tool calls this key
     auto seed = Sha256::from_hex(kTestSeed);
     k.secret_key = seed->bytes;
     if (!parties::derive_pubkey(k.secret_key, k.public_key)) std::abort();
@@ -256,6 +257,14 @@ fs::path install(const fs::path& install_root, const Release& r) {
     return dir;
 }
 
+void sign_and_publish(const fs::path& source, Channel channel, const std::string& payload) {
+    SigningKey key = test_key();
+    auto envelope = sign_manifest({reinterpret_cast<const uint8_t*>(payload.data()), payload.size()}, {&key, 1});
+    std::string error;
+    const fs::path file = source / (std::string(channel_name(channel)) + ".manifest.json");
+    if (!envelope || !durable_replace(file, *envelope, error)) std::abort();
+}
+
 struct Publish {
     Channel channel = Channel::Stable;
     std::vector<Version> revoked;
@@ -278,12 +287,7 @@ void publish(const fs::path& source, const std::vector<const Release*>& releases
             fs::copy_file(r->dir / f.name, source / "files" / f.sha256.to_hex(), fs::copy_options::skip_existing);
     }
     std::ranges::sort(p.builds, [](const BuildEntry& a, const BuildEntry& b) { return a.version > b.version; });
-    std::string payload = write_payload(p);
-    SigningKey key = test_key();
-    auto envelope = sign_manifest({reinterpret_cast<const uint8_t*>(payload.data()), payload.size()}, {&key, 1});
-    std::string error;
-    const fs::path file = source / (std::string(channel_name(how.channel)) + ".manifest.json");
-    if (!envelope || !durable_replace(file, *envelope, error)) std::abort();
+    sign_and_publish(source, how.channel, write_payload(p));
 }
 
 class Db {
@@ -368,6 +372,39 @@ struct World {
         return log_mark <= text.size() ? text.substr(log_mark) : text;
     }
 };
+
+// What revoke.yml does: the real manifest tool revokes `version` from what is
+// published, and the harness signs the payloads it writes.
+void revoke_with_tool(World& w, const Version& version, uint64_t serial) {
+    const fs::path work = w.root.path() / "revoke";
+    fs::create_directories(work / "ring");
+    const SigningKey key = test_key();
+    std::string pub;
+    for (uint8_t b : key.public_key) pub += std::format("{:02x}", b);
+    std::ofstream(work / "ring" / "harness.pub") << pub;
+    std::wstring cmd = L"\"" + g_manifest_tool.wstring() + L"\" revoke --version " + widen(version.to_string()) +
+                       L" --serial " + std::to_wstring(serial) + L" --expires-days 45 --out-dir \"" + work.wstring() +
+                       L"\" --keyring \"" + (work / "ring").wstring() + L"\"";
+    for (Channel c : {Channel::Beta, Channel::Stable}) {
+        const fs::path published = w.source / (std::string(channel_name(c)) + ".manifest.json");
+        cmd += L" --" + widen(channel_name(c)) + L" \"" + (fs::exists(published) ? published.wstring() : L"none") + L"\"";
+    }
+    STARTUPINFOW si{sizeof si};
+    PROCESS_INFORMATION pi{};
+    DWORD code = 1;
+    if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, work.c_str(), &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    if (code != 0) return fail(w.name, "parties_manifest_tool revoke exited " + std::to_string(code));
+    for (Channel c : {Channel::Beta, Channel::Stable}) {
+        auto payload = read_file(work / (std::string(channel_name(c)) + ".payload.json"));
+        if (!payload) return fail(w.name, std::string("the tool wrote no ") + std::string(channel_name(c)) + " payload");
+        sign_and_publish(w.source, c, *payload);
+    }
+}
 
 struct RunResult {
     DWORD exit_code = 0;
@@ -780,7 +817,133 @@ std::vector<Scenario> scenarios() {
                    },
                    true, false});
 
+    // ADV2: B is proven (A is previous_good), then B is revoked the way revoke.yml does it:
+    // B dropped from builds and listed in revoked[]. The newest build left is A.
+    out.push_back({"adv-revoked-to-previous", "", 1, 1, true,
+                   [](World& w) {
+                       for (int i = 0; i < 6; ++i) {
+                           auto s = w.state();
+                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
+                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
+                       }
+                       auto s = w.state();
+                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       publish(w.source, {&w.a}, 3, {.revoked = {w.b.entry.version}});
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && settled(*s) && s->good == w.a.entry.id();
+                   },
+                   [](const World& w, const std::string& label) {
+                       const BuildRecord* b = record(*w.state(), w.b);
+                       if (b && !b->quarantined()) fail(label, "the revoked B can still be rolled back to");
+                   },
+                   false, false});
+
+    // B (schema 3) is proven and then revoked. A cannot read B's data, so leaving B would
+    // restore a backup: Parties keeps B and offers the move instead of making it.
+    out.push_back({"adv-revoked-needs-restore", "", 3, 3, true,
+                   [](World& w) {
+                       for (int i = 0; i < 6; ++i) {
+                           auto s = w.state();
+                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
+                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
+                       }
+                       auto s = w.state();
+                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       publish(w.source, {&w.a}, 3, {.revoked = {w.b.entry.version}});
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && settled(*s) && w.statuses().find("\"kind\":\"withdrawn\"") != std::string::npos;
+                   },
+                   [](const World& w, const std::string& label) {
+                       auto s = w.state();
+                       if (s->good != w.b.entry.id() || !std::holds_alternative<Steady>(s->activation))
+                           fail(label, "Parties left B without the user's choice");
+                       if (Db(w.db()).scalar("SELECT version FROM parties_schema") != 3)
+                           fail(label, "the live database was restored without the user's choice");
+                       if (w.statuses().find("\"downgrade\":{\"version\":\"1.0.0.0\",\"data_effect\":\"restores_backup\","
+                                             "\"backup_taken_at\"") == std::string::npos)
+                           fail(label, "the app was not offered A with the date of the backup it restores");
+                   },
+                   false, false, {{"PARTIES_FAKE_FAULT", "2.0.0.0:run-until-checked"}}});
+
+    // A was installed by a setup whose build is only on Beta, and the install follows Stable,
+    // which lists only an older D. The operator revokes A once, with the real manifest tool.
+    out.push_back({"adv-beta-only-revoked", "", 1, 1, false,
+                   [](World& w) {
+                       Release d = make_release(w.root.path(), g_fake_app, "0.9.0.0", 1, 1, true);
+                       publish(w.source, {&d}, 2);
+                       publish(w.source, {&w.a}, 2, {.channel = Channel::Beta});
+                       revoke_with_tool(w, w.a.entry.version, 3);
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && settled(*s) && s->good != w.a.entry.id();
+                   },
+                   [](const World& w, const std::string& label) {
+                       if (w.state()->good.version != *Version::parse("0.9.0.0")) fail(label, "the install did not move to D");
+                   },
+                   false, false});
+
+    // ADV2: B is downloaded and staged while A runs; then B is revoked before B ever starts.
+    out.push_back({"adv-revoked-staged", "", 1, 1, true,
+                   [](World& w) {
+                       // Ends session 1 right after B is staged (before the restart's AppExited commit),
+                       // standing in for a user who closes the app without clicking "Restart to update".
+                       char* kat = nullptr; size_t kn = 0; _dupenv_s(&kat, &kn, "ADV_KILL_AT");
+                       std::string kill_at = kat ? kat : "6"; std::free(kat);
+                       run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"},
+                                        {"PARTIES_KILL_AT", kill_at}});
+                       auto s = w.state();
+                       auto* st = s ? std::get_if<Staged>(&s->activation) : nullptr;
+                       if (!st || st->build != w.b.entry.id()) fail(w.name, "B was not staged: " + read_file(w.install_root / "state" / "supervisor.json").value_or("") + "\nLOG:\n" + w.last_run_log());
+                       std::cout << "staged B before revocation: " << (st ? "yes" : "no") << "\n";
+                       publish(w.source, {&w.a}, 3, {.revoked = {w.b.entry.version}});
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && settled(*s) && std::holds_alternative<Steady>(s->activation);
+                   },
+                   [](const World& w, const std::string& label) {
+                       auto s = w.state();
+                       std::cout << "good after revocation: " << s->good.version.to_string()
+                                 << ", runs of revoked 2.0.0.0: " << markers(w.db(), "2.0.0.0") << "\n";
+                       if (s->good == w.b.entry.id()) fail(label, "the revoked build B became good");
+                       if (markers(w.db(), "2.0.0.0") > 0) fail(label, "the revoked build B was started");
+                   },
+                   false, false});
+
     // B (schema 3) is good; the user switches to a Beta that only has A (schema 1).
+    // ADV2: B is good on Stable. The app switches to Beta (only A, older), takes "switch now",
+    // then immediately picks Stable again. The user's last choice is Stable, keep B.
+    out.push_back({"adv-downgrade-then-stable", "downgrade-then-stable", 1, 1, true,
+                   [](World& w) {
+                       for (int i = 0; i < 6; ++i) {
+                           auto s = w.state();
+                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
+                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
+                       }
+                       auto s = w.state();
+                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       publish(w.source, {&w.a}, 1, {.channel = Channel::Beta});
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && settled(*s) && markers(w.db(), "2.0.0.0") >= 3;
+                   },
+                   [](const World& w, const std::string& label) {
+                       auto s = w.state();
+                       std::cout << "last choice sent: stable/wait; final state channel "
+                                 << channel_name(s->channel) << ", good " << s->good.version.to_string()
+                                 << ", runs of A after the switch: " << markers(w.db(), "1.0.0.0") << std::endl;
+                       if (s->channel != Channel::Stable) fail(label, "the channel is not the user's last choice");
+                       if (s->good != w.b.entry.id() || !std::holds_alternative<Steady>(s->activation))
+                           fail(label, "a downgrade the user withdrew was applied");
+                   },
+                   false, false});
+
     out.push_back({"downgrade-now", "wait-then-downgrade", 3, 3, true,
                    [](World& w) {
                        for (int i = 0; i < 6; ++i) {
@@ -1025,6 +1188,7 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--launcher" && i + 1 < argc) g_launcher = argv[++i];
         else if (a == "--fake-app" && i + 1 < argc) g_fake_app = argv[++i];
+        else if (a == "--manifest-tool" && i + 1 < argc) g_manifest_tool = argv[++i];
         else if (a == "--real-client" && i + 1 < argc) real_client = argv[++i];
         else if (a == "--only" && i + 1 < argc) only = argv[++i];
         else if (a == "--no-kill") kill_points = false;
@@ -1033,7 +1197,7 @@ int main(int argc, char** argv) {
     if (!parties::crypto_init()) return 2;
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 2;
-    if (g_launcher.empty() || g_fake_app.empty()) {
+    if (g_launcher.empty() || g_fake_app.empty() || g_manifest_tool.empty()) {
         std::cerr << "usage: update_e2e_test --launcher <exe> --fake-app <exe> [--only <name>] [--no-kill]\n";
         return 2;
     }
