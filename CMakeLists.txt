@@ -66,15 +66,14 @@ if(BUILD_IN_RETAIL)
     set(ENABLE_TRACY OFF CACHE BOOL "" FORCE)
 endif()
 option(ENABLE_SENTRY "Enable Sentry crash reporting" OFF)
+# Testing hooks for the boot stub and the update launcher. Never in retail.
+option(PARTIES_UPDATE_TESTING "Compile update testing hooks" OFF)
+if(BUILD_IN_RETAIL AND PARTIES_UPDATE_TESTING)
+    message(FATAL_ERROR "PARTIES_UPDATE_TESTING must be OFF in retail builds")
+endif()
 # Heap allocation tracker (leak hunting): replaces global new/delete with a
 # size-bucketed, stack-capturing tracking allocator. Windows client only.
 option(PARTIES_ALLOC_TRACKER "Enable heap allocation tracker" OFF)
-# Test hooks for the update launcher (kill points, fast timers, a harness
-# signing key). Never on in a retail build.
-option(PARTIES_UPDATE_TESTING "Build the update launcher's test hooks and e2e harness" OFF)
-if(PARTIES_UPDATE_TESTING AND BUILD_IN_RETAIL)
-    message(FATAL_ERROR "PARTIES_UPDATE_TESTING must not be enabled in a retail build")
-endif()
 set(APPLE_DEVELOPMENT_TEAM "" CACHE STRING "Apple Development Team ID used for signed Apple builds")
 set(SENTRY_DSN_CLIENT "" CACHE STRING "Sentry DSN for the client (per-platform)")
 set(SENTRY_DSN_SERVER "" CACHE STRING "Sentry DSN for the server")
@@ -119,6 +118,7 @@ add_subdirectory(common)
 add_subdirectory(updater/core)
 if(WIN32)
     add_subdirectory(updater/launcher)
+    add_subdirectory(updater/boot)
 endif()
 if(BUILD_CLIENT)
     add_subdirectory(encdec)
