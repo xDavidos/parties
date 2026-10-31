@@ -10,6 +10,8 @@
 
 #define NOMINMAX
 
+#include "../client/src/windows/shell_identity.h"
+
 #include <parties/update/data_compat.h>
 #include <parties/update/link.h>
 
@@ -206,6 +208,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     exec(db, "INSERT INTO markers (build, opened_at) VALUES ('" + build.version + "', " + std::to_string(opened_at) + ")");
     if (fault == "migrate-then-crash") die(kCrash);
 
+    // Stands in for the client's main window, so the setup harness can read
+    // its shell identity like the taskbar does.
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"PartiesFakeAppWindow";
+    RegisterClassW(&wc);
+    HWND window = CreateWindowExW(0, wc.lpszClassName, L"Parties (fake)", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100,
+                                  nullptr, nullptr, wc.hInstance, nullptr);
+    apply_shell_identity(window);
+
     peer.send(link::Healthy{build.schema});
     if (fault == "crash-after-health") {
         Sleep(100);
@@ -231,6 +244,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return elapsed < std::chrono::milliseconds(run_ms > 0 ? run_ms : 1000);
     };
     while (running()) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
         auto m = peer.poll();
         if (!m) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -255,6 +270,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             peer.send(link::Request{link::RestartToUpdate{}});
         }
     }
+    clear_shell_identity(window);
+    DestroyWindow(window);
     sqlite3_close(db);
     return 0;
 }
