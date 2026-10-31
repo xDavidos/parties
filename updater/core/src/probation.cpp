@@ -78,12 +78,14 @@ void begin_restore(Tx& tx, const Snapshot& from, SnapshotId preserve_live_as) {
     tx.commit();
 }
 
+// Returns the build to delete. A retried previous_good keeps its record.
 std::optional<BuildId> unstage(Tx& tx) {
     auto* staged = std::get_if<Staged>(&tx.s.activation);
     if (!staged) return std::nullopt;
     BuildId id = staged->build;
-    std::erase_if(tx.s.builds, [&](const BuildRecord& r) { return r.id == id; });
     tx.s.activation = Steady{};
+    if (tx.s.previous_good == id) return std::nullopt;
+    std::erase_if(tx.s.builds, [&](const BuildRecord& r) { return r.id == id; });
     return id;
 }
 
@@ -152,9 +154,9 @@ void start_staged(Tx& tx, Staged staged, const std::optional<DataInfo>& data) {
     const BuildId c = staged.build;
     std::optional<DataInfo> candidate_data = staged.restore_first ? std::optional(staged.restore_first->data) : data;
     if (compat_of(tx.s, c, candidate_data) == Compatibility::Incompatible) {
-        unstage(tx);
+        std::optional<BuildId> dropped = unstage(tx);
         tx.commit();
-        tx.emit(DeleteBuild{c});
+        if (dropped) tx.emit(DeleteBuild{*dropped});
         return start_good(tx, data);
     }
     SnapshotId pre_id = snapshot_name("pre", c, tx.next_generation());
@@ -314,7 +316,7 @@ void handle(Tx& tx, const UserRollback& e) {
     }
     if (!tx.s.previous_good || e.target != *tx.s.previous_good) return;
     const BuildRecord* target = tx.s.find(e.target);
-    if (!target || target->quarantined()) return;
+    if (!target || !std::holds_alternative<Proven>(target->verdict)) return;
     std::optional<DataInfo> data = e.restore ? std::optional(e.restore->data) : tx.ctx.live_db;
     if (compat_of(tx.s, e.target, data) == Compatibility::Incompatible)
         return show(tx, RecoveryReason::DataIncompatible);
@@ -370,9 +372,11 @@ void handle(Tx& tx, const BuildCorrupt& e) {
         return rollback(tx, FailureReason::Corrupt, spawn_failed);
     }
     if (auto* staged = std::get_if<Staged>(&tx.s.activation); staged && staged->build == e.build) {
-        unstage(tx);
+        std::optional<BuildId> dropped = unstage(tx);
         tx.commit();
-        return tx.emit(DeleteBuild{e.build});
+        if (dropped) tx.emit(DeleteBuild{*dropped});
+        if (tx.s.previous_good == e.build) tx.emit(Redownload{e.build});
+        return;
     }
     if (e.build == tx.s.good) {
         tx.emit(Redownload{e.build});
@@ -389,9 +393,10 @@ void handle(Tx& tx, const BuildCorrupt& e) {
 void handle(Tx& tx, const ManifestSeen& e) {
     auto revoked = [&](const BuildId& id) { return std::ranges::find(e.revoked, id.version) != e.revoked.end(); };
     if (auto* staged = std::get_if<Staged>(&tx.s.activation); staged && revoked(staged->build)) {
-        BuildId id = *unstage(tx);
+        std::optional<BuildId> dropped = unstage(tx);
         tx.commit();
-        return tx.emit(DeleteBuild{id});
+        if (dropped) tx.emit(DeleteBuild{*dropped});
+        return;
     }
     if (Probation* p = probation(tx.s); p && idle(tx.s) && revoked(p->candidate))
         rollback(tx, FailureReason::Revoked, false);

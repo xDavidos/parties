@@ -2,6 +2,7 @@
 // then a seeded random walk that checks invariants over every reachable state.
 
 #include <parties/update/probation.h>
+#include <parties/update/state_codec.h>
 
 #include <algorithm>
 #include <functional>
@@ -364,11 +365,442 @@ bool test_table() {
     return ok;
 }
 
+// --- Random walk ---------------------------------------------------------------
+//
+// The world is what the shell would observe: the database (schema info plus a
+// content id, so two copies with equal schema are still told apart), the
+// backups directory, the app process, and the committed state on disk.
+
+struct Data {
+    DataInfo info;
+    uint64_t content = 0;
+};
+
+struct World {
+    SupervisorState disk;
+    std::optional<Data> live;
+    std::map<std::string, Data> snapshots;
+    std::optional<BuildId> app;
+    bool app_opened_db = false;
+    bool app_refused_db = false;
+    bool app_healthy = false;
+    bool app_killed = false;
+    std::optional<BuildId> lease_failed;
+    uint64_t next_content = 1;
+};
+
+struct Stats {
+    uint64_t sequences = 0;
+    uint64_t events = 0;
+    uint64_t kills = 0;
+    uint64_t checks = 0;
+    uint64_t truncations = 0;
+    uint64_t probation_exits = 0;
+    uint64_t rollbacks_with_restore = 0;
+    std::unordered_set<std::string> states;
+};
+
+struct Walk {
+    std::mt19937_64 rng;
+    Stats stats;
+    std::vector<std::string> trace;
+    std::string violation;
+
+    bool check(bool cond, const std::string& what) {
+        ++stats.checks;
+        if (!cond && violation.empty()) violation = what;
+        return cond;
+    }
+
+    size_t pick(size_t n) { return std::uniform_int_distribution<size_t>(0, n - 1)(rng); }
+    bool chance(double p) { return std::bernoulli_distribution(p)(rng); }
+};
+
+const BuildRecord* universe[] = {&A, &B, &C, &D, &E};
+
+SupervisorState normalized(SupervisorState s) {
+    s.generation = 0;
+    return s;
+}
+
+const Commit* last_commit(const std::vector<Effect>& effects, size_t end) {
+    const Commit* last = nullptr;
+    for (size_t i = 0; i < end; ++i)
+        if (auto* c = std::get_if<Commit>(&effects[i])) last = c;
+    return last;
+}
+
+bool has_spawn_or_recovery(const std::vector<Effect>& effects, const BuildId& build) {
+    return std::ranges::any_of(effects, [&](const Effect& e) {
+        auto* s = std::get_if<Spawn>(&e);
+        return (s && s->build == build) || std::holds_alternative<ShowRecovery>(e);
+    });
+}
+
+std::string event_name(const Event& e) {
+    return std::visit(
+        [](const auto& x) -> std::string {
+            using T = std::decay_t<decltype(x)>;
+            if constexpr (std::is_same_v<T, StartRequested>) return "StartRequested";
+            else if constexpr (std::is_same_v<T, Resumed>) return "Resumed";
+            else if constexpr (std::is_same_v<T, AppHealthy>) return "AppHealthy";
+            else if constexpr (std::is_same_v<T, AppExited>) return "AppExited" + std::to_string(int(x.kind));
+            else if constexpr (std::is_same_v<T, HealthDeadlinePassed>) return "HealthDeadlinePassed";
+            else if constexpr (std::is_same_v<T, ConfirmTimerElapsed>) return "ConfirmTimer" + std::to_string(x.healthy_uptime_s);
+            else if constexpr (std::is_same_v<T, BuildSealed>) return "BuildSealed " + x.record.id.version.to_string() + (x.restore_first ? " restore " + x.restore_first->id.stem : "");
+            else if constexpr (std::is_same_v<T, UserRollback>) return "UserRollback " + x.target.version.to_string() + (x.restore ? " restore " + x.restore->id.stem : "");
+            else if constexpr (std::is_same_v<T, UserRetry>) return "UserRetry " + x.target.version.to_string();
+            else if constexpr (std::is_same_v<T, UserRestore>) return "UserRestore " + x.from.id.stem;
+            else if constexpr (std::is_same_v<T, BuildCorrupt>) return "BuildCorrupt " + x.build.version.to_string();
+            else if constexpr (std::is_same_v<T, ManifestSeen>) return "ManifestSeen";
+            else if constexpr (std::is_same_v<T, ChannelIntentSet>) return "ChannelIntentSet";
+            else return "NoticeAcknowledged";
+        },
+        e);
+}
+
+// User actions and store reports the shell would deliver again after a crash.
+bool retriable(const Event& e) {
+    return !std::holds_alternative<Resumed>(e) && !std::holds_alternative<AppHealthy>(e) &&
+           !std::holds_alternative<AppExited>(e) && !std::holds_alternative<HealthDeadlinePassed>(e) &&
+           !std::holds_alternative<ConfirmTimerElapsed>(e);
+}
+
+// --- State invariants ---
+
+void check_state(Walk& w, const SupervisorState& s) {
+    const BuildRecord* good = s.find(s.good);
+    w.check(good && std::holds_alternative<Proven>(good->verdict), "good is a proven record");
+    for (size_t i = 0; i < s.builds.size(); ++i)
+        for (size_t j = i + 1; j < s.builds.size(); ++j)
+            w.check(!(s.builds[i].id == s.builds[j].id), "build records are unique");
+    if (s.previous_good) w.check(*s.previous_good != s.good && s.find(*s.previous_good), "previous_good is a distinct record");
+    if (auto* st = std::get_if<Staged>(&s.activation)) {
+        const BuildRecord* r = s.find(st->build);
+        w.check(r && st->build != s.good && !r->quarantined(), "staged is a distinct, eligible record");
+    }
+    if (auto* p = std::get_if<Probation>(&s.activation)) {
+        w.check(p->candidate != s.good, "good is never the candidate");
+        w.check(p->fallback == s.good, "fallback is good during probation");
+        const BuildRecord* r = s.find(p->candidate);
+        w.check(r && !r->quarantined(), "the candidate is an eligible record");
+    }
+    if (auto* r = std::get_if<Running>(&s.operation)) w.check(s.find(r->build) != nullptr, "running build has a record");
+}
+
+// --- Step invariants ---
+
+void check_step(Walk& w, const SupervisorState& before, const Event& event, const Context& ctx, const Step& out) {
+    const auto& fx = out.effects;
+    const Commit* last = last_commit(fx, fx.size());
+    w.check(last ? last->state == out.next : out.next == before, "next is the last committed state");
+    uint64_t gen = before.generation;
+    const SupervisorState* committed = &before;
+    for (const Effect& e : fx) {
+        if (auto* c = std::get_if<Commit>(&e)) {
+            w.check(c->state.generation == ++gen, "each commit advances the generation by one");
+            check_state(w, c->state);
+            committed = &c->state;
+        } else if (auto* sp = std::get_if<Spawn>(&e)) {
+            auto* r = std::get_if<Running>(&committed->operation);
+            w.check(r && r->build == sp->build && !r->healthy, "every spawn is committed as Running first");
+        } else if (auto* rs = std::get_if<RestoreSnapshot>(&e)) {
+            w.check(!rs->preserve_live_as.stem.empty() && rs->preserve_live_as != rs->from,
+                    "every restore preserves the live data under its own name");
+            auto* r = std::get_if<Restoring>(&committed->operation);
+            w.check(r && r->from.id == rs->from && r->preserve_live_as == rs->preserve_live_as,
+                    "every restore is committed as Restoring first");
+        } else if (auto* d = std::get_if<DeleteBuild>(&e)) {
+            const SupervisorState& s = *committed;
+            bool protected_build = d->build == s.good || (s.previous_good && d->build == *s.previous_good);
+            if (auto* st = std::get_if<Staged>(&s.activation)) protected_build |= st->build == d->build;
+            if (auto* p = std::get_if<Probation>(&s.activation)) protected_build |= p->candidate == d->build;
+            if (auto* r = std::get_if<Running>(&s.operation)) protected_build |= r->build == d->build;
+            w.check(!protected_build && !s.find(d->build), "never delete a build the state still uses");
+        }
+    }
+
+    // Leaving probation either confirms or returns to the fallback, and the
+    // next start runs the fallback or explains why it cannot.
+    if (auto* p = std::get_if<Probation>(&before.activation); p && !std::get_if<Probation>(&out.next.activation)) {
+        ++w.stats.probation_exits;
+        if (std::ranges::any_of(fx, [](const Effect& e) { return std::holds_alternative<RestoreSnapshot>(e); }))
+            ++w.stats.rollbacks_with_restore;
+        bool confirmed = out.next.good == p->candidate;
+        if (confirmed) {
+            w.check(out.next.previous_good == p->fallback, "confirm keeps the old good as previous_good");
+        } else {
+            const BuildRecord* c = out.next.find(p->candidate);
+            w.check(out.next.good == p->fallback && c && c->quarantined(), "rollback quarantines the candidate");
+            auto* run = std::get_if<Running>(&before.operation);
+            auto* exit = std::get_if<AppExited>(&event);
+            bool startup_failure = exit && run && !run->healthy && exit->kind != ExitKind::Clean &&
+                                   exit->kind != ExitKind::DataUnavailable;
+            if (startup_failure || std::holds_alternative<UserRollback>(event))
+                w.check(has_spawn_or_recovery(fx, p->fallback), "a startup failure starts the fallback at once");
+            Step resumed = step(out.next, Resumed{}, ctx);
+            Step start = step(resumed.next, StartRequested{}, ctx);
+            if (!std::holds_alternative<Running>(resumed.next.operation))
+                w.check(has_spawn_or_recovery(start.effects, p->fallback), "after a rollback the next start runs the fallback");
+        }
+    }
+
+    // Resumed is idempotent.
+    Step r1 = step(out.next, Resumed{}, ctx);
+    Step r2 = step(r1.next, Resumed{}, ctx);
+    w.check(r2.effects.empty(), "a second Resumed does nothing");
+
+    // Killed at any effect: Resumed converges to the uninterrupted outcome, or
+    // to the state before the event, or (for an event the shell redelivers)
+    // reaches the uninterrupted outcome once the event arrives again.
+    if (!fx.empty()) {
+        SupervisorState done = normalized(r1.next);
+        SupervisorState lost = normalized(step(before, Resumed{}, ctx).next);
+        const Commit* previous = nullptr;
+        for (size_t i = 0; i < fx.size(); ++i) {
+            ++w.stats.truncations;
+            const Commit* c = last_commit(fx, i);
+            // Truncations that share the same last commit leave the same disk.
+            if (i > 0 && c == previous) continue;
+            previous = c;
+            const SupervisorState& on_disk = c ? c->state : before;
+            Step recovered = step(on_disk, Resumed{}, ctx);
+            SupervisorState got = normalized(recovered.next);
+            bool converged = got == done || got == lost;
+            if (!converged && retriable(event)) {
+                SupervisorState again = normalized(step(step(recovered.next, event, ctx).next, Resumed{}, ctx).next);
+                converged = again == done;
+            }
+            w.check(converged, "kill at effect " + std::to_string(i) + " of " + describe(fx) + " did not converge");
+            // A restore that was committed but cut off is finished by Resumed.
+            if (c && std::holds_alternative<Restoring>(c->state.operation))
+                w.check(!recovered.effects.empty() && std::holds_alternative<RestoreSnapshot>(recovered.effects[0]),
+                        "Resumed finishes a committed restore first");
+        }
+    }
+}
+
+// --- Executing effects against the world ---
+
+void open_db(World& world, const BuildRecord& build) {
+    world.app_opened_db = true;
+    Compatibility c = world.live ? compatibility(build.data_schema, world.live->info) : Compatibility::MigratesForward;
+    if (c == Compatibility::Incompatible) {
+        world.app_refused_db = true;
+        return;
+    }
+    DataInfo info = world.live ? world.live->info : DataInfo{build.data_schema, build.data_compat_floor};
+    if (c == Compatibility::MigratesForward && world.live)
+        info = {build.data_schema, std::max(info.compat_floor, build.data_compat_floor)};
+    world.live = Data{info, world.next_content++};
+}
+
+void apply(Walk& w, World& world, const Effect& e) {
+    if (auto* t = std::get_if<TakeSnapshot>(&e)) {
+        if (!w.check(world.live.has_value(), "snapshot only when there is data")) return;
+        auto it = world.snapshots.find(t->id.stem);
+        w.check(it == world.snapshots.end() || it->second.content == world.live->content,
+                "a snapshot name is never reused for different data");
+        world.snapshots[t->id.stem] = *world.live;
+    } else if (auto* c = std::get_if<Commit>(&e)) {
+        w.check(c->state.generation == world.disk.generation + 1, "commits reach disk in order");
+        world.disk = c->state;
+    } else if (auto* sp = std::get_if<Spawn>(&e)) {
+        w.check(!world.app, "never two app processes");
+        const BuildRecord* r = world.disk.find(sp->build);
+        if (!w.check(r != nullptr, "spawned build has a record")) return;
+        if (world.live) {
+            Compatibility c = compatibility(r->data_schema, world.live->info);
+            w.check(c != Compatibility::Incompatible, "never spawn a build onto data it cannot open");
+            if (c == Compatibility::MigratesForward) {
+                bool saved = std::ranges::any_of(world.snapshots, [&](const auto& kv) {
+                    return kv.second.content == world.live->content;
+                });
+                w.check(saved, "a copy of the data exists before a build migrates it");
+            }
+        }
+        if (w.chance(0.03)) {
+            world.lease_failed = sp->build;
+            return;
+        }
+        world.app = sp->build;
+        world.app_opened_db = world.app_refused_db = world.app_healthy = world.app_killed = false;
+        if (w.chance(0.7)) open_db(world, *r);
+    } else if (std::holds_alternative<TerminateApp>(e)) {
+        w.check(world.app.has_value(), "terminate only a running app");
+        world.app_killed = true;
+    } else if (auto* rs = std::get_if<RestoreSnapshot>(&e)) {
+        w.check(!world.app, "restore only while the app is not running");
+        auto from = world.snapshots.find(rs->from.stem);
+        if (!w.check(from != world.snapshots.end(), "restore from a snapshot that exists")) return;
+        bool replay = world.live && world.live->content == from->second.content &&
+                      world.snapshots.contains(rs->preserve_live_as.stem);
+        if (replay) return;
+        w.check(!world.snapshots.contains(rs->preserve_live_as.stem), "a restore never overwrites a preserved copy");
+        if (world.live) world.snapshots[rs->preserve_live_as.stem] = *world.live;
+        world.live = from->second;
+    }
+}
+
+// --- Generating plausible events ---
+
+std::optional<Snapshot> random_snapshot(Walk& w, const World& world) {
+    if (world.snapshots.empty() || w.chance(0.3)) return std::nullopt;
+    auto it = world.snapshots.begin();
+    std::advance(it, w.pick(world.snapshots.size()));
+    return Snapshot{{it->first}, it->second.info};
+}
+
+BuildId random_known_id(Walk& w, const SupervisorState& s) {
+    if (w.chance(0.15)) return universe[w.pick(5)]->id;
+    return s.builds[w.pick(s.builds.size())].id;
+}
+
+Event app_event(Walk& w, const World& world) {
+    if (world.app_killed) return AppExited{ExitKind::KilledHung};
+    if (world.app_refused_db) return AppExited{ExitKind::DataTooNew};
+    switch (w.pick(10)) {
+    case 0:
+    case 1:
+    case 2: return AppHealthy{};
+    case 3: return HealthDeadlinePassed{};
+    case 4: return ConfirmTimerElapsed{uint32_t(std::array{30, 60, 600, 700}[w.pick(4)])};
+    default: {
+        constexpr ExitKind kinds[] = {ExitKind::Clean, ExitKind::Clean, ExitKind::InitFailed, ExitKind::DataUnavailable,
+                                      ExitKind::Abnormal, ExitKind::Abnormal, ExitKind::Terminated};
+        return AppExited{kinds[w.pick(std::size(kinds))]};
+    }
+    }
+}
+
+Event other_event(Walk& w, const World& world, const SupervisorState& s) {
+    switch (w.pick(16)) {
+    case 0:
+    case 1:
+    case 2:
+    case 3:
+    case 4: return StartRequested{};
+    case 5:
+    case 6: return BuildSealed{*universe[1 + w.pick(4)], w.chance(0.2) ? random_snapshot(w, world) : std::nullopt};
+    case 7: {
+        BuildId target = s.previous_good && w.chance(0.7) ? *s.previous_good : random_known_id(w, s);
+        if (auto* p = std::get_if<Probation>(&s.activation); p && w.chance(0.5)) target = p->fallback;
+        return UserRollback{target, w.chance(0.4) ? random_snapshot(w, world) : std::nullopt};
+    }
+    case 8: return UserRetry{random_known_id(w, s)};
+    case 9: {
+        auto snap_choice = random_snapshot(w, world);
+        if (snap_choice) return UserRestore{*snap_choice};
+        return StartRequested{};
+    }
+    case 10: {
+        BuildId id = random_known_id(w, s);
+        if (world.app && *world.app == id) return StartRequested{};
+        return BuildCorrupt{id};
+    }
+    case 11: {
+        ManifestSeen m;
+        for (const BuildRecord* r : universe)
+            if (w.chance(0.2)) m.revoked.push_back(r->id.version);
+        return m;
+    }
+    case 12: {
+        Channel c = w.chance(0.5) ? Channel::Stable : Channel::Beta;
+        if (w.chance(0.5)) return ChannelIntentSet{c, Follow{}};
+        return ChannelIntentSet{c, PinnedUntilAtLeast{universe[w.pick(5)]->id.version}};
+    }
+    case 13: return NoticeAcknowledged{};
+    case 14: return Resumed{};
+    default: return w.chance(0.5) ? Event{AppHealthy{}} : Event{AppExited{ExitKind::Abnormal}};
+    }
+}
+
+Event next_event(Walk& w, const World& world, const SupervisorState& s) {
+    if (world.lease_failed) return BuildCorrupt{*world.lease_failed};
+    if (world.app && w.chance(0.75)) return app_event(w, world);
+    return other_event(w, world, s);
+}
+
+// Feeds one event, checks it, and executes its effects, possibly killing the
+// launcher partway through.
+void feed(Walk& w, World& world, SupervisorState& state, const Event& event, bool allow_kill) {
+    ++w.stats.events;
+    w.trace.push_back(event_name(event));
+    w.stats.states.insert(write_state(normalized(state)));
+
+    // Resumed means the launcher restarted. The shell runs the app in a
+    // kill-on-close job, so an app never outlives the launcher that spawned it.
+    if (std::holds_alternative<Resumed>(event)) world.app.reset();
+    if (std::holds_alternative<BuildCorrupt>(event)) world.lease_failed.reset();
+    if (std::holds_alternative<AppExited>(event) && world.app) {
+        if (!world.app_opened_db && w.chance(0.5)) {
+            if (const BuildRecord* r = world.disk.find(*world.app)) open_db(world, *r);
+        }
+        world.app.reset();
+    }
+    if (std::holds_alternative<AppHealthy>(event) && world.app) {
+        if (!world.app_opened_db)
+            if (const BuildRecord* r = world.disk.find(*world.app)) open_db(world, *r);
+        world.app_healthy = true;
+    }
+
+    Context context = ctx(world.live ? std::optional(world.live->info) : std::nullopt);
+    Step out = step(state, event, context);
+    check_step(w, state, event, context, out);
+
+    size_t limit = out.effects.size();
+    bool kill = allow_kill && limit > 0 && w.chance(0.08);
+    if (kill) limit = w.pick(out.effects.size());
+    for (size_t i = 0; i < limit && w.violation.empty(); ++i) apply(w, world, out.effects[i]);
+    if (!kill) {
+        state = out.next;
+        w.check(normalized(state) == normalized(world.disk) || !last_commit(out.effects, out.effects.size()),
+                "disk holds the state the step returned");
+        return;
+    }
+    ++w.stats.kills;
+    w.trace.push_back("<kill at " + std::to_string(limit) + ">");
+    world.app.reset();
+    state = world.disk;
+    feed(w, world, state, Resumed{}, false);
+}
+
+bool test_random_walk() {
+    constexpr uint64_t kSequences = 100000;
+    Walk w{std::mt19937_64(0x5eed'2026'1031ULL)};
+    for (uint64_t seq = 0; seq < kSequences && w.violation.empty(); ++seq) {
+        ++w.stats.sequences;
+        w.trace.clear();
+        World world;
+        SupervisorState state = initial_state(A, Channel::Stable);
+        world.disk = state;
+        if (w.chance(0.9)) world.live = Data{kV1, world.next_content++};
+        size_t length = 1 + w.pick(30);
+        for (size_t i = 0; i < length && w.violation.empty(); ++i) {
+            Event e = next_event(w, world, state);
+            feed(w, world, state, e, true);
+            check_state(w, state);
+        }
+    }
+    std::cout << "update_probation_test: random walk sequences=" << w.stats.sequences << " events=" << w.stats.events
+              << " kills=" << w.stats.kills << " distinct_states=" << w.stats.states.size()
+              << " probation_exits=" << w.stats.probation_exits
+              << " rollbacks_with_restore=" << w.stats.rollbacks_with_restore
+              << " kill_truncations=" << w.stats.truncations << " invariant_checks=" << w.stats.checks << "\n";
+    if (!w.violation.empty()) {
+        std::string t;
+        for (const auto& e : w.trace) t += "\n  " + e;
+        return fail("random walk violated: " + w.violation + "\ntrace:" + t);
+    }
+    return true;
+}
+
 } // namespace
 
 int main() {
     bool ok = true;
     ok &= test_table();
+    ok &= test_random_walk();
     if (ok) std::cout << "update_probation_test: all passed\n";
     return ok ? 0 : 1;
 }

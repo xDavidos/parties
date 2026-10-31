@@ -62,7 +62,8 @@ struct UserRestore {
     Snapshot from;
     friend bool operator==(const UserRestore&, const UserRestore&) = default;
 };
-// The exec lease found a missing or modified file.
+// A missing or modified file: from the exec lease of a Spawn that therefore
+// started nothing, or from a scan of a build that is not running.
 struct BuildCorrupt {
     BuildId build;
     friend bool operator==(const BuildCorrupt&, const BuildCorrupt&) = default;

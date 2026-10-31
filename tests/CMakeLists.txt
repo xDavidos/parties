@@ -357,3 +357,5 @@ endforeach()
 add_executable(update_boot_test update_boot_test.cpp)
 target_link_libraries(update_boot_test PRIVATE parties_update_boot)
 add_test(NAME update_boot COMMAND update_boot_test)
+# 100000 seeded random-walk sequences; about two minutes in a Debug build.
+set_tests_properties(update_probation PROPERTIES TIMEOUT 900)
