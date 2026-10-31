@@ -59,6 +59,32 @@ inline bool proto_gate_draining_report() {
     return proto_gate_variant() >= 7;
 }
 
+inline uint32_t proto_env_ms(const char* name, uint32_t fallback) {
+    std::string s;
+#ifdef _WIN32
+    char* value = nullptr;
+    size_t size = 0;
+    if (_dupenv_s(&value, &size, name) == 0 && value) {
+        s = value;
+        std::free(value);
+    }
+#else
+    if (const char* e = std::getenv(name)) s = e;
+#endif
+    if (s.empty()) return fallback;
+    try { return static_cast<uint32_t>(std::stoul(s)); } catch (...) { return fallback; }
+}
+
+inline uint32_t proto_viewer_budget_ms(uint32_t fallback) {
+    static const uint32_t v = proto_env_ms("PARTIES_PROTO_VIEWER_BUDGET_MS", fallback);
+    return v;
+}
+
+inline uint32_t proto_viewer_congest_ms(uint32_t fallback) {
+    static const uint32_t v = proto_env_ms("PARTIES_PROTO_VIEWER_CONGEST_MS", fallback);
+    return v;
+}
+
 constexpr int64_t VIDEO_BACKLOG_MIN_THRESHOLD_BYTES = 64 * 1024;
 constexpr int64_t VIDEO_BACKLOG_MAX_THRESHOLD_BYTES = 2 * 1024 * 1024;
 constexpr double  VIDEO_BACKLOG_QUEUE_SECONDS       = 0.25;

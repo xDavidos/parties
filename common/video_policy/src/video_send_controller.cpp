@@ -27,7 +27,7 @@ bool proto_viewer_refuses(const video_send_detail::SharedCounters& c) {
     int64_t queue_ms = c.report_queue_ms.load();
     if (proto_gate_draining_report())
         queue_ms -= (proto_steady_us() - c.report_at_us.load(std::memory_order_acquire)) / 1000;
-    return queue_ms > static_cast<int64_t>(c.queue_budget_ms.load());
+    return queue_ms > static_cast<int64_t>(proto_viewer_budget_ms(c.queue_budget_ms.load()));
 }
 
 uint32_t scale_bitrate(uint32_t bps, double factor) {
@@ -210,7 +210,7 @@ void VideoSendController::tick(int64_t now_us) {
             last_loss_ratio_ > cfg_.loss_threshold ||
             admission_drops > 0 ||
             send_failures > 0 ||
-            (proto_gate_reports() && viewer_peak_queue_ms >= cfg_.congestion_queue_ms);
+            (proto_gate_reports() && viewer_peak_queue_ms >= proto_viewer_congest_ms(cfg_.congestion_queue_ms));
 
         const uint32_t current = counters_.bitrate_bps.load();
 
