@@ -67,7 +67,7 @@ jobs:
       - name: Run update core tests
         run: ctest --test-dir ${{ matrix.preset == 'release' && 'build-release' || 'build' }} -R "^update_" -E "^update_e2e" --output-on-failure --no-tests=error
 
-      # About five minutes: every scenario replayed with a kill at each effect.
+      # About six and a half minutes: most scenarios replayed with a kill at each effect.
       # update_e2e_smoke is left out because the real client needs a GPU.
       - name: Run update launcher e2e
         if: matrix.preset == 'default'
