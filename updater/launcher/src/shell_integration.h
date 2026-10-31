@@ -24,6 +24,10 @@ struct Shortcut {
 // "Parties" and "Parties Recovery", both starting the stub.
 std::vector<Shortcut> shortcuts(const InstallPaths& install);
 
+// What each Parties.lnk in the Start menu and on the Desktop starts, read
+// before setup rewrites the Start menu one. Needs COM on the calling thread.
+std::vector<fs::path> parties_shortcut_targets();
+
 // Creates each shortcut or rewrites one that differs; one already right is
 // left byte for byte. Needs COM initialized on the calling thread.
 bool write_shortcuts(const InstallPaths& install, std::string& error);
