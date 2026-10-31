@@ -551,20 +551,14 @@ void AppCore::load_saved_prefs()
 
 void AppCore::load_or_generate_identity(const std::string& username_hint)
 {
+    // An empty seed phrase is a raw-key import and as valid as any other identity.
     auto identity = settings_.load_identity();
-    if (identity && !identity->seed_phrase.empty()) {
+    if (identity) {
         seed_phrase_ = identity->seed_phrase;
         secret_key_  = identity->secret_key;
         public_key_  = identity->public_key;
         has_identity_ = true;
     } else {
-        // No saved identity (or legacy identity without seed phrase) —
-        // show onboarding modal so the user can generate/restore.
-        if (identity) {
-            // Legacy identity with no seed phrase — discard it so the user
-            // gets a fresh identity with a proper seed phrase backup.
-            settings_.delete_identity();
-        }
         has_identity_ = false;
         server_model_.show_onboarding = true;
     }
@@ -2874,7 +2868,7 @@ void AppCore::setup_model_callbacks()
 
     // Identity backup/import
     model_.on_show_seed_phrase = [this]() {
-        if (!has_identity_) return;
+        if (!has_identity_ || seed_phrase_.empty()) return;
         if (model_.show_seed_phrase) {
             model_.show_seed_phrase = false;
             model_.identity_seed_phrase = "";
