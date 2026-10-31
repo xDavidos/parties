@@ -471,8 +471,7 @@ int run_install(const SetupOptions& o, const std::expected<Payload, std::string>
     return kDone;
 }
 
-int run_uninstall(SetupOptions o) {
-    if (auto handed_over = hand_over_to_temporary_copy(o)) return *handed_over;
+int confirm_and_uninstall(SetupOptions o) {
     if (!o.silent) {
         const std::vector<TASKDIALOG_BUTTON> buttons{{kProceed, L"Uninstall"}};
         const std::wstring content = L"Parties closes if it is running. Your identity, servers and settings stay in " +
@@ -486,8 +485,14 @@ int run_uninstall(SetupOptions o) {
     if (!o.silent)
         show(outcome.code == kDone ? L"Parties is uninstalled" : L"Parties could not be uninstalled",
              widen(outcome.message), outcome.code == kDone ? TD_INFORMATION_ICON : TD_ERROR_ICON);
-    if (outcome.code == kDone) remove_temporary_copy();
     return outcome.code;
+}
+
+int run_uninstall(const SetupOptions& o) {
+    if (auto handed_over = hand_over_to_temporary_copy(o)) return *handed_over;
+    int code = confirm_and_uninstall(o);
+    remove_temporary_copy();
+    return code;
 }
 
 int run_pack(const SetupOptions& o) {

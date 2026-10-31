@@ -17,8 +17,9 @@ namespace parties::update::launcher {
 struct Adopt {
     friend bool operator==(const Adopt&, const Adopt&) = default;
 };
-// The bundled build is newer than good and unknown: it is staged the way a
-// download would be, so it runs under probation and good stays good.
+// The bundled build is unknown and newer than both good and any staged
+// build: it is staged the way a download would be, so it runs under
+// probation and good stays good.
 struct Stage {
     Step step;  // BuildSealed's transition
 };

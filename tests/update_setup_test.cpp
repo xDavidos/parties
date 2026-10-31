@@ -573,6 +573,19 @@ void newer_is_staged() {
     check(w.reg_string(L"UninstallString") == expected_uninstall(w, b), "the launcher moved UninstallString too");
 }
 
+void newer_staged_build_wins() {
+    World w("staged");
+    Build a = w.build("1.0.0.0");
+    Build b = w.build("2.0.0.0");
+    Build c = w.build("3.0.0.0");
+    install_and_run(w, a);
+    check(w.setup(w.setup_for(c), {L"--no-launch"}) == 0u, "setup 3.0.0.0 exited 0");
+    const auto state_before = read_file(w.install / "state" / "supervisor.json");
+    check(w.setup(w.setup_for(b), {L"--no-launch"}) == 0u, "setup 2.0.0.0 exited 0");
+    check(read_file(w.install / "state" / "supervisor.json") == state_before, "the staged 3.0.0.0 stays staged");
+    check(!fs::exists(w.install / "builds" / b.id().dir_name()), "2.0.0.0 was not written");
+}
+
 void older_keeps_good() {
     World w("older");
     Build a = w.build("1.0.0.0");
@@ -757,6 +770,7 @@ int main(int argc, char** argv) {
         {"a fresh-install", fresh_install},
         {"b rerun-is-noop", rerun_is_noop},
         {"c newer-is-staged", newer_is_staged},
+        {"c newer-staged-build-wins", newer_staged_build_wins},
         {"d older-keeps-good", older_keeps_good},
         {"e tampered-payload", tampered_payload_aborts},
         {"f uninstall-keeps-data", uninstall_keeps_data},
