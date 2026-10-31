@@ -3,6 +3,7 @@
 #include <parties/video_common.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -23,7 +24,14 @@ struct VideoSendControllerConfig {
     uint32_t default_rtt_us       = 50'000;
     uint32_t min_reconfigure_ms   = 500;
     double   min_reconfigure_ratio = 0.10;
+    // Measured in the gate bakeoff: 30/20 throttled a clean link to under half
+    // its capacity, because QUIC ACK delay puts a ~25 ms floor under the signal.
+    uint32_t viewer_queue_budget_ms     = 60;
+    uint32_t viewer_congestion_queue_ms = 40;
+    uint32_t viewer_report_horizon_ms   = 500;
 };
+
+int64_t steady_clock_us();
 
 struct QuicPathCounters {
     uint32_t rtt_us = 0;
@@ -37,6 +45,9 @@ namespace video_send_detail {
 uint32_t queue_delay_ms(int64_t outstanding_bytes, uint32_t bitrate_bps, uint32_t rtt_us);
 
 struct SharedCounters {
+    explicit SharedCounters(int64_t (*clock)()) : clock_us(clock) {}
+
+    int64_t (*const clock_us)();
     std::atomic<int64_t>  outstanding{0};
     std::atomic<int64_t>  allowance_bytes{0};
     std::atomic<uint32_t> bitrate_bps{0};
@@ -46,6 +57,11 @@ struct SharedCounters {
     std::atomic<uint32_t> send_failures{0};
     std::atomic<uint32_t> send_failures_window{0};
     std::atomic<bool>     keyframe_request{false};
+    std::atomic<uint32_t> viewer_queue_budget_ms{0};
+    std::atomic<uint32_t> viewer_report_horizon_ms{0};
+    std::atomic<int64_t>  viewer_refusal_until_us{INT64_MIN};
+    std::atomic<int64_t>  viewer_queue_peak_ms{0};
+    std::atomic<uint32_t> viewer_admission_drops{0};
 };
 
 }
@@ -55,6 +71,7 @@ public:
     void on_bytes_queued(size_t bytes);
     void on_bytes_retired(size_t bytes);
     void on_send_failed();
+    void on_viewer_queue(std::chrono::milliseconds worst_viewer_queue);
     [[nodiscard]] bool admit_frame();
     uint32_t bitrate_bps() const;
 
@@ -77,7 +94,8 @@ private:
 
 class VideoSendController {
 public:
-    explicit VideoSendController(const VideoSendControllerConfig& cfg = {});
+    explicit VideoSendController(const VideoSendControllerConfig& cfg = {},
+                                 int64_t (*clock_us)() = steady_clock_us);
     VideoSendController(const VideoSendController&) = delete;
     VideoSendController& operator=(const VideoSendController&) = delete;
 
@@ -98,6 +116,7 @@ public:
         uint32_t queue_delay_ms     = 0;
         double   loss_ratio         = 0.0;
         uint32_t admission_drops    = 0;
+        uint32_t viewer_admission_drops = 0;
         uint32_t send_failures      = 0;
         uint32_t decreases          = 0;
     };

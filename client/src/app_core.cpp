@@ -241,6 +241,8 @@ bool AppCore::init(const std::string& settings_path, PlatformBridge bridge, Rml:
                 bridge_.request_keyframe &&
                 pli_.admit_incoming(std::chrono::steady_clock::now()))
                 bridge_.request_keyframe();
+            else if (const auto queue = protocol::decode_viewer_queue(data, len))
+                video_sender_.accounting().on_viewer_queue(*queue);
         }
     };
 
