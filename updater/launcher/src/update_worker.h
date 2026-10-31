@@ -31,9 +31,12 @@ struct RepairJob {
     BuildId build;
     friend bool operator==(const RepairJob&, const RepairJob&) = default;
 };
-// set_channel with downgrade_now.
+// set_channel with downgrade_now. Its outcome applies only while the channel
+// and intent it was asked from still hold, so a later choice withdraws it.
 struct DowngradeJob {
     Channel channel;
+    Channel asked_on;
+    ChannelIntent asked_with;
     friend bool operator==(const DowngradeJob&, const DowngradeJob&) = default;
 };
 using Job = std::variant<CheckJob, RepairJob, DowngradeJob>;

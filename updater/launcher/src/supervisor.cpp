@@ -380,7 +380,7 @@ void Supervisor::on_request(const link::Request& request) {
                 dispatch(NoticeAcknowledged{});
             } else {
                 if (r.choice == link::ChannelChoice::DowngradeNow) {
-                    submit(DowngradeJob{r.channel});
+                    submit(DowngradeJob{r.channel, state_.channel, state_.intent});
                     return;
                 }
                 ChannelIntent intent = r.choice == link::ChannelChoice::Wait
@@ -422,8 +422,12 @@ void Supervisor::on_worker() {
         return;
     }
     running_job_.reset();
+    auto* downgrade = std::get_if<DowngradeJob>(&outcome->job);
     if (std::holds_alternative<CheckJob>(outcome->job) && outcome->channel != state_.channel) {
         log("dropping a check of the channel the user just left");
+        if (app_) submit(CheckJob{});
+    } else if (downgrade && (downgrade->asked_on != state_.channel || downgrade->asked_with != state_.intent)) {
+        log("dropping a switch to {} the user withdrew", channel_name(downgrade->channel));
         if (app_) submit(CheckJob{});
     } else if (std::holds_alternative<RepairJob>(outcome->job)) {
         for (Event& e : outcome->events) dispatch(std::move(e));
