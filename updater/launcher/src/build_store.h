@@ -1,8 +1,9 @@
 #pragma once
 
-// Sole owner of builds\. A directory named builds\<version>-<sha8> is
-// complete by construction: it is assembled as builds\.staging-<name>,
-// verified file by file against the signed entry, and only then renamed.
+// Sole owner of builds\ and downloads\. A directory named
+// builds\<version>-<sha8> is complete by construction: every file is fetched
+// into downloads\<sha256>.partial and checked there against the signed entry,
+// then moved into builds\.staging-<name>, which is renamed only when whole.
 
 #include "paths.h"
 #include "update_source.h"
@@ -45,7 +46,8 @@ public:
     std::expected<BuildRecord, std::string> adopt(const fs::path& dir) const;
 
     // Fetches, verifies and seals entry's files. Re-running it for a build
-    // that is already sealed and intact returns the same record.
+    // that is already sealed and intact returns the same record; for a sealed
+    // build with damaged or missing files it fetches just those again.
     std::expected<BuildRecord, std::string> seal(const BuildEntry& entry, UpdateSource& source,
                                                  const Progress& progress, const std::atomic<bool>& cancel) const;
 
@@ -55,12 +57,17 @@ public:
     // Refuses every build the committed state still needs.
     bool remove(const BuildId& id, const SupervisorState& committed, std::string& error) const;
 
-    // Deletes leftovers (.staging-*, .trash-*) and sealed directories the
+    // Deletes leftovers (downloads\, .staging-*, .trash-*) and sealed directories the
     // committed state does not track. Never touches `keep_dir`, the running
     // launcher's own directory. Run only while nothing is being sealed.
     void collect_garbage(const SupervisorState& committed, const fs::path& keep_dir) const;
 
 private:
+    std::expected<fs::path, std::string> download(const FileEntry& file, UpdateSource& source,
+                                                  const Progress& progress, const std::atomic<bool>& cancel) const;
+    std::expected<BuildRecord, std::string> repair(const BuildEntry& entry, UpdateSource& source,
+                                                   const Progress& progress, const std::atomic<bool>& cancel) const;
+
     InstallPaths install_;
 };
 

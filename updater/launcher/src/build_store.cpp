@@ -1,5 +1,6 @@
 #include "build_store.h"
 
+#include "authenticode.h"
 #include "build_info.h"
 #include "file_io.h"
 #include "log.h"
@@ -49,15 +50,70 @@ std::expected<BuildRecord, std::string> BuildStore::adopt(const fs::path& dir) c
     return BuildRecord::from_entry(*entry);
 }
 
+std::expected<fs::path, std::string> BuildStore::download(const FileEntry& f, UpdateSource& source,
+                                                          const Progress& progress,
+                                                          const std::atomic<bool>& cancel) const {
+    std::error_code ec;
+    fs::create_directories(install_.downloads(), ec);
+    const fs::path partial = install_.downloads() / (f.sha256.to_hex() + ".partial");
+    fs::remove(partial, ec);
+    auto fail = [&](std::string why) -> std::expected<fs::path, std::string> {
+        std::error_code ignored;
+        fs::remove(partial, ignored);
+        return std::unexpected(std::move(why));
+    };
+    auto fetched = source.fetch_file(f, partial, progress, cancel);
+    if (!fetched) return fail(f.name + ": " + fetched.error().detail);
+    auto digest = digest_file(partial);
+    if (!digest || digest->size != f.size || digest->sha256 != f.sha256)
+        return fail(f.name + " does not match the signed manifest");
+    if (f.name.ends_with(".exe") && !pinned_publisher().empty()) {
+        if (auto why = publisher_mismatch(partial, pinned_publisher())) return fail(f.name + ": " + *why);
+    }
+    std::string error;
+    if (!flush_file(partial, error)) return fail(error);
+    return partial;
+}
+
+// The directory may hold the running launcher, so it cannot be renamed aside;
+// putting the signed bytes back file by file restores what its name promises.
+std::expected<BuildRecord, std::string> BuildStore::repair(const BuildEntry& entry, UpdateSource& source,
+                                                           const Progress& progress,
+                                                           const std::atomic<bool>& cancel) const {
+    const fs::path dir = dir_of(entry.id());
+    uint64_t total = 0;
+    for (const FileEntry& f : entry.files) {
+        auto digest = digest_file(dir / f.name);
+        if (digest && digest->size == f.size && digest->sha256 == f.sha256) continue;
+        if (cancel.load()) return std::unexpected("cancelled");
+        auto partial = download(f, source, [&](uint64_t done) { if (progress) progress(total + done); }, cancel);
+        if (!partial) return std::unexpected(partial.error());
+        const fs::path dest = dir / f.name;
+        if (!MoveFileExW(partial->c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            std::string why = "cannot replace " + utf8(dest) + ": " + last_error_text();
+            std::error_code ec;
+            fs::remove(*partial, ec);
+            return std::unexpected(why);
+        }
+        log("repaired {}", utf8(dest));
+        total += f.size;
+    }
+    const std::string info = write_build_info(entry);
+    std::string error;
+    if (read_file(dir / kBuildInfoFile) != info && !durable_replace(dir / kBuildInfoFile, info, error))
+        return std::unexpected(error);
+    if (auto bad = verify_files(dir, entry)) return std::unexpected("repair of " + utf8(dir) + " failed: " + *bad);
+    return BuildRecord::from_entry(entry);
+}
+
 std::expected<BuildRecord, std::string> BuildStore::seal(const BuildEntry& entry, UpdateSource& source,
                                                          const Progress& progress,
                                                          const std::atomic<bool>& cancel) const {
     const fs::path final_dir = dir_of(entry.id());
     std::error_code ec;
     if (fs::exists(final_dir, ec)) {
-        if (auto bad = verify_files(final_dir, entry))
-            return std::unexpected("sealed " + utf8(final_dir) + " is damaged: " + *bad);
-        return BuildRecord::from_entry(entry);
+        if (!verify_files(final_dir, entry)) return BuildRecord::from_entry(entry);
+        return repair(entry, source, progress, cancel);
     }
 
     const fs::path staging = install_.builds() / (".staging-" + entry.id().dir_name());
@@ -75,13 +131,14 @@ std::expected<BuildRecord, std::string> BuildStore::seal(const BuildEntry& entry
     uint64_t total = 0;
     for (const FileEntry& f : entry.files) {
         if (cancel.load()) return fail("cancelled");
+        auto partial = download(f, source, [&](uint64_t done) { if (progress) progress(total + done); }, cancel);
+        if (!partial) return fail(partial.error());
         const fs::path dest = staging / f.name;
-        auto fetched = source.fetch_file(f, dest, [&](uint64_t done) { if (progress) progress(total + done); }, cancel);
-        if (!fetched) return fail(f.name + ": " + fetched.error().detail);
-        auto digest = digest_file(dest);
-        if (!digest || digest->size != f.size || digest->sha256 != f.sha256)
-            return fail(f.name + " does not match the signed manifest");
-        if (!flush_file(dest, error)) return fail(error);
+        if (!MoveFileExW(partial->c_str(), dest.c_str(), MOVEFILE_WRITE_THROUGH)) {
+            std::string why = "cannot move " + f.name + " into " + utf8(staging) + ": " + last_error_text();
+            fs::remove(*partial, ec);
+            return fail(why);
+        }
         total += f.size;
     }
     if (!durable_replace(staging / kBuildInfoFile, write_build_info(entry), error)) return fail(error);
@@ -120,6 +177,10 @@ bool BuildStore::remove(const BuildId& id, const SupervisorState& committed, std
 
 void BuildStore::collect_garbage(const SupervisorState& committed, const fs::path& keep_dir) const {
     std::error_code ec;
+    for (const auto& item : fs::directory_iterator(install_.downloads(), ec)) {
+        std::error_code removed;
+        if (fs::remove(item.path(), removed)) log("collected {}", utf8(item.path().filename()));
+    }
     for (const auto& item : fs::directory_iterator(install_.builds(), ec)) {
         if (!item.is_directory(ec)) continue;
         const std::string name = item.path().filename().string();

@@ -3,6 +3,8 @@
 #include "file_io.h"
 #include "log.h"
 
+#include <parties/update/release_keys.h>
+
 #include <charconv>
 #include <cstdlib>
 #include <string_view>
@@ -105,8 +107,7 @@ Timing timing() { return {}; }
 void before_effect() {}
 std::optional<std::string> scripted_recovery() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> exit_after_healthy() { return std::nullopt; }
-// Production keys arrive with the release pipeline; until then no manifest verifies.
-Keyring pinned_keys() { return {}; }
+Keyring pinned_keys() { return production_keyring(); }
 
 #endif
 
