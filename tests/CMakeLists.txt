@@ -348,7 +348,7 @@ endif()
 
 # ── Update manager pure core (offline, deterministic) ────────────────────────
 if(TARGET parties_update_core)
-    foreach(update_test version data_compat manifest probation state_codec policy link)
+    foreach(update_test version data_compat manifest probation state_codec policy link retention)
         add_executable(update_${update_test}_test update_${update_test}_test.cpp)
         target_link_libraries(update_${update_test}_test PRIVATE parties_update_core parties_common)
         add_test(NAME update_${update_test} COMMAND update_${update_test}_test)

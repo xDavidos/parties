@@ -38,6 +38,7 @@ add_library(parties_update_core STATIC
     src/probation.cpp
     src/state_codec.cpp
     src/update_policy.cpp
+    src/retention.cpp
 )
 target_include_directories(parties_update_core PUBLIC include)
 target_link_libraries(parties_update_core
