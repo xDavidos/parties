@@ -1,0 +1,97 @@
+--- a/scripts/verify-stream.ps1
++++ b/scripts/verify-stream.ps1
+@@ -40,7 +40,11 @@
+     [double]$BitrateMbps = 0,
+     [string[]]$Codecs = @('AV1', 'H.265', 'H.264'),
+     [string[]]$Bitrates = @('4', '12'),
+-    [switch]$Noise
++    [switch]$Noise,
++    # Server -> viewer bottleneck through scripts/link_shaper.py; 0 = direct.
++    [double]$ViewerLinkMbps = 0,
++    [double]$ViewerLinkDelayMs = 10,
++    [double]$ViewerLinkBufferKB = 0
+ )
+ 
+ $ErrorActionPreference = 'Stop'
+@@ -197,9 +201,10 @@
+                 client_sha256 = (Get-FileHash $clientExe).Hash }
+     Save-State $state
+ 
+-    $state.server = Start-Owned 'server' $serverExe @('server.toml') (Join-Path $RunDir 'server') @{
+-        PARTIES_PORT = "$port"; PARTIES_LISTEN_IP = '127.0.0.1'; PARTIES_SERVER_NAME = "verify-$Run"
+-    } 'Minimized'
++    $serverEnv = @{ PARTIES_PORT = "$port"; PARTIES_LISTEN_IP = '127.0.0.1'; PARTIES_SERVER_NAME = "verify-$Run" }
++    # Debug keeps the per-viewer backlog gate's drop lines, which matter on a shaped link.
++    if ($ViewerLinkMbps -gt 0) { $serverEnv.PARTIES_LOG_LEVEL = 'debug' }
++    $state.server = Start-Owned 'server' $serverExe @('server.toml') (Join-Path $RunDir 'server') $serverEnv 'Minimized'
+     $state.server.port = $port
+     Save-State $state
+ 
+@@ -212,6 +217,28 @@
+     }
+     Write-Step "server ready on udp/127.0.0.1:$port"
+ 
++    $state.viewer_port = $port
++    if ($ViewerLinkMbps -gt 0) {
++        $python = (& python -I -c 'import sys; print(sys.executable)').Trim()
++        $linkPort = Get-FreeUdpPort
++        $linkArgs = @('-I', "`"$(Join-Path $PSScriptRoot 'link_shaper.py')`"", '--listen', "127.0.0.1:$linkPort",
++                      '--upstream', "127.0.0.1:$port", '--down-mbps', $ViewerLinkMbps,
++                      '--delay-ms', $ViewerLinkDelayMs, '--buffer-kb', $ViewerLinkBufferKB,
++                      '--log', "`"$(Join-Path $Evidence 'link.jsonl')`"")
++        $state.shaper = Start-Owned 'shaper' $python $linkArgs (Join-Path $RunDir 'shaper') @{} 'Minimized'
++        $state.viewer_port = $linkPort
++        $state.link = @{ down_mbps = $ViewerLinkMbps; delay_ms = $ViewerLinkDelayMs; buffer_kb = $ViewerLinkBufferKB }
++        Save-State $state
++        $linkLog = Join-Path $Evidence 'link.jsonl'
++        $deadline = (Get-Date).AddSeconds(10)
++        while (-not ((Test-Path $linkLog) -and (Select-String -Path $linkLog -Pattern 'link_start' -Quiet))) {
++            if (-not (Get-OwnedProcess $state.shaper)) { throw 'link shaper exited during startup' }
++            if ((Get-Date) -gt $deadline) { throw 'link shaper never started' }
++            Start-Sleep -Milliseconds 200
++        }
++        Write-Step "viewer link: $ViewerLinkMbps Mbps toward the viewer, $ViewerLinkDelayMs ms each way, via udp/127.0.0.1:$linkPort"
++    }
++
+     foreach ($who in 'sender', 'viewer') {
+         $dir = Join-Path $RunDir $who
+         $pipe = "parties-verify-$Run-$who"
+@@ -310,10 +337,14 @@
+     # Two clients on one machine share a microphone and speakers: silence both.
+     Click-Ui $Who '#channel-sidebar .voice-btn-row .voice-btn:nth-child(2)'
+     Click-Ui $Who '#channel-sidebar .voice-btn-row .voice-btn:nth-child(1)'
+-    if ((Find-Visible $Who '#channel-sidebar .voice-btn-row .voice-btn.active').Count -lt 2) {
+-        throw "$Who is not both muted and deafened"
++    # A click returns once WndProc has run the handler; RmlUi applies the bound
++    # .active class only on the render thread's next Context::Update.
++    $silenced = [Diagnostics.Stopwatch]::StartNew()
++    while ((Find-Visible $Who '#channel-sidebar .voice-btn-row .voice-btn.active').Count -lt 2) {
++        if ($silenced.Elapsed.TotalSeconds -gt 3) { throw "$Who is not both muted and deafened after 3 s" }
++        Start-Sleep -Milliseconds 50
+     }
+-    Write-Step "$Who connected as $Nickname, joined General, muted and deafened"
++    Write-Step "$Who connected as $Nickname, joined General, muted and deafened ($($silenced.ElapsedMilliseconds) ms until both showed active)"
+ }
+ 
+ function Set-ShareSettings($State) {
+@@ -350,7 +381,7 @@
+     $script:CurrentState = Get-State
+     $state = $script:CurrentState
+     Connect-Client 'sender' 'Sender' $state.port
+-    Connect-Client 'viewer' 'Viewer' $state.port
++    Connect-Client 'viewer' 'Viewer' $(if ($state.viewer_port) { $state.viewer_port } else { $state.port })
+     Set-ShareSettings $state
+ 
+     Click-Ui 'sender' '#room-share-button'
+@@ -419,6 +450,11 @@
+         Stop-Process -Id $server.Id -Force
+         Write-Step "stopped server pid $($server.Id)"
+     }
++    $shaper = Get-OwnedProcess $state.shaper
++    if ($shaper) {
++        Stop-Process -Id $shaper.Id -Force
++        Write-Step "stopped link shaper pid $($shaper.Id)"
++    }
+     foreach ($who in 'sender', 'viewer') {
+         $logs = Join-Path $state[$who].dir 'localappdata/Parties/logs'
+         if (Test-Path $logs) {
