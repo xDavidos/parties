@@ -17,11 +17,15 @@ add_library(parties_launcher_shell STATIC
     src/data_guard.cpp
     src/file_io.cpp
     src/https_source.cpp
+    src/install_plan.cpp
     src/link_server.cpp
     src/local_dir_source.cpp
     src/log.cpp
     src/paths.cpp
     src/recovery_ui.cpp
+    src/setup.cpp
+    src/setup_payload.cpp
+    src/shell_integration.cpp
     src/state_store.cpp
     src/supervisor.cpp
     src/testing.cpp
@@ -34,7 +38,7 @@ target_include_directories(parties_launcher_shell
 target_link_libraries(parties_launcher_shell
     PUBLIC parties_update_core
     PRIVATE parties_update_release_keys rapidjson unofficial::sqlite3::sqlite3 bcrypt comctl32 shell32 winhttp
-        wintrust crypt32)
+        wintrust crypt32 ole32 propsys)
 target_compile_definitions(parties_launcher_shell PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 if(PARTIES_UPDATE_TESTING)
     target_compile_definitions(parties_launcher_shell PRIVATE PARTIES_UPDATE_TESTING)

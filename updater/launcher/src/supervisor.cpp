@@ -7,6 +7,7 @@
 #include "link_server.h"
 #include "log.h"
 #include "recovery_ui.h"
+#include "shell_integration.h"
 #include "state_store.h"
 #include "testing.h"
 #include "update_worker.h"
@@ -123,6 +124,7 @@ private:
     void on_link();
     void on_request(const link::Request& request);
     void on_activate();
+    void on_quit();
     void on_worker();
     void on_timers();
     std::optional<Clock::time_point> next_deadline() const;
@@ -159,6 +161,7 @@ private:
     std::optional<DataInfo> last_live_db_;
     FeedView feed_view_;
     bool restart_requested_ = false;
+    bool quitting_ = false;  // setup or uninstall asked; ends the session once no app runs
     bool quit_ = false;
     bool session_ended_ = false;
     Clock::time_point next_check_ = Clock::time_point::max();
@@ -244,6 +247,7 @@ bool Supervisor::execute(const Effect& effect) {
                 return true;
             } else if constexpr (std::is_same_v<T, Commit>) {
                 if (!store_.commit(e.state, error)) return false;
+                if (e.state.good != state_.good) refresh_uninstall_entry(options_.install, e.state.good);
                 state_ = e.state;
                 return true;
             } else if constexpr (std::is_same_v<T, Spawn>) {
@@ -316,6 +320,10 @@ void Supervisor::on_app_exit() {
     ExitKind kind = app_->process.exit_kind();
     app_.reset();
     dispatch(AppExited{kind});
+    if (quitting_) {
+        on_quit();
+        return;
+    }
     if (restart_requested_ && !app_) {
         restart_requested_ = false;
         dispatch(StartRequested{});
@@ -342,6 +350,7 @@ void Supervisor::on_link() {
             app_->welcomed = true;
             app_->last_sent.reset();
             publish_status();
+            if (quitting_) on_quit();
         } else if (auto* healthy = std::get_if<link::Healthy>(&message)) {
             if (app_->healthy_at) continue;
             log("app reported healthy (data schema {})", healthy->data_schema);
@@ -384,7 +393,17 @@ void Supervisor::on_request(const link::Request& request) {
         request);
 }
 
+// Closes the app through its normal path; the loop ends once none runs.
+void Supervisor::on_quit() {
+    quitting_ = true;
+    restart_requested_ = false;
+    // Setup and uninstall replace the install; a download in flight is not worth waiting for.
+    cancel_jobs();
+    if (app_ && !app_->exit_sent) app_->exit_sent = app_->link->send(link::ExitRequested{});
+}
+
 void Supervisor::on_activate() {
+    if (quitting_) return;
     if (app_) {
         HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, object_name(L".Client.Activate").c_str());
         if (e) {
@@ -608,6 +627,8 @@ int Supervisor::run() {
     write_session(false);
 
     HANDLE activate = CreateEventW(nullptr, FALSE, FALSE, object_name(L".Launcher.Activate").c_str());
+    // Set by setup and uninstall, which then wait for the Running mutex.
+    HANDLE quit = CreateEventW(nullptr, FALSE, FALSE, object_name(L".Launcher.Quit").c_str());
     WNDCLASSW wc{};
     wc.lpfnWndProc = window_proc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -623,6 +644,7 @@ int Supervisor::run() {
     if (!load_state()) return 1;
     builds_.collect_garbage(state_, self_exe_.parent_path());
     data_.prune(state_);
+    refresh_uninstall_entry(options_.install, state_.good);
 
     dispatch(Resumed{});
     if (options_.recover) recovery_ = PendingRecovery{std::nullopt};
@@ -630,7 +652,7 @@ int Supervisor::run() {
 
     while (!quit_) {
         // A repair in flight may make the recovery dialog unnecessary.
-        if (recovery_ && !app_ && !repairing()) {
+        if (recovery_ && !app_ && !repairing() && !quitting_) {
             show_pending_recovery();
             continue;
         }
@@ -639,7 +661,7 @@ int Supervisor::run() {
         if (!app_ && !running_job_ && jobs_.empty()) break;
 
         const bool with_app = app_.has_value();
-        std::vector<HANDLE> handles{activate, worker_.event()};
+        std::vector<HANDLE> handles{activate, worker_.event(), quit};
         if (with_app) handles.insert(handles.end(), {app_->link->event(), app_->process.handle()});
         DWORD timeout = INFINITE;
         if (auto deadline = next_deadline()) {
@@ -650,8 +672,11 @@ int Supervisor::run() {
                                               MWMO_INPUTAVAILABLE);
         if (r == WAIT_OBJECT_0) on_activate();
         else if (r == WAIT_OBJECT_0 + 1) on_worker();
-        else if (with_app && r == WAIT_OBJECT_0 + 2) on_link();
-        else if (with_app && r == WAIT_OBJECT_0 + 3) on_app_exit();
+        else if (r == WAIT_OBJECT_0 + 2) {
+            log("asked to quit");
+            on_quit();
+        } else if (with_app && r == WAIT_OBJECT_0 + 3) on_link();
+        else if (with_app && r == WAIT_OBJECT_0 + 4) on_app_exit();
         else if (r == WAIT_OBJECT_0 + handles.size()) {
             MSG msg;
             while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -666,6 +691,7 @@ int Supervisor::run() {
     if (!session_ended_) write_session(true);
     log("launcher exiting");
     DestroyWindow(window);
+    CloseHandle(quit);
     CloseHandle(activate);
     CloseHandle(running);
     return 0;

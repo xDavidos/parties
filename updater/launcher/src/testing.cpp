@@ -107,6 +107,20 @@ std::optional<std::chrono::milliseconds> job_cap() {
 
 Keyring pinned_keys() { return kKeys; }
 
+namespace {
+
+std::optional<std::wstring> wide_env(const char* name) {
+    auto value = env(name);
+    if (!value) return std::nullopt;
+    return fs::path(std::u8string(value->begin(), value->end())).wstring();
+}
+
+} // namespace
+
+std::optional<std::wstring> uninstall_key() { return wide_env("PARTIES_TEST_UNINSTALL_KEY"); }
+std::optional<fs::path> start_menu() { return wide_env("PARTIES_TEST_START_MENU"); }
+std::optional<fs::path> recycle_log() { return wide_env("PARTIES_TEST_RECYCLE_LOG"); }
+
 #else
 
 bool enabled() { return false; }
@@ -115,7 +129,11 @@ void before_effect() {}
 std::optional<std::string> scripted_recovery() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> exit_after_healthy() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> job_cap() { return std::nullopt; }
+// Empty until a production key is committed, so no manifest verifies.
 Keyring pinned_keys() { return production_keyring(); }
+std::optional<std::wstring> uninstall_key() { return std::nullopt; }
+std::optional<std::filesystem::path> start_menu() { return std::nullopt; }
+std::optional<std::filesystem::path> recycle_log() { return std::nullopt; }
 
 #endif
 
