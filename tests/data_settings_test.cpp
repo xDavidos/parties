@@ -76,7 +76,7 @@ bool migration_table_is_contiguous_and_floor_monotonic() {
             floor = m.raises_floor_to;
         }
     }
-    ok &= Check(schema::kCurrent == schema::Version{2, 1}, "this build is not data version 2, floor 1");
+    ok &= Check(schema::kCurrent == schema::Version{3, 1}, "this build is not data version 3, floor 1");
     return ok;
 }
 
@@ -114,7 +114,7 @@ bool legacy_v1_migrates_and_keeps_every_row(bool with_password) {
         ok &= Check(stored, "server password did not round-trip after migration");
     }
 
-    ok &= Check(stored_version(paths.db) == schema::Version{2, 1}, "database not recorded as version 2, floor 1");
+    ok &= Check(stored_version(paths.db) == schema::Version{3, 1}, "database not recorded as version 3, floor 1");
 
     const auto snapshots = files_in(paths.backups_dir);
     ok &= Check(snapshots.size() == 1, "expected exactly one pre-migration snapshot");
@@ -177,8 +177,8 @@ bool reopening_current_database_writes_nothing_new() {
         Settings settings;
         ok &= Check(ready(settings.open(paths)), "second open failed");
     }
-    ok &= Check(files_in(paths.backups_dir) == after_first, "reopening a v2 database wrote a snapshot");
-    ok &= Check(stored_version(paths.db) == schema::Version{2, 1}, "reopening changed the version");
+    ok &= Check(files_in(paths.backups_dir) == after_first, "reopening a current database wrote a snapshot");
+    ok &= Check(stored_version(paths.db) == schema::Version{3, 1}, "reopening changed the version");
 
     TempDir fresh;
     {
@@ -187,7 +187,7 @@ bool reopening_current_database_writes_nothing_new() {
         ok &= Check(!settings.has_identity(), "fresh database has an identity");
     }
     ok &= Check(files_in(paths_in(fresh).backups_dir).empty(), "creating a fresh database wrote a snapshot");
-    ok &= Check(stored_version(paths_in(fresh).db) == schema::Version{2, 1}, "fresh database not at version 2");
+    ok &= Check(stored_version(paths_in(fresh).db) == schema::Version{3, 1}, "fresh database not at version 3");
     return ok;
 }
 
@@ -200,16 +200,16 @@ bool newer_compatible_database_opens_as_is() {
     }
     {
         RawDb raw(paths.db);
-        raw.exec("UPDATE parties_schema SET version = 3, compat_floor = 1");
+        raw.exec("UPDATE parties_schema SET version = 4, compat_floor = 1");
     }
     bool ok = true;
     {
         Settings settings;
-        ok &= Check(ready(settings.open(paths)), "version 3 floor 1 database did not open");
+        ok &= Check(ready(settings.open(paths)), "version 4 floor 1 database did not open");
         ok &= Check(settings.set_pref("ui.theme", "dark") && settings.get_pref("ui.theme") == "dark",
-                    "version 3 floor 1 database is not writable");
+                    "version 4 floor 1 database is not writable");
     }
-    ok &= Check(stored_version(paths.db) == schema::Version{3, 1}, "opening a newer database changed its version");
+    ok &= Check(stored_version(paths.db) == schema::Version{4, 1}, "opening a newer database changed its version");
     ok &= Check(files_in(paths.backups_dir).empty(), "opening a newer database wrote a snapshot");
     return ok;
 }
@@ -224,14 +224,14 @@ bool too_new_database_is_refused_untouched() {
     }
     {
         RawDb raw(paths.db);
-        raw.exec("UPDATE parties_schema SET version = 3, compat_floor = 3");
+        raw.exec("UPDATE parties_schema SET version = 4, compat_floor = 4");
     }
     const auto before = read_bytes(paths.db);
     bool ok = true;
     {
         Settings settings;
         const auto result = settings.open(paths);
-        ok &= Check(result.status == Settings::OpenStatus::TooNew, "version 3 floor 3 database was not TooNew");
+        ok &= Check(result.status == Settings::OpenStatus::TooNew, "version 4 floor 4 database was not TooNew");
         ok &= Check(!result.reason.empty(), "TooNew carries no reason");
         ok &= Check(!settings.is_open(), "TooNew left the database open");
     }
@@ -266,7 +266,7 @@ bool failed_migration_leaves_database_at_old_version() {
     }
 
     std::vector<schema::Migration> broken(std::begin(schema::kMigrations), std::end(schema::kMigrations));
-    broken.push_back({3, 0, "CREATE TABLE half_done (x INTEGER); INSERT INTO no_such_table VALUES (1);"});
+    broken.push_back({4, 0, "CREATE TABLE half_done (x INTEGER); INSERT INTO no_such_table VALUES (1);"});
 
     bool ok = true;
     {
@@ -274,7 +274,7 @@ bool failed_migration_leaves_database_at_old_version() {
         const auto result = SettingsTestSeam::open(settings, paths, broken);
         ok &= Check(result.status == Settings::OpenStatus::Unavailable, "failing migration did not report Unavailable");
     }
-    ok &= Check(stored_version(paths.db) == schema::Version{2, 1}, "failing migration changed the version");
+    ok &= Check(stored_version(paths.db) == schema::Version{3, 1}, "failing migration changed the version");
     {
         RawDb raw(paths.db);
         ok &= Check(raw.scalar("SELECT COUNT(*) FROM sqlite_master WHERE name = 'half_done'") == 0,

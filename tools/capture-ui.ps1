@@ -21,7 +21,7 @@ if (-not (Test-Path -LiteralPath $designer)) {
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 
 $lobbyScenarios = @(
-    "onboarding", "recovery", "launcher", "party-modal", "room",
+    "onboarding", "recovery", "recovery-save-failed", "launcher", "party-modal", "room",
     "stream-single", "stream-fps-overflow", "streams", "member", "settings",
     "settings-select-open", "settings-screen-share", "settings-hotkeys",
     "settings-account", "share", "audio-share", "chat", "chat-segment-churn",

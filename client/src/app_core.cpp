@@ -547,6 +547,10 @@ void AppCore::load_saved_prefs()
 // Identity
 // ─────────────────────────────────────────────────────────────────────────────
 
+namespace {
+constexpr const char* kIdentityNotSaved = "Parties could not save your identity. Try again, or restart Parties.";
+} // namespace
+
 void AppCore::load_or_generate_identity(const std::string& username_hint)
 {
     // An empty seed phrase is a raw-key import and as valid as any other identity.
@@ -571,14 +575,6 @@ void AppCore::load_or_generate_identity(const std::string& username_hint)
 
     server_model_.has_identity = has_identity_;
     server_model_.fingerprint  = Rml::String(settings_.get_fingerprint());
-}
-
-void AppCore::generate_identity()
-{
-    seed_phrase_ = parties::generate_seed_phrase();
-    parties::derive_keypair(seed_phrase_, secret_key_, public_key_);
-    has_identity_ = true;
-    settings_.save_identity(seed_phrase_, secret_key_, public_key_);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2917,7 +2913,7 @@ void AppCore::setup_model_callbacks()
         }
 
         if (!settings_.save_identity(sp, sk, pk)) {
-            model_.import_error = "Failed to save identity";
+            model_.import_error = kIdentityNotSaved;
             return;
         }
         secret_key_ = sk; public_key_ = pk; has_identity_ = true; seed_phrase_ = sp;
@@ -3093,6 +3089,7 @@ void AppCore::setup_server_model_callbacks()
     server_model_.on_generate_identity = [this]() {
         std::string phrase = parties::generate_seed_phrase();
         server_model_.seed_phrase       = Rml::String(phrase);
+        server_model_.login_error       = "";
         server_model_.show_onboarding   = true;
         server_model_.show_restore      = false;
         server_model_.show_key_import   = false;
@@ -3105,12 +3102,15 @@ void AppCore::setup_server_model_callbacks()
             LOG_ERROR("Failed to derive keypair"); return;
         }
         if (!settings_.save_identity(phrase, sk, pk)) {
-            LOG_ERROR("Failed to save identity"); return;
+            LOG_ERROR("Failed to save identity");
+            server_model_.login_error = kIdentityNotSaved;
+            return;
         }
         secret_key_ = sk; public_key_ = pk; has_identity_ = true; seed_phrase_ = phrase;
         server_model_.fingerprint   = Rml::String(parties::public_key_fingerprint(pk));
         server_model_.has_identity  = true;
         server_model_.show_onboarding = false;
+        server_model_.login_error   = "";
         LOG_INFO("Identity saved: {}",
                     parties::public_key_fingerprint(pk));
     };
@@ -3127,7 +3127,7 @@ void AppCore::setup_server_model_callbacks()
             return;
         }
         if (!settings_.save_identity(phrase, sk, pk)) {
-            server_model_.login_error = "Failed to save identity";
+            server_model_.login_error = kIdentityNotSaved;
             return;
         }
         secret_key_ = sk; public_key_ = pk; has_identity_ = true; seed_phrase_ = phrase;
@@ -3163,7 +3163,7 @@ void AppCore::setup_server_model_callbacks()
             return;
         }
         if (!settings_.save_identity("", sk, pk)) {
-            server_model_.login_error = "Failed to save identity";
+            server_model_.login_error = kIdentityNotSaved;
             return;
         }
         secret_key_ = sk; public_key_ = pk; has_identity_ = true; seed_phrase_ = "";

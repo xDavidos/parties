@@ -432,7 +432,6 @@ private:
     void on_chat_file_ready(const uint8_t* data, size_t len);
 
     void update_speaking_state();
-    void generate_identity();
 
     IdleSleepInhibitor sleep_inhibitor_;
     void apply_sleep_inhibit(bool wanted);

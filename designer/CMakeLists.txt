@@ -84,6 +84,16 @@ if(BUILD_TESTING)
             --screenshot "${CMAKE_BINARY_DIR}/ui-designer-recovery.bmp"
     )
     add_test(
+        NAME parties_ui_designer_recovery_save_failed
+        COMMAND rmlui_designer
+            "${CMAKE_SOURCE_DIR}/client/ui/lobby.rml"
+            --asset-dir "${CMAKE_SOURCE_DIR}/client/ui"
+            --fixture recovery-save-failed
+            --size 1440x900
+            --frames 5
+            --screenshot "${CMAKE_BINARY_DIR}/ui-designer-recovery-save-failed.bmp"
+    )
+    add_test(
         NAME parties_ui_designer_member
         COMMAND rmlui_designer
             "${CMAKE_SOURCE_DIR}/client/ui/lobby.rml"

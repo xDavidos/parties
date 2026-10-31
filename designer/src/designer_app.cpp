@@ -404,7 +404,7 @@ struct DesignerApp::PartiesFixture {
 		}
 
 		lobby.is_connected = scenario != "launcher" && scenario != "party-modal" &&
-			scenario != "onboarding" && scenario != "recovery" && scenario.rfind("update-", 0) != 0;
+			scenario != "onboarding" && scenario.rfind("recovery", 0) != 0 && scenario.rfind("update-", 0) != 0;
 		lobby.server_name = "Night Shift";
 		lobby.server_initials = "NS";
 		lobby.username = "tuxick";
@@ -545,8 +545,11 @@ struct DesignerApp::PartiesFixture {
 			};
 			lobby.on_apply_update = [this] { lobby.on_update_action(parties::client::UpdateAction::ClickPill); };
 		}
-		server_list.show_onboarding = scenario == "onboarding" || scenario == "recovery";
-		server_list.onboarding_step = scenario == "recovery" ? 1 : 0;
+		const bool recovery = scenario == "recovery" || scenario == "recovery-save-failed";
+		server_list.show_onboarding = scenario == "onboarding" || recovery;
+		server_list.onboarding_step = recovery ? 1 : 0;
+		if (scenario == "recovery-save-failed")
+			server_list.login_error = "Parties could not save your identity. Try again, or restart Parties.";
 		if (server_list.show_onboarding.get())
 			server_list.has_identity = false;
 		server_list.show_add_form = scenario == "party-modal";
@@ -667,7 +670,7 @@ struct DesignerApp::PartiesFixture {
 
 	bool Init(Rml::Context* context, const std::string& scenario) {
 		if (scenario != "launcher" && scenario != "party-modal" && scenario != "onboarding" &&
-			scenario != "recovery" && scenario != "room" && scenario != "settings" &&
+			scenario != "recovery" && scenario != "recovery-save-failed" && scenario != "room" && scenario != "settings" &&
 			scenario != "settings-select-open" && scenario != "settings-screen-share" &&
 			scenario != "settings-hotkeys" &&
 			scenario != "settings-account" &&
@@ -971,6 +974,14 @@ struct DesignerApp::PartiesFixture {
 			}
 		}
 
+		if (scenario == "recovery-save-failed") {
+			Rml::Element* error = document->GetElementById("onboarding-save-error");
+			const bool valid = error && error->IsVisible(true) &&
+				error->GetInnerRML().find("could not save your identity") != Rml::String::npos;
+			if (!valid)
+				std::fprintf(stderr, "[Designer] The failed identity save is not shown\n");
+			return valid;
+		}
 		if (update_status && !ValidateUpdateFixture(document, scenario))
 			return false;
 		if (update_status && !IsUpdateSettings(scenario))
