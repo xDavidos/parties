@@ -84,6 +84,7 @@ set(CLIENT_COMMON_SOURCES
     src/sound_player.cpp
     src/ui_fixture.cpp
     src/net_client_msquic.cpp
+    src/test_pattern.cpp
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
@@ -129,6 +130,7 @@ else()
         src/windows/auto_updater.cpp
 
         src/windows/screen_capture.cpp
+        src/windows/verification.cpp
 
         src/windows/video_encoder.cpp
         src/windows/video_decoder.cpp
@@ -402,4 +404,13 @@ if(NOT APPLE)
                 "${CMAKE_BINARY_DIR}/${COPY_DIR}/parties_client.exe"
         )
     endforeach()
+endif()
+
+if(WIN32 AND NOT BUILD_IN_RETAIL)
+    add_executable(parties_stream_probe
+        ${CMAKE_SOURCE_DIR}/tools/stream_probe.cpp
+        src/test_pattern.cpp
+    )
+    target_include_directories(parties_stream_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(parties_stream_probe PRIVATE d3d11 dxgi dwmapi windowsapp)
 endif()

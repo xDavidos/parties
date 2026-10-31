@@ -160,6 +160,13 @@ void PartiesRenderInterface_DX12::EndFrame() {
 	CollectRetiredTextures(upstream_.Get_CurrentFrameIndex());
 }
 
+bool PartiesRenderInterface_DX12::RepresentLastFrame() {
+	if (!active_frame_ || !upstream_.RepresentLastFrame()) return false;
+	active_frame_.reset();
+	CollectRetiredTextures(upstream_.Get_CurrentFrameIndex());
+	return true;
+}
+
 void PartiesRenderInterface_DX12::ReleaseRetiredResourcesBetweenFrames() {
 	if (!upstream_ || active_frame_) return;
 	upstream_.WaitIdle();

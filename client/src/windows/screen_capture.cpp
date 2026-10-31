@@ -1,4 +1,5 @@
 #include <client/screen_capture.h>
+#include <client/test_pattern.h>
 #include <parties/profiler.h>
 #include <parties/log.h>
 
@@ -368,6 +369,7 @@ struct ScreenCapture::Impl {
     GraphicsCaptureSession session{nullptr};
     event_token frame_arrived_token{};
     event_token closed_token{};
+    std::jthread test_pattern_thread;
 };
 
 ScreenCapture::ScreenCapture() = default;
@@ -567,6 +569,24 @@ CaptureThumbnail ScreenCapture::ThumbnailSession::capture(const CaptureTarget& t
                                                           uint32_t max_height) {
     ZoneScopedN("ScreenCapture::ThumbnailSession::capture");
     CaptureThumbnail result;
+    if (target.type == CaptureTarget::Type::TestPattern) {
+        const uint32_t width = (std::min)(max_width, max_height * 16 / 9) & ~1u;
+        const uint32_t height = (width * 9 / 16) & ~1u;
+        if (width == 0 || height == 0) return result;
+        TestPatternRenderer renderer(width, height);
+        const uint8_t* bgra = renderer.render(0);
+        result.rgba.resize(static_cast<size_t>(width) * height * 4);
+        for (size_t i = 0; i < result.rgba.size(); i += 4) {
+            result.rgba[i] = bgra[i + 2];
+            result.rgba[i + 1] = bgra[i + 1];
+            result.rgba[i + 2] = bgra[i];
+            result.rgba[i + 3] = 255;
+        }
+        result.width = width;
+        result.height = height;
+        result.source = CaptureThumbnail::Source::Gdi;
+        return result;
+    }
     if (!target.handle || max_width == 0 || max_height == 0)
         return result;
 
@@ -680,6 +700,8 @@ bool ScreenCapture::start(const CaptureTarget& target, uint32_t target_fps) {
     if (target_lost()) return false;
     impl_->callbacks = std::make_shared<Impl::Callbacks>();
     impl_->callbacks->owner = this;
+    if (target.type == CaptureTarget::Type::TestPattern)
+        return start_test_pattern(target_fps);
 
     std::lock_guard setup_lock(g_wgc_session_setup_mutex);
     frame_count_ = 0;
@@ -812,6 +834,81 @@ bool ScreenCapture::start(const CaptureTarget& target, uint32_t target_fps) {
     }
 }
 
+bool ScreenCapture::start_test_pattern(uint32_t target_fps) {
+    const uint32_t width = target_.pattern_width ? target_.pattern_width & ~1u : 1280;
+    const uint32_t height = target_.pattern_height ? target_.pattern_height & ~1u : 720;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    // One texture is enough: the frame callback copies it out on this same
+    // immediate context before the next update is recorded.
+    ComPtr<ID3D11Texture2D> texture;
+    if (FAILED(device_->CreateTexture2D(&desc, nullptr, &texture))) {
+        LOG_ERROR("Test pattern texture creation failed at {}x{}", width, height);
+        return false;
+    }
+    width_ = width;
+    height_ = height;
+    test_pattern_counter_.store(0, std::memory_order_release);
+    capturing_.store(true, std::memory_order_release);
+
+    // Generate at twice the share rate, as a display faster than the share
+    // rate would, so the sender's capture pacing never aliases against us.
+    const uint32_t rate = (std::max)(target_fps, 1u) * 2;
+    LOG_INFO("Test pattern source started: {}x{} at {} Hz{}", width, height, rate,
+             target_.pattern_noise ? " with noise" : "");
+    impl_->test_pattern_thread = std::jthread(
+        [this, state = impl_->callbacks, texture, width, height, rate,
+         noise = target_.pattern_noise](std::stop_token stop) {
+            TracySetThreadName("TestPattern");
+            TestPatternRenderer renderer(width, height, noise);
+            HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr,
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            LARGE_INTEGER frequency, now;
+            QueryPerformanceFrequency(&frequency);
+            QueryPerformanceCounter(&now);
+            const int64_t period = frequency.QuadPart / rate;
+            int64_t next = now.QuadPart;
+            uint32_t counter = 0;
+            while (!stop.stop_requested() && capturing_.load(std::memory_order_acquire)) {
+                for (const TestPatternRegion& region : renderer.render_changes(counter)) {
+                    const D3D11_BOX box{region.x0, region.y0, 0, region.x1, region.y1, 1};
+                    const uint8_t* source = renderer.pixels() +
+                        (static_cast<size_t>(region.y0) * width + region.x0) * 4;
+                    context_->UpdateSubresource(texture.Get(), 0, &box, source,
+                                                static_cast<UINT>(renderer.stride()), 0);
+                }
+                {
+                    std::lock_guard lock(state->mutex);
+                    if (!state->owner || !capturing_.load(std::memory_order_acquire)) break;
+                    test_pattern_counter_.store(counter, std::memory_order_release);
+                    if (on_frame_) on_frame_(texture.Get(), width, height);
+                }
+                counter = (counter + 1) & kTestPatternCounterMask;
+                next += period;
+                QueryPerformanceCounter(&now);
+                if (next <= now.QuadPart) {
+                    next = now.QuadPart;
+                    continue;
+                }
+                LARGE_INTEGER due;
+                due.QuadPart = -((next - now.QuadPart) * 10'000'000 / frequency.QuadPart);
+                if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE))
+                    WaitForSingleObject(timer, INFINITE);
+                else
+                    Sleep(1);
+            }
+            if (timer) CloseHandle(timer);
+        });
+    return true;
+}
+
 bool ScreenCapture::target_lost() const {
     if (target_closed_.load(std::memory_order_acquire)) return true;
     if (!target_.handle) return false;
@@ -839,6 +936,7 @@ void ScreenCapture::stop() {
         std::lock_guard lock(impl_->callbacks->mutex);
         impl_->callbacks->owner = nullptr;
     }
+    impl_->test_pattern_thread = {};
     try { if (impl_->frame_pool) impl_->frame_pool.FrameArrived(impl_->frame_arrived_token); } catch (...) {}
     try { if (impl_->session) impl_->session.Close(); } catch (...) {}
     try { if (impl_->frame_pool) impl_->frame_pool.Close(); } catch (...) {}

@@ -154,6 +154,12 @@ if(APPLE AND BUILD_CLIENT AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set_tests_properties(parties_macos_pip_panel PROPERTIES SKIP_RETURN_CODE ${PARTIES_TEST_SKIP_EXIT_CODE} TIMEOUT 15)
 endif()
 
+add_executable(parties_test_pattern_test
+    test_pattern_test.cpp
+    ../client/src/test_pattern.cpp)
+target_include_directories(parties_test_pattern_test PRIVATE ../client/include)
+add_test(NAME parties_test_pattern COMMAND parties_test_pattern_test)
+
 add_executable(parties_server_query_wake_test server_query_wake_test.cpp)
 target_include_directories(parties_server_query_wake_test PRIVATE ../client/include)
 
@@ -215,6 +221,10 @@ if(BUILD_CLIENT)
 endif()
 
 if(WIN32 AND BUILD_CLIENT)
+    add_executable(parties_frame_requests_test frame_requests_test.cpp)
+    target_include_directories(parties_frame_requests_test PRIVATE ../client/include)
+    add_test(NAME parties_frame_requests COMMAND parties_frame_requests_test)
+
     find_path(AMD_AMF_INCLUDE_DIRS "AMF/core/Result.h" REQUIRED)
     add_executable(parties_amf_decode_state_test amf_decode_state_test.cpp)
     target_include_directories(parties_amf_decode_state_test PRIVATE
@@ -281,6 +291,7 @@ if(WIN32 AND BUILD_CLIENT)
     add_executable(parties_window_thumbnail_test
         window_thumbnail_test.cpp
         ../client/src/windows/screen_capture.cpp
+        ../client/src/test_pattern.cpp
     )
     target_include_directories(parties_window_thumbnail_test PRIVATE ../client/include)
     target_link_libraries(parties_window_thumbnail_test PRIVATE
@@ -288,7 +299,8 @@ if(WIN32 AND BUILD_CLIENT)
 
     add_executable(parties_screen_capture_lifecycle_test
         screen_capture_lifecycle_test.cpp
-        ../client/src/windows/screen_capture.cpp)
+        ../client/src/windows/screen_capture.cpp
+        ../client/src/test_pattern.cpp)
     target_include_directories(parties_screen_capture_lifecycle_test PRIVATE ../client/include)
     target_link_libraries(parties_screen_capture_lifecycle_test PRIVATE
         parties_common d3d11 dxgi windowsapp dwmapi gdi32 user32)

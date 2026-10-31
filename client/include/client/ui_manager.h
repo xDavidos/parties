@@ -36,6 +36,9 @@ public:
     bool render_begin();
     void render_body();
     void render_end();
+    // Ends a frame begun with render_begin by presenting the previous frame
+    // again. Returns false, leaving the frame open, when there is none to reuse.
+    bool represent_last_frame();
 
     void on_resize(int width, int height);
     void on_minimize();

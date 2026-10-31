@@ -19,10 +19,13 @@
 namespace parties::client {
 
 struct CaptureTarget {
-    enum class Type { Window, Monitor };
+    enum class Type { Window, Monitor, TestPattern };
     Type type;
     std::string name;
     void* handle = nullptr;
+    uint32_t pattern_width = 0;
+    uint32_t pattern_height = 0;
+    bool pattern_noise = false;
 };
 
 struct CaptureThumbnail {
@@ -84,6 +87,8 @@ public:
 
     ID3D11Device* device() const { return device_.Get(); }
     ID3D11DeviceContext* context() const { return context_.Get(); }
+    // Counter of the test-pattern frame being delivered; valid inside the frame callback.
+    uint32_t test_pattern_counter() const { return test_pattern_counter_.load(std::memory_order_acquire); }
 
     void set_frame_callback(std::function<void(ID3D11Texture2D*, uint32_t, uint32_t)> callback);
 
@@ -101,6 +106,9 @@ private:
     uint32_t height_ = 0;
     uint32_t frame_count_ = 0;
     std::chrono::steady_clock::time_point last_frame_time_{};
+    std::atomic<uint32_t> test_pattern_counter_{0};
+
+    bool start_test_pattern(uint32_t target_fps);
 
     struct Impl;
     Impl* impl_ = nullptr;

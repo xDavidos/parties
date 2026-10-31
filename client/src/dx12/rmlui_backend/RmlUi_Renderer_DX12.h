@@ -465,6 +465,9 @@ public:
 	bool BeginFrame();
 	// Draws the result to the backbuffer and restores OpenGL state.
 	void EndFrame();
+	// Ends a frame begun with nothing recorded by presenting the last composed frame again.
+	// Returns false, leaving the frame active, when no composed frame is retained.
+	bool RepresentLastFrame();
 
 	// Optional, can be used to clear the active framebuffer.
 	void Clear();
@@ -570,6 +573,7 @@ private:
 	void Flush() noexcept;
 	uint64_t Signal(uint32_t frame_index) noexcept;
 	void WaitForFenceValue(uint32_t frame_index);
+	void SubmitAndPresent();
 
 	void Create_Resources_DependentOnSize() noexcept;
 	void Destroy_Resources_DependentOnSize() noexcept;
@@ -659,6 +663,8 @@ private:
 	bool m_is_stencil_equal;
 	bool m_is_use_msaa;
 	bool m_is_viewport_valid;
+	// The primary postprocess framebuffer holds the last composed frame until a resize.
+	bool m_is_last_frame_retained = false;
 	bool m_is_execute_when_end_frame_issued;
 	bool m_is_command_list_user;
 	unsigned char m_msaa_sample_count;

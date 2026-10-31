@@ -8,12 +8,14 @@
 #include <client/rml_elements.h>
 #include <client/stream_audio_capture.h>
 #include <client/context_window_manager.h>
+#include <client/frame_requests.h>
 #include <client/hotkey_binding.h>
 #include <client/win32_power_request.h>
 #include <client/win32_tray.h>
 #include <client/native_video_frame.h>
 #include <client/video_decode_inbox.h>
 #include <client/video_frame_router.h>
+#include <client/verification.h>
 #include <parties/types.h>
 #include <parties/video_common.h>
 
@@ -56,6 +58,8 @@ public:
     App();
     ~App();
 
+    // Call before init(); developer builds only pass non-default options.
+    void set_verification(VerificationOptions options) { verify_ = std::move(options); }
     bool init(HWND hwnd);
     void shutdown();
 
@@ -70,6 +74,7 @@ public:
 
     void defer_resize(int width, int height);
     void defer_dpi(float scale);
+    void request_frame() { frame_requests_.request(); }
 
     // Guards all RmlUi context + data-model access (render thread vs. the
     // message thread's input/tick). Recursive so a modal handler that re-enters
@@ -109,11 +114,14 @@ private:
 
 
     void render_loop();
-    void render_frame();
+    void render_frame(bool counts_toward_fps, bool may_represent);
+    bool has_video_streams();
+    bool update_titlebar(RenderClock::time_point now);
     void sync_video_router();
     VideoFrameRouter::Surfaces video_surfaces();
     void deliver_video_frames(bool grid_visible);
     void render_pip_only();
+    std::string handle_automation(const std::string& request);
 
     HWND hwnd_ = nullptr;
     Win32Tray tray_;
@@ -213,6 +221,9 @@ private:
     int64_t encode_ready_ts_  = 0;
 
     uint32_t encode_fps_ = 60;
+    uint32_t encode_slot_counter_[ENCODE_SLOTS]{};
+    uint32_t encoding_counter_ = 0;
+    bool sharing_test_pattern_ = false;
     std::function<void(const uint8_t*, size_t, bool)> encode_on_encoded_;
 
     std::unique_ptr<StreamAudioCapture> stream_audio_capture_;
@@ -236,6 +247,7 @@ private:
         std::vector<uint8_t> staging_y, staging_u, staging_v;
         uint32_t width = 0, height = 0, y_stride = 0, uv_stride = 0;
         bool nv12 = false;
+        int64_t frame_seq = -1;
 
         std::jthread thread;
     };
@@ -247,6 +259,7 @@ private:
     std::chrono::steady_clock::time_point fps_last_update_{std::chrono::steady_clock::now()};
     std::chrono::steady_clock::time_point last_render_stall_log_{};
     uint32_t suppressed_render_stalls_ = 0;
+
     // Delays sampling the video mailbox until just before the DWM latch the
     // frame would make anyway. Times are QPC ticks.
     struct LatchPacer {
@@ -257,16 +270,21 @@ private:
         double miss_penalty = 0;
 
         ~LatchPacer();
-        void before_sample(bool streams_active);
+        void before_sample(bool streams_active, bool waited_for_present);
         void after_frame();
     };
     LatchPacer latch_pacer_;
+    FrameRequests frame_requests_;
+    RenderClock::time_point next_ui_update_{};
     // Last titlebar strings — SetInnerRML rebuilds the text element (and its
     // render geometry) even for identical content, so skip unchanged updates.
     Rml::String titlebar_fps_last_;
     Rml::String titlebar_ping_last_;
 
     Rml::ElementDocument* doc_ = nullptr;
+    VerificationOptions verify_;
+    VerificationLog verify_log_;
+    AutomationServer automation_;
 };
 
 }

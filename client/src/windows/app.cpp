@@ -17,10 +17,17 @@
 #include <parties/profiler.h>
 #include <parties/log.h>
 #include <parties/thread_scheduling.h>
+#include <parties/version.h>
 
 #include <RmlUi/Core/Factory.h>
 #include <RmlUi/Core/Context.h>
 #include <RmlUi/Core/Element.h>
+#include <RmlUi/Core/ElementDocument.h>
+#include <RmlUi/Core/ElementText.h>
+
+#include <rapidjson/document.h>
+
+#include <format>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -177,7 +184,10 @@ bool App::handle_chat_input(unsigned int msg, WPARAM wParam, LPARAM lParam) {
 }
 
 App::App() = default;
-App::~App() { shutdown(); }
+App::~App() {
+    shutdown();
+    parties::rml::dirty_hook = {};
+}
 
 bool App::handle_tray_message(UINT message, WPARAM w_param, LPARAM l_param) {
     return tray_.handle_message(message, w_param, l_param);
@@ -185,6 +195,7 @@ bool App::handle_tray_message(UINT message, WPARAM w_param, LPARAM l_param) {
 
 void App::on_window_visibility_changed(bool visible) {
     ui_.on_visibility_change(visible);
+    frame_requests_.request();
     if (!visible) {
         std::lock_guard<std::recursive_mutex> lock(ui_mutex_);
         context_windows_.close();
@@ -193,6 +204,12 @@ void App::on_window_visibility_changed(bool visible) {
 
 bool App::init(HWND hwnd) {
     hwnd_ = hwnd;
+    parties::rml::dirty_hook = {
+        [](void* requests) { static_cast<FrameRequests*>(requests)->request(); }, &frame_requests_};
+    if (!verify_.log_path.empty() && verify_log_.open(verify_.log_path)) {
+        verify_log_.write(std::format(R"({{"ev":"start","pid":{},"t":{},"test_pattern":{}}})",
+                                      GetCurrentProcessId(), qpc_100ns(), verify_.test_pattern));
+    }
 
     PlatformBridge bridge;
 
@@ -481,10 +498,16 @@ bool App::init(HWND hwnd) {
     render_running_.store(true, std::memory_order_release);
     render_thread_ = std::thread([this] { render_loop(); });
 
+#ifndef PARTIES_RETAIL
+    if (!verify_.automation_pipe.empty())
+        automation_.start(verify_.automation_pipe);
+#endif
+
     return true;
 }
 
 void App::shutdown() {
+    automation_.stop();
     tray_.shutdown();
     cancel_share_thumbnails();
     if (share_thumbnail_thread_.joinable()) {
@@ -494,6 +517,7 @@ void App::shutdown() {
     }
 
     render_running_.store(false, std::memory_order_release);
+    frame_requests_.request();
     if (render_thread_.joinable())
         render_thread_.join();
 
@@ -644,8 +668,34 @@ void App::render_loop() {
             }
             continue;
         }
-        render_frame();
+        const auto now = RenderClock::now();
+        const bool titlebar_changed = update_titlebar(now);
+        const bool requested = frame_requests_.take();
+        bool always_dirty = pip_host_ && pip_host_->visible();
+        if (!always_dirty) {
+            std::lock_guard<std::recursive_mutex> lock(ui_mutex_);
+            always_dirty = context_windows_.is_open();
+        }
+        const auto deadline = (std::min)(next_ui_update_, fps_last_update_ + std::chrono::seconds(1));
+        const auto wait = idle_wait_ms(requested || always_dirty || titlebar_changed, now, deadline);
+        // DWM flips an isolated present a varying number of refreshes late, so
+        // while video plays the window presents every refresh, reusing the last
+        // frame when nothing changed.
+        if (wait && !has_video_streams()) {
+            {
+                std::lock_guard<std::recursive_mutex> lock(ui_mutex_);
+                sync_video_router();
+            }
+            frame_requests_.wait(*wait);
+            continue;
+        }
+        render_frame(requested || always_dirty || now >= next_ui_update_, wait.has_value());
     }
+}
+
+bool App::has_video_streams() {
+    std::lock_guard<std::mutex> slock(streams_mutex_);
+    return !video_streams_.empty();
 }
 
 VideoFrameRouter::Surfaces App::video_surfaces() {
@@ -657,6 +707,7 @@ VideoFrameRouter::Surfaces App::video_surfaces() {
 
 void App::sync_video_router() {
     const auto cleared = video_router_.sync(core_.pip_.stream(), video_surfaces());
+    if (cleared.grid || cleared.pip) frame_requests_.request();
     if (cleared.grid) ui_.renderer()->ReleaseRetiredResourcesBetweenFrames();
     if (cleared.pip && pip_host_ && pip_host_->renderer())
         pip_host_->renderer()->ReleaseRetiredResourcesBetweenFrames();
@@ -671,6 +722,7 @@ void App::deliver_video_frames(bool grid_visible) {
         std::vector<uint8_t> y, u, v;
         uint32_t w, h, ys, uvs;
         bool nv12;
+        int64_t seq;
     };
     const UserId pip_stream = video_router_.pip_stream();
     std::vector<PendingUpload> uploads;
@@ -689,6 +741,7 @@ void App::deliver_video_frames(bool grid_visible) {
             up.w = s->width; up.h = s->height;
             up.ys = s->y_stride; up.uvs = s->uv_stride;
             up.nv12 = s->nv12;
+            up.seq = s->frame_seq;
             s->new_frame.store(false, std::memory_order_relaxed);
             uploads.push_back(std::move(up));
         }
@@ -699,6 +752,10 @@ void App::deliver_video_frames(bool grid_visible) {
         if ((!up.native && up.y.empty()) || up.w == 0 || up.h == 0) continue;
         core_.stream_frame_count_.fetch_add(1, std::memory_order_relaxed);
         VideoElement* ve = video_router_.target(up.sharer, surfaces);
+        if (verify_log_) {
+            verify_log_.write(std::format(R"({{"ev":"upload","sharer":{},"seq":{},"surface":{},"t":{}}})",
+                                          up.sharer, up.seq, ve != nullptr, qpc_100ns()));
+        }
         if (!ve) continue;
         if (up.native)
             ve->UpdateNativeVideoFrame(std::move(*up.native));
@@ -739,7 +796,7 @@ App::LatchPacer::~LatchPacer() {
     if (timer) CloseHandle(timer);
 }
 
-void App::LatchPacer::before_sample(bool streams_active) {
+void App::LatchPacer::before_sample(bool streams_active, bool waited_for_present) {
     const int64_t now = qpc_ticks();
     const int64_t previous_target = std::exchange(target_vblank, 0);
     sample = 0;
@@ -755,7 +812,9 @@ void App::LatchPacer::before_sample(bool streams_active) {
 
     // The latency waitable releases this frame once DWM latched the previous
     // one, so waking about a refresh after its target means that frame missed.
-    if (previous_target != 0) {
+    // After skipped refreshes the waitable was already signalled, so a pass
+    // that did not block on it says nothing about the previous frame.
+    if (previous_target != 0 && waited_for_present) {
         const int64_t wake = now - previous_target;
         if (wake > period / 2 && wake < period * 3 / 2)
             miss_penalty = (std::min)(miss_penalty + ms / 2, static_cast<double>(period));
@@ -799,7 +858,39 @@ static Rml::Element* find_share_thumbnail(Rml::ElementDocument* document, int ta
     return document->GetElementById(element_id);
 }
 
-void App::render_frame() {
+// The fps label counts main-window presents, leaving out presents made only
+// to show a new label, so an idle window settles on "0 fps".
+bool App::update_titlebar(RenderClock::time_point now) {
+    if (now - fps_last_update_ < std::chrono::seconds(1)) return false;
+    const float elapsed = std::chrono::duration<float>(now - fps_last_update_).count();
+    const int fps = static_cast<int>(fps_frame_count_ / elapsed);
+    fps_frame_count_ = 0;
+    fps_last_update_ = now;
+    if (!doc_) return false;
+    bool changed = false;
+    std::lock_guard<std::recursive_mutex> lock(ui_mutex_);
+    Rml::String fps_text(std::to_string(fps) + " fps");
+    if (fps_text != titlebar_fps_last_) {
+        if (auto* elem = doc_->GetElementById("titlebar-fps")) {
+            elem->SetInnerRML(fps_text);
+            titlebar_fps_last_ = std::move(fps_text);
+            changed = true;
+        }
+    }
+    Rml::String ping_text = core_.model_.is_connected
+        ? Rml::String(std::to_string(core_.model_.ping_ms.get()) + " ms")
+        : Rml::String();
+    if (ping_text != titlebar_ping_last_) {
+        if (auto* elem = doc_->GetElementById("titlebar-ping")) {
+            elem->SetInnerRML(ping_text);
+            titlebar_ping_last_ = std::move(ping_text);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+void App::render_frame(bool counts_toward_fps, bool may_represent) {
     ZoneScopedN("App::render_frame");
 
     const auto frame_start = std::chrono::steady_clock::now();
@@ -809,48 +900,28 @@ void App::render_frame() {
         sync_video_router();
     }
 
+    const int64_t begin_start = qpc_ticks();
     if (!ui_.render_begin()) {
+        frame_requests_.request();
         Sleep(16);
         return;
     }
-    bool streams_active;
-    {
-        std::lock_guard<std::mutex> slock(streams_mutex_);
-        streams_active = !video_streams_.empty();
+    const bool waited_for_present = qpc_ticks() - begin_start > qpc_frequency() / 4000;
+    latch_pacer_.before_sample(has_video_streams(), waited_for_present);
+    if (may_represent) {
+        if (frame_requests_.take()) {
+            counts_toward_fps = true;
+        } else if (ui_.represent_last_frame()) {
+            return;
+        }
     }
-    latch_pacer_.before_sample(streams_active);
     const auto begin_complete = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::recursive_mutex> lock(ui_mutex_);
 
         deliver_video_frames(true);
 
-        fps_frame_count_++;
-        auto now_fps = std::chrono::steady_clock::now();
-        float elapsed_fps = std::chrono::duration<float>(now_fps - fps_last_update_).count();
-        if (elapsed_fps >= 1.0f) {
-            int fps = static_cast<int>(fps_frame_count_ / elapsed_fps);
-            fps_frame_count_ = 0;
-            fps_last_update_ = now_fps;
-            if (doc_) {
-                Rml::String fps_text(std::to_string(fps) + " fps");
-                if (fps_text != titlebar_fps_last_) {
-                    if (auto* elem = doc_->GetElementById("titlebar-fps")) {
-                        elem->SetInnerRML(fps_text);
-                        titlebar_fps_last_ = std::move(fps_text);
-                    }
-                }
-                Rml::String ping_text = core_.model_.is_connected
-                    ? Rml::String(std::to_string(core_.model_.ping_ms.get()) + " ms")
-                    : Rml::String();
-                if (ping_text != titlebar_ping_last_) {
-                    if (auto* elem = doc_->GetElementById("titlebar-ping")) {
-                        elem->SetInnerRML(ping_text);
-                        titlebar_ping_last_ = std::move(ping_text);
-                    }
-                }
-            }
-        }
+        if (counts_toward_fps) fps_frame_count_++;
 
         ui_.update();
 
@@ -877,15 +948,16 @@ void App::render_frame() {
                     remaining.push_back(std::move(thumbnail));
                 }
             }
-            if (!remaining.empty()) {
-                std::lock_guard lock(share_thumbnail_mutex_);
-                for (auto& thumbnail : remaining)
-                    pending_share_thumbnails_.push_back(std::move(thumbnail));
-            }
+            std::lock_guard lock(share_thumbnail_mutex_);
+            for (auto& thumbnail : remaining)
+                pending_share_thumbnails_.push_back(std::move(thumbnail));
+            if (!pending_share_thumbnails_.empty()) frame_requests_.request();
         } else if (!core_.model_.router.is(DocumentRoute::SharePicker)) {
             cancel_share_thumbnails();
         }
         ui_.render_body();
+        if (auto* context = ui_.context())
+            next_ui_update_ = ui_update_deadline(RenderClock::now(), context->GetNextUpdateDelay());
     }
     const auto body_complete = std::chrono::steady_clock::now();
     ui_.render_end();
@@ -926,6 +998,7 @@ void App::tick_message_thread() {
 
     std::lock_guard<std::recursive_mutex> lock(ui_mutex_);
 
+    automation_.pump([this](const std::string& request) { return handle_automation(request); });
     poll_screen_share_start();
     // WGC can miss/delay Closed, particularly after asynchronous startup.
     // Native source liveness also catches application exit without a new frame.
@@ -955,11 +1028,13 @@ void App::defer_resize(int width, int height) {
     pending_w_.store(width, std::memory_order_relaxed);
     pending_h_.store(height, std::memory_order_relaxed);
     resize_pending_.store(true, std::memory_order_release);
+    frame_requests_.request();
 }
 
 void App::defer_dpi(float scale) {
     pending_dpi_.store(scale, std::memory_order_relaxed);
     dpi_pending_.store(true, std::memory_order_release);
+    frame_requests_.request();
 }
 
 void App::show_share_picker(bool audio_only) {
@@ -992,6 +1067,16 @@ void App::show_share_picker(bool audio_only) {
     core_.model_.selected_share_target = -1;
     core_.model_.share_picker_mode = audio_only ? SharePickerMode::ApplicationAudio : SharePickerMode::Screen;
 
+    if (!audio_only && verify_.test_pattern) {
+        const int idx = static_cast<int>(capture_targets_.size());
+        ShareTarget st; st.name = "Test pattern"; st.index = idx; st.is_monitor = true;
+        st.element_id = "share-thumbnail-" + Rml::ToString(idx);
+        monitor_targets.push_back(std::move(st));
+        capture_targets_.push_back({.type = CaptureTarget::Type::TestPattern, .name = "Test pattern",
+                                    .pattern_width = verify_.pattern_width,
+                                    .pattern_height = verify_.pattern_height,
+                                    .pattern_noise = verify_.pattern_noise});
+    }
     if (!audio_only) {
         for (auto& m : picker->enumerate_monitors()) {
             int idx = static_cast<int>(capture_targets_.size());
@@ -1094,6 +1179,7 @@ void App::share_thumbnail_worker(std::stop_token stop_token) {
             if (generation != share_thumbnail_generation_)
                 break;
             pending_share_thumbnails_.push_back(std::move(pending));
+            frame_requests_.request();
         }
 
         {
@@ -1211,6 +1297,7 @@ void App::start_screen_share(int target_index) {
     }
 
     encode_fps_ = frames_per_second(core_.model_.share_fps.get());
+    sharing_test_pattern_ = target.type == CaptureTarget::Type::TestPattern;
 
     auto job = std::make_shared<ScreenShareStartJob>();
     job->capture = capture_;
@@ -1316,6 +1403,12 @@ void App::finish_screen_share_start(StreamAudioSource audio_source) {
         const VideoCodecId codec = encoder_->codec();
 
         const auto r = core_.send_video_frame(data, len, keyframe, w, h, codec);
+        if (verify_log_) {
+            verify_log_.write(std::format(
+                R"({{"ev":"sent","counter":{},"seq":{},"bytes":{},"key":{},"sent":{},"w":{},"h":{},"t":{}}})",
+                sharing_test_pattern_ ? static_cast<int64_t>(encoding_counter_) : -1, r.frame_seq, len,
+                keyframe, r.sent, w, h, qpc_100ns()));
+        }
         if (keyframe)
             LOG_INFO("keyframe fn={} size={} sent={}", r.frame_seq, len, r.sent ? 1 : 0);
 
@@ -1348,12 +1441,19 @@ void App::finish_screen_share_start(StreamAudioSource audio_source) {
 
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
-        if (now.QuadPart < next_capture_qpc_) return;
+        const uint32_t pattern_counter = sharing_test_pattern_ ? capture_->test_pattern_counter() : 0;
+        const auto log_pattern = [&](std::string_view outcome) {
+            if (!verify_log_ || !sharing_test_pattern_) return;
+            verify_log_.write(std::format(R"({{"ev":"pattern","counter":{},"outcome":"{}","t":{}}})",
+                                          pattern_counter, outcome, qpc_100ns()));
+        };
+        if (now.QuadPart < next_capture_qpc_) { log_pattern("paced"); return; }
         next_capture_qpc_ += capture_interval_qpc_;
         if (next_capture_qpc_ < now.QuadPart - capture_interval_qpc_)
             next_capture_qpc_ = now.QuadPart + capture_interval_qpc_;
 
-        if (!core_.video_accounting().admit_frame()) return;
+        if (!core_.video_accounting().admit_frame()) { log_pattern("admission"); return; }
+        log_pattern("accepted");
 
         uint32_t cap_w = (desc.Width  + 1) & ~1u;
         uint32_t cap_h = (desc.Height + 1) & ~1u;
@@ -1458,6 +1558,7 @@ void App::finish_screen_share_start(StreamAudioSource audio_source) {
         {
             std::lock_guard<std::mutex> lock(encode_mutex_);
             encode_ready_slot_ = ws;
+            encode_slot_counter_[ws] = pattern_counter;
             encode_ready_ts_ = (now.QuadPart - capture_start_qpc_) * 10'000'000LL / qpc_frequency_;
             for (int i = 0; i < ENCODE_SLOTS; i++) {
                 if (i != encode_ready_slot_ && i != encode_active_slot_) { encode_write_slot_ = i; break; }
@@ -1466,8 +1567,10 @@ void App::finish_screen_share_start(StreamAudioSource audio_source) {
         encode_cv_.notify_one();
     });
 
-    stream_audio_capture_ = std::make_unique<StreamAudioCapture>();
-    if (stream_audio_capture_->init(audio_source)) {
+    // The test pattern has no sound of its own; loopback would echo the viewer.
+    if (!sharing_test_pattern_)
+        stream_audio_capture_ = std::make_unique<StreamAudioCapture>();
+    if (stream_audio_capture_ && stream_audio_capture_->init(audio_source)) {
         stream_audio_capture_->on_encoded_frame = [this](const uint8_t* data, size_t len) {
             if (!sharing_screen_ || !core_.authenticated_) return;
             std::vector<uint8_t> pkt(1 + len);
@@ -1476,7 +1579,7 @@ void App::finish_screen_share_start(StreamAudioSource audio_source) {
             core_.net_.send_data(pkt.data(), pkt.size());
         };
         stream_audio_capture_->start();
-    } else {
+    } else if (stream_audio_capture_) {
         LOG_WARN("Loopback audio capture unavailable");
         stream_audio_capture_.reset();
     }
@@ -1532,6 +1635,13 @@ static int64_t steady_now_us() {
 void App::enqueue_decode_work(UserId sharer_id, ParsedVideoFrame&& frame) {
     ZoneScopedN("App::enqueue_decode_work");
     if (frame.encoded().empty()) return;
+    if (verify_log_) {
+        const VideoFrameHeader& header = frame.header();
+        verify_log_.write(std::format(
+            R"({{"ev":"recv","sharer":{},"seq":{},"bytes":{},"key":{},"w":{},"h":{},"t":{}}})",
+            sharer_id, header.frame_seq, frame.encoded().size(), header.keyframe, header.width,
+            header.height, qpc_100ns()));
+    }
     KeyframeRecovery recovery = KeyframeRecovery::None;
     {
         std::lock_guard<std::mutex> lock(streams_mutex_);
@@ -1580,6 +1690,7 @@ void App::encode_loop() {
             if (!encode_running_.load(std::memory_order_relaxed)) break;
             if (encode_ready_slot_ < 0) continue;
             slot = encode_ready_slot_; ts = encode_ready_ts_;
+            encoding_counter_ = encode_slot_counter_[slot];
             encode_ready_slot_ = -1; encode_active_slot_ = slot;
         }
 
@@ -1602,6 +1713,12 @@ void App::encode_loop() {
             }
             enc->on_encoded = encode_on_encoded_;
             encoder_ = std::move(enc);
+            if (verify_log_) {
+                verify_log_.write(std::format(
+                    R"({{"ev":"encoder","backend":"{}","codec":{},"w":{},"h":{},"fps":{},"bitrate_bps":{},"t":{}}})",
+                    json_escape(encoder_->backend_name()), static_cast<int>(encoder_->codec()), w, h,
+                    encode_fps_, bitrate_bps, qpc_100ns()));
+            }
 
             if (sharing_screen_) {
                 BinaryWriter upd;
@@ -1686,6 +1803,11 @@ void App::on_video_decoded(VideoStream* s, const encdec::DecodedFrame& frame) {
     s->decoded_since_init = true;
     if (s->suppress_output) return;
     uint32_t w = frame.width, h = frame.height;
+    if (verify_log_) {
+        verify_log_.write(std::format(R"({{"ev":"output","sharer":{},"seq":{},"native":{},"t":{}}})",
+                                      s->sharer_id, frame.timestamp,
+                                      frame.native_d3d12_resource != nullptr, qpc_100ns()));
+    }
 
     if (frame.native_d3d12_resource && frame.native_owner) {
         std::lock_guard<std::mutex> lock(s->frame_mutex);
@@ -1712,7 +1834,9 @@ void App::on_video_decoded(VideoStream* s, const encdec::DecodedFrame& frame) {
         s->y_stride = 0;
         s->uv_stride = 0;
         s->nv12 = true;
+        s->frame_seq = frame.timestamp;
         s->new_frame.store(true, std::memory_order_release);
+        frame_requests_.request();
         return;
     }
 
@@ -1734,8 +1858,10 @@ void App::on_video_decoded(VideoStream* s, const encdec::DecodedFrame& frame) {
         s->width = w; s->height = h;
         s->y_stride = frame.y_stride; s->uv_stride = frame.uv_stride;
         s->nv12 = frame.nv12;
+        s->frame_seq = frame.timestamp;
         s->new_frame.store(true, std::memory_order_release);
     }
+    frame_requests_.request();
 }
 
 void App::decode_loop(std::stop_token stop, VideoStream* s) {
@@ -1823,11 +1949,24 @@ void App::decode_loop(std::stop_token stop, VideoStream* s) {
                     break;
                 }
                 LOG_INFO("Decoder reinitialized: {}",  s->decoder->backend_name());
+                if (verify_log_) {
+                    verify_log_.write(std::format(
+                        R"({{"ev":"decoder","sharer":{},"backend":"{}","codec":{},"w":{},"h":{},"t":{}}})",
+                        s->sharer_id, json_escape(s->decoder->backend_name()),
+                        static_cast<int>(header.codec), header.width, header.height, qpc_100ns()));
+                }
                 s->decoder->on_decoded = [this, s](const DecodedFrame& f) { on_video_decoded(s, f); };
             }
             s->suppress_output = i + 1 < frames.size();
             const auto encoded = work.frame.encoded();
+            const int64_t decode_start = verify_log_ ? qpc_100ns() : 0;
             const bool decoded = s->decoder->decode(encoded.data(), encoded.size(), header.frame_seq);
+            if (verify_log_) {
+                verify_log_.write(std::format(
+                    R"({{"ev":"decode","sharer":{},"seq":{},"bytes":{},"key":{},"shown":{},"ok":{},"t0":{},"t1":{}}})",
+                    s->sharer_id, header.frame_seq, encoded.size(), header.keyframe,
+                    !s->suppress_output, decoded, decode_start, qpc_100ns()));
+            }
             s->suppress_output = false;
             if (!decoded) {
                 if (stop.stop_requested()) break;
@@ -1838,6 +1977,200 @@ void App::decode_loop(std::stop_token stop, VideoStream* s) {
                 s->inbox.on_keyframe_decoded(steady_now_us(), work.recovery_keyframe);
         }
     }
+}
+
+namespace {
+
+void collect_text(Rml::Element* element, std::string& out) {
+    if (auto* text = dynamic_cast<Rml::ElementText*>(element); text && !text->GetText().empty()) {
+        if (!out.empty()) out += ' ';
+        out += text->GetText();
+    }
+    for (int i = 0; i < element->GetNumChildren(); ++i)
+        collect_text(element->GetChild(i), out);
+}
+
+std::string element_text(Rml::Element* element) {
+    std::string text;
+    collect_text(element, text);
+    return text;
+}
+
+bool contains_element(Rml::Element* ancestor, Rml::Element* element) {
+    for (; element; element = element->GetParentNode())
+        if (element == ancestor) return true;
+    return false;
+}
+
+std::string box_json(Rml::Element* element, Rml::BoxArea area) {
+    const Rml::Vector2f offset = element->GetAbsoluteOffset(area);
+    const Rml::Vector2f size = element->GetBox().GetSize(area);
+    return std::format(R"({{"x":{:.1f},"y":{:.1f},"w":{:.1f},"h":{:.1f}}})", offset.x, offset.y, size.x, size.y);
+}
+
+bool is_shown(Rml::Element* element) {
+    const Rml::Vector2f size = element->GetBox().GetSize(Rml::BoxArea::Border);
+    return element->IsVisible(true) && size.x > 0 && size.y > 0;
+}
+
+std::string describe(Rml::Element* element) {
+    if (!element) return "nothing";
+    std::string name = "<" + element->GetTagName() + ">";
+    if (!element->GetId().empty()) name += "#" + element->GetId();
+    const std::string classes = element->GetClassNames();
+    if (!classes.empty()) name += " ." + classes;
+    return name;
+}
+
+}
+
+std::string App::handle_automation(const std::string& request) {
+    const auto failure = [](std::string_view message) {
+        return std::format(R"({{"ok":false,"error":"{}"}})", json_escape(message));
+    };
+    rapidjson::Document json;
+    if (json.Parse(request.c_str()).HasParseError() || !json.IsObject() ||
+        !json.HasMember("cmd") || !json["cmd"].IsString())
+        return failure("expected a JSON object with a string \"cmd\"");
+    const auto string_field = [&json](const char* key) -> std::string {
+        const auto it = json.FindMember(key);
+        return it != json.MemberEnd() && it->value.IsString() ? it->value.GetString() : "";
+    };
+    const std::string cmd = json["cmd"].GetString();
+
+    if (cmd == "ping") {
+        size_t streams = 0;
+        {
+            std::lock_guard lock(streams_mutex_);
+            streams = video_streams_.size();
+        }
+        return std::format(
+            R"({{"ok":true,"pid":{},"version":"{}","test_pattern":{},"verify_log":"{}","authenticated":{},"channel":{},"sharing":{},"streams":{}}})",
+            GetCurrentProcessId(), parties::APP_VERSION, verify_.test_pattern,
+            json_escape(verify_.log_path.string()), core_.authenticated_, core_.current_channel_,
+            sharing_screen_.load(), streams);
+    }
+    if (cmd == "window") {
+        RECT client{};
+        GetClientRect(hwnd_, &client);
+        return std::format(R"({{"ok":true,"hwnd":"0x{:x}","width":{},"height":{},"dpi":{}}})",
+                           reinterpret_cast<uintptr_t>(hwnd_), client.right, client.bottom,
+                           GetDpiForWindow(hwnd_));
+    }
+    if (cmd == "quit") {
+        // WM_CLOSE only hides to the tray; quit the message loop like the tray's Exit.
+        PostQuitMessage(0);
+        return R"({"ok":true})";
+    }
+
+    Rml::Context* context = ui_.context();
+    const std::string selector = string_field("selector");
+    const std::string text = string_field("text");
+    if (!context || selector.empty()) return failure("this command needs a \"selector\"");
+    std::vector<Rml::Element*> matches;
+    for (int d = 0; d < context->GetNumDocuments(); ++d) {
+        Rml::ElementList list;
+        context->GetDocument(d)->QuerySelectorAll(list, selector);
+        for (Rml::Element* element : list)
+            if (text.empty() || element_text(element).find(text) != std::string::npos)
+                matches.push_back(element);
+    }
+
+    if (cmd == "query") {
+        std::string elements;
+        for (size_t i = 0; i < matches.size() && i < 50; ++i) {
+            Rml::Element* element = matches[i];
+            if (!elements.empty()) elements += ',';
+            elements += std::format(
+                R"({{"tag":"{}","id":"{}","class":"{}","text":"{}","value":"{}","visible":{},"rect":{},"content":{}}})",
+                json_escape(element->GetTagName()), json_escape(element->GetId()),
+                json_escape(element->GetClassNames()), json_escape(element_text(element)),
+                json_escape(element->GetAttribute<Rml::String>("value", "")), is_shown(element),
+                box_json(element, Rml::BoxArea::Border), box_json(element, Rml::BoxArea::Content));
+        }
+        return std::format(R"({{"ok":true,"count":{},"elements":[{}]}})", matches.size(), elements);
+    }
+
+    if (cmd == "key") {
+        static constexpr std::pair<std::string_view, WPARAM> kKeys[] = {
+            {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT}, {"UP", VK_UP}, {"DOWN", VK_DOWN},
+            {"HOME", VK_HOME}, {"END", VK_END}, {"ESCAPE", VK_ESCAPE}, {"RETURN", VK_RETURN},
+        };
+        const std::string key = string_field("key");
+        const auto found = std::ranges::find(kKeys, key, &std::pair<std::string_view, WPARAM>::first);
+        if (found == std::end(kKeys)) return failure("unknown key \"" + key + "\"");
+        SendMessageW(hwnd_, WM_KEYDOWN, found->second, 0);
+        SendMessageW(hwnd_, WM_KEYUP, found->second, 0);
+        return R"({"ok":true})";
+    }
+    if (cmd != "click" && cmd != "type" && cmd != "drag") return failure("unknown cmd \"" + cmd + "\"");
+    const auto shown = std::ranges::find_if(matches, is_shown);
+    if (shown == matches.end())
+        return failure(std::format("no visible element matches {} ({} hidden)", selector, matches.size()));
+    Rml::Element* target = *shown;
+
+    // Real window messages through WndProc, aimed at the element's centre after
+    // checking that the element, not an overlay, is what the pointer would hit.
+    const Rml::Vector2f offset = target->GetAbsoluteOffset(Rml::BoxArea::Border);
+    const Rml::Vector2f size = target->GetBox().GetSize(Rml::BoxArea::Border);
+    int x = static_cast<int>(offset.x + size.x / 2);
+    const int y = static_cast<int>(offset.y + size.y / 2);
+    if (cmd == "drag") {
+        // Press on a range input's thumb (its current value along the content
+        // box), move to fraction "to" of the track, and release.
+        const auto to_it = json.FindMember("to");
+        if (to_it == json.MemberEnd() || !to_it->value.IsNumber()) return failure("drag needs a numeric \"to\" in [0,1]");
+        const float min = target->GetAttribute<float>("min", 0.0f);
+        const float max = target->GetAttribute<float>("max", 1.0f);
+        const float value = target->GetAttribute<float>("value", min);
+        const Rml::Vector2f content = target->GetAbsoluteOffset(Rml::BoxArea::Content);
+        const Rml::Vector2f track = target->GetBox().GetSize(Rml::BoxArea::Content);
+        const float from = max > min ? (value - min) / (max - min) : 0.0f;
+        const float to = std::clamp(static_cast<float>(to_it->value.GetDouble()), 0.0f, 1.0f);
+        x = static_cast<int>(content.x + from * track.x);
+        const int to_x = static_cast<int>(content.x + to * track.x);
+        Rml::Element* pressed = context->GetElementAtPoint({static_cast<float>(x), static_cast<float>(y)});
+        if (!contains_element(target, pressed))
+            return failure(std::format("thumb at {},{} is covered by {}", x, y, describe(pressed)));
+        SendMessageW(hwnd_, WM_MOUSEMOVE, 0, MAKELPARAM(x, y));
+        SendMessageW(hwnd_, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+        for (int step = 1; step <= 8; ++step)
+            SendMessageW(hwnd_, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x + (to_x - x) * step / 8, y));
+        SendMessageW(hwnd_, WM_LBUTTONUP, 0, MAKELPARAM(to_x, y));
+        return std::format(R"({{"ok":true,"dragged":"{}","from_x":{},"to_x":{},"value":"{}"}})",
+                           json_escape(describe(target)), x, to_x,
+                           json_escape(target->GetAttribute<Rml::String>("value", "")));
+    }
+    Rml::Element* hit = context->GetElementAtPoint({static_cast<float>(x), static_cast<float>(y)});
+    if (!contains_element(target, hit))
+        return failure(std::format("point {},{} over {} is covered by {}", x, y, describe(target), describe(hit)));
+    const auto button_it = json.FindMember("button");
+    const bool right = button_it != json.MemberEnd() && button_it->value.IsInt() && button_it->value.GetInt() == 1;
+    const LPARAM point = MAKELPARAM(x, y);
+    SendMessageW(hwnd_, WM_MOUSEMOVE, 0, point);
+    SendMessageW(hwnd_, right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN, right ? MK_RBUTTON : MK_LBUTTON, point);
+    SendMessageW(hwnd_, right ? WM_RBUTTONUP : WM_LBUTTONUP, 0, point);
+
+    if (cmd == "click")
+        return std::format(R"({{"ok":true,"clicked":"{}","x":{},"y":{}}})", json_escape(describe(target)), x, y);
+
+    const std::string value = string_field("value");
+    const std::string current = target->GetAttribute<Rml::String>("value", "");
+    const size_t current_chars = static_cast<size_t>(std::ranges::count_if(
+        current, [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; }));
+    SendMessageW(hwnd_, WM_KEYDOWN, VK_END, 0);
+    SendMessageW(hwnd_, WM_KEYUP, VK_END, 0);
+    for (size_t i = 0; i < current_chars; ++i) {
+        SendMessageW(hwnd_, WM_KEYDOWN, VK_BACK, 0);
+        SendMessageW(hwnd_, WM_KEYUP, VK_BACK, 0);
+    }
+    const int wide_length = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    std::wstring wide(static_cast<size_t>(wide_length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), wide.data(), wide_length);
+    for (const wchar_t c : wide)
+        SendMessageW(hwnd_, WM_CHAR, c, 0);
+    return std::format(R"({{"ok":true,"typed":"{}","value":"{}"}})", json_escape(describe(target)),
+                       json_escape(target->GetAttribute<Rml::String>("value", "")));
 }
 
 }

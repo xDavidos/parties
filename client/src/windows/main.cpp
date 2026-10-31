@@ -2,6 +2,7 @@
 #include <client/auto_updater.h>
 #include <client/window_action.h>
 #include <client/win32_single_instance.h>
+#include <client/verification.h>
 #include <parties/version.h>
 #include <parties/process_services.h>
 #include <parties/profiler.h>
@@ -217,6 +218,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (app) {
                 std::lock_guard<std::recursive_mutex> lock(app->ui_mutex());
                 Rml::Debugger::SetVisible(!Rml::Debugger::IsVisible());
+                app->request_frame();
             }
             return 0;
         }
@@ -233,6 +235,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     if (app && ui && ui->context()) {
         std::lock_guard<std::recursive_mutex> lock(app->ui_mutex());
+        // Requested under the lock: the render thread reads the UI only while
+        // holding it, so it cannot render before this message is applied.
+        app->request_frame();
         if (app->handle_chat_input(msg, wParam, lParam))
             return 0;
         bool propagating = RmlWin32::WindowProcedure(
@@ -268,6 +273,13 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--allow-multiple-instances") == 0)
             allow_multiple_instances = true;
+    }
+#endif
+    VerificationOptions verification;
+#ifndef PARTIES_RETAIL
+    if (const auto error = parse_verification_options(argc, argv, verification)) {
+        std::fprintf(stderr, "%s\n", error->c_str());
+        return 2;
     }
 #endif
     const wchar_t* window_class = allow_multiple_instances
@@ -334,6 +346,7 @@ int main(int argc, char* argv[]) {
     DwmExtendFrameIntoClientArea(hwnd, &margins);
 
     App app;
+    app.set_verification(std::move(verification));
     SetPropW(hwnd, L"App", &app);
 
     if (!app.init(hwnd)) {
