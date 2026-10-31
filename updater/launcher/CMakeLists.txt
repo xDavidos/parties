@@ -50,3 +50,34 @@ endif()
 
 add_executable(PartiesLauncher WIN32 src/main.cpp)
 target_link_libraries(PartiesLauncher PRIVATE parties_launcher_shell)
+
+# PartiesSetup.exe: PartiesLauncher.exe packed with a payload directory
+# (manifest.json, Parties.exe and the build's files, see setup_payload.h).
+# Not part of "all"; build it with --target PartiesSetup.
+set(PARTIES_SETUP_PAYLOAD_DIR "" CACHE PATH
+    "Payload directory for PartiesSetup.exe. Empty: testing builds stage this build's own executables.")
+set(setup_exe "${CMAKE_CURRENT_BINARY_DIR}/PartiesSetup.exe")
+if(PARTIES_SETUP_PAYLOAD_DIR)
+    set(setup_payload "${PARTIES_SETUP_PAYLOAD_DIR}")
+    set(setup_payload_depends "")
+elseif(PARTIES_UPDATE_TESTING AND BUILD_CLIENT)
+    set(setup_payload "${CMAKE_CURRENT_BINARY_DIR}/setup-payload")
+    set(setup_payload_depends "${setup_payload}/manifest.json")
+    # The e2e harness key (src/testing.cpp), which only testing launchers trust.
+    set(harness_key f769e71268cc70210831656bcc920641326a5bd43fe4a015881f3515a8f908a8)
+    add_custom_command(OUTPUT "${setup_payload}/manifest.json"
+        COMMAND ${CMAKE_COMMAND} -DSTUB=$<TARGET_FILE:parties_boot_stub> -DLAUNCHER=$<TARGET_FILE:PartiesLauncher>
+            -DCLIENT=$<TARGET_FILE:parties_client> -DTOOL=$<TARGET_FILE:parties_manifest_tool>
+            -DKEY_HEX=${harness_key} -DOUT=${setup_payload}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/stage_setup_payload.cmake
+        DEPENDS PartiesLauncher parties_boot_stub parties_client parties_manifest_tool
+            ${CMAKE_CURRENT_SOURCE_DIR}/stage_setup_payload.cmake
+        VERBATIM)
+endif()
+if(DEFINED setup_payload)
+    add_custom_command(OUTPUT "${setup_exe}"
+        COMMAND $<TARGET_FILE:PartiesLauncher> --pack=${setup_payload} --out=${setup_exe}
+        DEPENDS PartiesLauncher ${setup_payload_depends}
+        VERBATIM)
+    add_custom_target(PartiesSetup DEPENDS "${setup_exe}")
+endif()
