@@ -34,7 +34,7 @@ struct LegacyHints {
 
 // Every folder a portable copy may keep parties_client.db in, in search
 // order: the working directory, the old binary's folder, this exe's folder,
-// the folders the Start menu and Desktop Parties.lnk start from, and the
+// the folders of links to a portable copy (portable_shortcut_dirs), and the
 // folders of running portable copies. Read before setup rewrites the Start
 // menu shortcut. Needs COM on the calling thread.
 std::vector<fs::path> legacy_dirs(const LegacyHints& hints);

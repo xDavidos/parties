@@ -56,7 +56,7 @@ std::vector<fs::path> legacy_dirs(const LegacyHints& hints) {
     std::vector<fs::path> dirs{hints.working_dir};
     if (hints.old) dirs.push_back(hints.old->path.parent_path());
     dirs.push_back(hints.self_dir);
-    for (const fs::path& target : parties_shortcut_targets()) dirs.push_back(target.parent_path());
+    for (const fs::path& dir : portable_shortcut_dirs()) dirs.push_back(dir);
     for (const fs::path& dir : portable_process_dirs()) dirs.push_back(dir);
     std::vector<fs::path> unique;
     for (const fs::path& dir : dirs) {
