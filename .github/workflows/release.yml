@@ -640,3 +640,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$GITHUB_REF_NAME" "PartiesSetup-$VERSION.exe" -R "$GITHUB_REPOSITORY" --clobber
+
+      # The legacy in-app updater downloads this zip from /releases/latest,
+      # extracts it with Expand-Archive, requires a valid Authenticode
+      # signature on its parties_client.exe and starts that with
+      # --update-cleanup. Putting the signed setup there under that name moves
+      # portable users onto the installer; promote.yml still decides when they
+      # see the release. Without a signed setup this step does not run, and the
+      # zip keeps the client that create-release put in it.
+      - name: Replace the legacy zip's client with the setup
+        if: env.SIGNED == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force legacy-zip | Out-Null
+          Copy-Item "PartiesSetup-$env:VERSION.exe" legacy-zip/parties_client.exe
+          $zip = "parties-client-windows-$env:GITHUB_REF_NAME.zip"
+          Compress-Archive -Path legacy-zip/parties_client.exe -DestinationPath $zip -Force
+          Expand-Archive $zip legacy-zip-check -Force
+          $sig = Get-AuthenticodeSignature legacy-zip-check/parties_client.exe
+          if ($sig.Status -ne "Valid") { throw "The legacy zip's parties_client.exe is not validly signed: $($sig.Status)" }
+          if ((Get-FileHash legacy-zip-check/parties_client.exe).Hash -ne (Get-FileHash "PartiesSetup-$env:VERSION.exe").Hash) {
+            throw "The legacy zip's parties_client.exe is not PartiesSetup-$env:VERSION.exe"
+          }
+          gh release upload "$env:GITHUB_REF_NAME" $zip -R "$env:GITHUB_REPOSITORY" --clobber
