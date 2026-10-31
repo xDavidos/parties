@@ -7,11 +7,14 @@
 #include <client/lobby_model.h>
 #include <parties/update/link.h>
 
+#include <chrono>
 #include <optional>
 
 namespace parties::client {
 
-void show_update_status(LobbyModel& model, const update::link::Status& status);
+// Dates are shown in local time; `now` decides whether they need a year.
+void show_update_status(LobbyModel& model, const update::link::Status& status,
+                        std::chrono::system_clock::time_point now = std::chrono::system_clock::now());
 
 // nullopt when the action means nothing in this status, such as choosing the
 // channel already in use or a switch the launcher does not offer.

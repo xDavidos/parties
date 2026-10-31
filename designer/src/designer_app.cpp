@@ -260,7 +260,7 @@ struct DesignerApp::PartiesFixture {
 			notice.to = version("1.2.0.0");
 			if (scenario == "update-data-restored") {
 				notice.kind = StatusNotice::Kind::DataRestored;
-				notice.preserved = "pre-restore-1.2.0.0-9f3c2a1b-g12.db";
+				notice.preserved = "backups\\rolled-back-1.3.0.0-9f3c2a1b-g12.db";
 			}
 			status.notice = notice;
 		} else if (scenario == "settings-updates-feed-stale") {
@@ -273,7 +273,11 @@ struct DesignerApp::PartiesFixture {
 			const DowngradeEffect effect = scenario == "settings-updates-pinned" ? DowngradeEffect::None
 				: scenario == "settings-updates-restore" ? DowngradeEffect::RestoresBackup
 				: DowngradeEffect::Impossible;
-			status.downgrade = DowngradeOffer{version("1.1.0.0"), effect};
+			status.downgrade = DowngradeOffer{version("1.1.0.0"), effect, std::nullopt};
+			// Midday UTC keeps the shown date on Oct 30 in nearly every time zone.
+			if (effect == DowngradeEffect::RestoresBackup)
+				status.downgrade->backup_taken_at =
+					std::chrono::sys_days{std::chrono::year{2026} / 10 / 30} + std::chrono::hours{12};
 		} else if (scenario != "settings-updates") {
 			return std::nullopt;
 		}
@@ -856,7 +860,7 @@ struct DesignerApp::PartiesFixture {
 			visible("update-notice") == notice &&
 			(!notice || contains(shown_text("update-notice"), "didn't start correctly, so you're back on 1.2.0.0")) &&
 			(scenario != "update-data-restored" ||
-				contains(shown_text("update-notice"), "pre-restore-1.2.0.0-9f3c2a1b-g12.db"));
+				contains(shown_text("update-notice"), "data folder as backups\\rolled-back-1.3.0.0-9f3c2a1b-g12.db."));
 		if (IsUpdateSettings(scenario)) {
 			Rml::Element* stable = document->GetElementById("settings-update-stable");
 			Rml::Element* beta_segment = document->GetElementById("settings-update-beta");
@@ -869,7 +873,8 @@ struct DesignerApp::PartiesFixture {
 				visible("settings-update-hold") == held &&
 				visible("settings-update-switch-now") == offers_switch &&
 				(!held || contains(hold, "Parties stays on 1.2.0.0 until Beta catches up.")) &&
-				(scenario != "settings-updates-restore" || contains(hold, "separate backup file")) &&
+				(scenario != "settings-updates-restore" ||
+					(contains(hold, "backup made on Oct 30") && contains(hold, "separate backup file"))) &&
 				(scenario != "settings-updates" || status == "Up to date") &&
 				(scenario != "settings-updates-feed-stale" || contains(status, "paused"));
 		}

@@ -1,5 +1,7 @@
 #include <client/update_view.h>
 
+#include <ctime>
+#include <format>
 #include <string>
 
 namespace parties::client {
@@ -23,6 +25,25 @@ Pill pill_for(const Status& s) {
     case Phase::Checking:       return s.available && *s.available > s.current ? Pill::Available : Pill::None;
     default:                    return Pill::None;
     }
+}
+
+std::tm local_time(std::chrono::system_clock::time_point at) {
+    const std::time_t t = std::chrono::system_clock::to_time_t(at);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    return tm;
+}
+
+std::string short_date_time(std::chrono::sys_seconds at, std::chrono::system_clock::time_point now) {
+    static constexpr const char* kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    const std::tm when = local_time(at);
+    const std::string year = when.tm_year == local_time(now).tm_year ? "" : std::format(", {}", when.tm_year + 1900);
+    return std::format("{} {}{}, {:02}:{:02}", kMonths[when.tm_mon], when.tm_mday, year, when.tm_hour, when.tm_min);
 }
 
 // Parties keeps the installed version because the chosen channel has nothing
@@ -70,12 +91,15 @@ std::string hold_text(const Status& s) {
     return channel + " has no version as new as " + kept + " yet." + wait;
 }
 
-std::string switch_note(const Status& s) {
+std::string switch_note(const Status& s, std::chrono::system_clock::time_point now) {
     if (!switch_offered(s)) return {};
-    if (s.downgrade->data_effect == DowngradeEffect::RestoresBackup)
-        return "Switching now restores an earlier backup of your data. Changes made since that backup stay saved "
-               "in a separate backup file and are not shown.";
-    return "Your data stays as it is.";
+    if (s.downgrade->data_effect != DowngradeEffect::RestoresBackup) return "Your data stays as it is.";
+    if (s.downgrade->backup_taken_at)
+        return "Switching now restores your data from the backup made on " +
+               short_date_time(*s.downgrade->backup_taken_at, now) +
+               ". Changes made since then stay saved in a separate backup file and are not shown.";
+    return "Switching now restores an earlier backup of your data. Changes made since that backup stay saved "
+           "in a separate backup file and are not shown.";
 }
 
 std::string notice_text(const Status& s) {
@@ -86,13 +110,13 @@ std::string notice_text(const Status& s) {
 
 std::string notice_detail(const Status& s) {
     if (!s.notice || s.notice->kind != StatusNotice::Kind::DataRestored || !s.notice->preserved) return {};
-    return "Changes made while " + s.notice->from.to_string() + " ran are saved in the backup file " +
+    return "Changes made while " + s.notice->from.to_string() + " ran are saved in your Parties data folder as " +
            *s.notice->preserved + ".";
 }
 
 } // namespace
 
-void show_update_status(LobbyModel& model, const Status& status) {
+void show_update_status(LobbyModel& model, const Status& status, std::chrono::system_clock::time_point now) {
     const Pill pill = pill_for(status);
     model.update_available = pill != Pill::None;
     model.update_downloading = pill == Pill::Downloading;
@@ -106,7 +130,7 @@ void show_update_status(LobbyModel& model, const Status& status) {
     model.update_status_line = status_line(status);
     model.update_hold = hold_text(status);
     model.update_can_switch = switch_offered(status);
-    model.update_switch_note = switch_note(status);
+    model.update_switch_note = switch_note(status, now);
     model.update_notice = notice_text(status);
     model.update_notice_detail = notice_detail(status);
 }

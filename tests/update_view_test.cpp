@@ -3,12 +3,16 @@
 
 #include <client/update_view.h>
 
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
 #include <iostream>
 #include <string>
 
 using namespace parties::client;
 using namespace parties::update;
 using namespace parties::update::link;
+using namespace std::chrono_literals;
 
 namespace {
 
@@ -24,6 +28,20 @@ void check(bool ok, const char* what) {
 Version v(const char* text) { return *Version::parse(text); }
 
 bool contains(const Rml::String& text, const char* part) { return text.find(part) != Rml::String::npos; }
+
+// POSIX-style zone, positive west of UTC: "UTC0", "EST5".
+void use_time_zone(const char* tz) {
+#ifdef _WIN32
+    _putenv_s("TZ", tz);
+    _tzset();
+#else
+    setenv("TZ", tz, 1);
+    tzset();
+#endif
+}
+
+constexpr std::chrono::sys_seconds kBackupTaken{std::chrono::sys_days{std::chrono::year{2026} / 10 / 30} + 14h + 5min};
+constexpr std::chrono::sys_seconds kNextDay{std::chrono::sys_days{std::chrono::year{2026} / 10 / 31} + 9h};
 
 Status base() {
     Status s;
@@ -70,9 +88,27 @@ void switch_now() {
     }
 
     LobbyModel restore;
-    show_update_status(restore, pinned_on_beta(DowngradeEffect::RestoresBackup));
-    check(contains(restore.update_switch_note.get(), "separate backup file"),
-          "a restoring switch says where newer changes are kept");
+    Status dated = pinned_on_beta(DowngradeEffect::RestoresBackup);
+    show_update_status(restore, dated, kNextDay);
+    check(restore.update_switch_note.get() ==
+              "Switching now restores an earlier backup of your data. Changes made since that backup stay saved "
+              "in a separate backup file and are not shown.",
+          "a restoring switch without a backup date keeps the general wording");
+
+    dated.downgrade->backup_taken_at = kBackupTaken;
+    use_time_zone("UTC0");
+    show_update_status(restore, dated, kNextDay);
+    check(restore.update_switch_note.get() ==
+              "Switching now restores your data from the backup made on Oct 30, 14:05. Changes made since then "
+              "stay saved in a separate backup file and are not shown.",
+          "a restoring switch names the backup's date and where newer changes are kept");
+    use_time_zone("EST5");
+    show_update_status(restore, dated, kNextDay);
+    check(contains(restore.update_switch_note.get(), "backup made on Oct 30, 09:05."),
+          "the backup's date is shown in local time");
+    show_update_status(restore, dated, kNextDay + std::chrono::days{70});
+    check(contains(restore.update_switch_note.get(), "backup made on Oct 30, 2026, 09:05."),
+          "a backup from another year names the year");
 
     const Status impossible = pinned_on_beta(DowngradeEffect::Impossible);
     LobbyModel model;
@@ -155,10 +191,12 @@ void notice() {
 
     Status restored = rolled;
     restored.notice->kind = StatusNotice::Kind::DataRestored;
-    restored.notice->preserved = "pre-restore-1.2.0.0-9f3c2a1b-g12.db";
+    restored.notice->preserved = "backups\\rolled-back-1.3.0.0-9f3c2a1b-g12.db";
     show_update_status(model, restored);
-    check(contains(model.update_notice_detail.get(), "pre-restore-1.2.0.0-9f3c2a1b-g12.db"),
-          "a data restore names the preserved backup file");
+    check(model.update_notice_detail.get() ==
+              "Changes made while 1.3.0.0 ran are saved in your Parties data folder as "
+              "backups\\rolled-back-1.3.0.0-9f3c2a1b-g12.db.",
+          "a data restore names the preserved backup file inside the data folder");
 
     show_update_status(model, base());
     check(model.update_notice.get().empty(), "the notice disappears once the launcher clears it");
