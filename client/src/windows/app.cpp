@@ -1036,7 +1036,7 @@ void App::tick_message_thread() {
 void App::attach_supervisor(std::unique_ptr<SupervisorLink> link) {
     supervisor_ = std::move(link);
     if (supervisor_)
-        core_.supervise_updates([this] { supervisor_->request(update::link::RestartToUpdate{}); });
+        core_.supervise_updates([this](const update::link::Request& request) { supervisor_->request(request); });
 }
 
 // The launcher judges a new build by this report: the lobby document is

@@ -211,6 +211,16 @@ void LobbyModel::build(rml::Builder& b) {
      .bind("update_downloading", update_downloading)
      .bind("update_ready",       update_ready)
      .bind("update_version",     update_version)
+     .bind("update_percent",     update_percent)
+     .bind("update_managed",     update_managed)
+     .bind("update_current",     update_current)
+     .bind("update_channel",     update_channel)
+     .bind("update_status_line", update_status_line)
+     .bind("update_hold",        update_hold)
+     .bind("update_can_switch",  update_can_switch)
+     .bind("update_switch_note", update_switch_note)
+     .bind("update_notice",      update_notice)
+     .bind("update_notice_detail", update_notice_detail)
      .bind("my_role",              my_role)
      .bind("can_manage_channels",  can_manage_channels)
      .bind("can_kick",             can_kick)
@@ -244,6 +254,15 @@ void LobbyModel::build(rml::Builder& b) {
     b.on("apply_update", [this] {
         if (on_apply_update) on_apply_update();
     });
+    b.on_args<int>("choose_update_channel", [this](int channel) {
+        if (on_update_action) on_update_action(channel == 1 ? UpdateAction::ChooseBeta : UpdateAction::ChooseStable);
+    });
+    b.on("switch_channel_now", [this] {
+        if (on_update_action) on_update_action(UpdateAction::SwitchNow);
+    });
+    b.on("dismiss_update_notice", [this] {
+        if (on_update_action) on_update_action(UpdateAction::DismissNotice);
+    });
 
     b.on("disconnect_server", [this] {
         if (on_disconnect_server) on_disconnect_server();
@@ -276,7 +295,7 @@ void LobbyModel::build(rml::Builder& b) {
 
     b.on_args<int>("navigate_settings", [this](int section) {
         const int first = static_cast<int>(SettingsSection::AudioVoice);
-        const int last = static_cast<int>(SettingsSection::Camera);
+        const int last = static_cast<int>(SettingsSection::Updates);
         section = std::clamp(section, first, last);
         router.select_settings(static_cast<SettingsSection>(section));
         mobile_show_content = true;

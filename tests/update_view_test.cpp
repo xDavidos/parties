@@ -1,0 +1,177 @@
+// The managed update UI: a launcher status in, what the user sees and the
+// link request each action sends out.
+
+#include <client/update_view.h>
+
+#include <iostream>
+#include <string>
+
+using namespace parties::client;
+using namespace parties::update;
+using namespace parties::update::link;
+
+namespace {
+
+int failures = 0;
+
+void check(bool ok, const char* what) {
+    if (!ok) {
+        std::cerr << "update_view_test: " << what << "\n";
+        ++failures;
+    }
+}
+
+Version v(const char* text) { return *Version::parse(text); }
+
+bool contains(const Rml::String& text, const char* part) { return text.find(part) != Rml::String::npos; }
+
+Status base() {
+    Status s;
+    s.current = v("1.2.0.0");
+    return s;
+}
+
+Status pinned_on_beta(DowngradeEffect effect) {
+    Status s = base();
+    s.phase = Phase::Pinned;
+    s.channel = Channel::Beta;
+    s.pinned_until = v("1.2.0.0");
+    s.downgrade = DowngradeOffer{v("1.1.0.0"), effect};
+    return s;
+}
+
+bool sends(const Status& s, UpdateAction action, const Request& expected) {
+    auto request = update_request(s, action);
+    return request && *request == expected;
+}
+
+void channel_choice() {
+    const Status stable = base();
+    check(sends(stable, UpdateAction::ChooseBeta, SetChannel{Channel::Beta, ChannelChoice::Wait}),
+          "choosing Beta on Stable switches and waits for Beta to catch up");
+    check(!update_request(stable, UpdateAction::ChooseStable), "choosing the current channel sends nothing");
+
+    const Status beta = pinned_on_beta(DowngradeEffect::None);
+    check(sends(beta, UpdateAction::ChooseStable, SetChannel{Channel::Stable, ChannelChoice::Wait}),
+          "choosing Stable while held on Beta switches back");
+}
+
+void switch_now() {
+    for (DowngradeEffect effect : {DowngradeEffect::None, DowngradeEffect::RestoresBackup}) {
+        const Status s = pinned_on_beta(effect);
+        LobbyModel model;
+        show_update_status(model, s);
+        check(model.update_can_switch.get(), "a data-compatible or restorable downgrade is offered");
+        check(sends(s, UpdateAction::SwitchNow, SetChannel{Channel::Beta, ChannelChoice::DowngradeNow}),
+              "Switch now asks for the downgrade on the chosen channel");
+        check(contains(model.update_hold.get(), "1.1.0.0") && contains(model.update_hold.get(), "1.2.0.0") &&
+                  contains(model.update_hold.get(), "until Beta catches up"),
+              "the hold names both versions and the channel");
+    }
+
+    LobbyModel restore;
+    show_update_status(restore, pinned_on_beta(DowngradeEffect::RestoresBackup));
+    check(contains(restore.update_switch_note.get(), "separate backup file"),
+          "a restoring switch says where newer changes are kept");
+
+    const Status impossible = pinned_on_beta(DowngradeEffect::Impossible);
+    LobbyModel model;
+    show_update_status(model, impossible);
+    check(!model.update_can_switch.get() && model.update_switch_note.get().empty(),
+          "an impossible downgrade is never offered");
+    check(!model.update_hold.get().empty(), "an impossible downgrade still explains the hold");
+    check(!update_request(impossible, UpdateAction::SwitchNow), "an impossible downgrade is never requested");
+
+    Status following_older = base();
+    following_older.channel = Channel::Beta;
+    following_older.downgrade = DowngradeOffer{v("1.1.0.0"), DowngradeEffect::None};
+    show_update_status(model, following_older);
+    check(contains(model.update_hold.get(), "Parties stays on 1.2.0.0"),
+          "an older channel without a pin is explained the same way");
+
+    Status downloading = pinned_on_beta(DowngradeEffect::None);
+    downloading.phase = Phase::Downloading;
+    downloading.percent = 10;
+    show_update_status(model, downloading);
+    check(model.update_hold.get().empty() && !update_request(downloading, UpdateAction::SwitchNow),
+          "no hold while a newer build downloads");
+}
+
+void pill() {
+    LobbyModel model;
+    Status idle = base();
+    show_update_status(model, idle);
+    check(!model.update_available.get() && model.update_status_line.get() == "Up to date",
+          "nothing in the titlebar when up to date");
+
+    Status available = base();
+    available.available = v("1.3.0.0");
+    show_update_status(model, available);
+    check(model.update_available.get() && model.update_version.get() == "v1.3.0.0", "a newer build shows its pill");
+    check(sends(available, UpdateAction::ClickPill, CheckNow{}), "the available pill starts the update");
+
+    Status same = base();
+    same.available = v("1.2.0.0");
+    show_update_status(model, same);
+    check(!model.update_available.get(), "the installed version is never offered as an update");
+
+    Status downloading = base();
+    downloading.phase = Phase::Downloading;
+    downloading.percent = 42;
+    show_update_status(model, downloading);
+    check(model.update_downloading.get() && model.update_percent.get() == 42, "download progress is shown");
+    check(!update_request(downloading, UpdateAction::ClickPill), "clicking progress sends nothing");
+
+    Status ready = base();
+    ready.phase = Phase::ReadyToRestart;
+    ready.available = v("1.3.0.0");
+    show_update_status(model, ready);
+    check(model.update_ready.get() && model.update_percent.get() == -1, "a staged build asks for a restart");
+    check(sends(ready, UpdateAction::ClickPill, RestartToUpdate{}), "the ready pill restarts into the update");
+
+    for (Phase quiet : {Phase::Checking, Phase::Pinned, Phase::FeedStale, Phase::Error}) {
+        Status s = base();
+        s.phase = quiet;
+        show_update_status(model, s);
+        check(!model.update_available.get(), "no titlebar alarm for checking, pinned, a stale feed or an error");
+    }
+
+    Status stale = base();
+    stale.phase = Phase::FeedStale;
+    show_update_status(model, stale);
+    check(contains(model.update_status_line.get(), "paused"), "a stale feed explains that updates are paused");
+}
+
+void notice() {
+    LobbyModel model;
+    Status rolled = base();
+    rolled.notice = StatusNotice{StatusNotice::Kind::RolledBack, v("1.3.0.0"), v("1.2.0.0"), std::nullopt};
+    show_update_status(model, rolled);
+    check(model.update_notice.get() ==
+              "Parties 1.3.0.0 didn't start correctly, so you're back on 1.2.0.0. Your data is safe.",
+          "a rollback says what happened and that data is safe");
+    check(model.update_notice_detail.get().empty(), "a plain rollback has no backup to point at");
+    check(sends(rolled, UpdateAction::DismissNotice, AcknowledgeNotice{}), "dismissing acknowledges the notice");
+
+    Status restored = rolled;
+    restored.notice->kind = StatusNotice::Kind::DataRestored;
+    restored.notice->preserved = "pre-restore-1.2.0.0-9f3c2a1b-g12.db";
+    show_update_status(model, restored);
+    check(contains(model.update_notice_detail.get(), "pre-restore-1.2.0.0-9f3c2a1b-g12.db"),
+          "a data restore names the preserved backup file");
+
+    show_update_status(model, base());
+    check(model.update_notice.get().empty(), "the notice disappears once the launcher clears it");
+    check(!update_request(base(), UpdateAction::DismissNotice), "nothing to acknowledge without a notice");
+}
+
+} // namespace
+
+int main() {
+    channel_choice();
+    switch_now();
+    pill();
+    notice();
+    if (failures == 0) std::cout << "update_view_test: all checks passed\n";
+    return failures == 0 ? 0 : 1;
+}
