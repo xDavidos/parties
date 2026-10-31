@@ -52,6 +52,14 @@ struct UserRollback {
     std::optional<Snapshot> restore;
     friend bool operator==(const UserRollback&, const UserRollback&) = default;
 };
+// The user chose an immediate downgrade (set_channel downgrade_now). The shell
+// sealed `record`, or found it on disk as previous_good, and picked
+// restore_first when the build cannot read the live data.
+struct UserDowngrade {
+    BuildRecord record;
+    std::optional<Snapshot> restore_first;
+    friend bool operator==(const UserDowngrade&, const UserDowngrade&) = default;
+};
 // Recovery: "try the failed build again".
 struct UserRetry {
     BuildId target;
@@ -81,8 +89,8 @@ struct ChannelIntentSet {
 struct NoticeAcknowledged { friend bool operator==(const NoticeAcknowledged&, const NoticeAcknowledged&) = default; };
 
 using Event = std::variant<StartRequested, Resumed, AppHealthy, AppExited, HealthDeadlinePassed,
-                           ConfirmTimerElapsed, BuildSealed, UserRollback, UserRetry, UserRestore,
-                           BuildCorrupt, ManifestSeen, ChannelIntentSet, NoticeAcknowledged>;
+                           ConfirmTimerElapsed, BuildSealed, UserDowngrade, UserRollback, UserRetry,
+                           UserRestore, BuildCorrupt, ManifestSeen, ChannelIntentSet, NoticeAcknowledged>;
 
 struct Policy {
     uint32_t health_deadline_s = 120;

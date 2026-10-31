@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <variant>
 
 namespace parties::update {
@@ -76,5 +77,9 @@ ChannelSwitchPlan plan_channel_switch(const SupervisorState& state, const Verifi
 // The intent to commit (through ChannelIntentSet) when the user switches
 // without taking the downgrade.
 ChannelIntent intent_for(const ChannelSwitchPlan& plan);
+
+// The backup an accepted DataEffect::NeedsRestore downgrade puts in place:
+// the newest one `entry` can open, so the least recent data is set aside.
+std::optional<Snapshot> restore_point(const BuildEntry& entry, std::span<const Snapshot> newest_first);
 
 } // namespace parties::update

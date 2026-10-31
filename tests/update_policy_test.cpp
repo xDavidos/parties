@@ -216,6 +216,17 @@ bool test_data_gate_on_newer_builds() {
     return true;
 }
 
+bool test_restore_point() {
+    const BuildEntry old = entry("1.5.0.0", 1, 1);
+    std::vector<Snapshot> newest_first{{{"rolled-back-x"}, DataInfo{3, 3}},
+                                       {{"pre-b"}, DataInfo{2, 1}},
+                                       {{"pre-a"}, DataInfo{1, 1}}};
+    auto chosen = restore_point(old, newest_first);
+    if (!chosen || chosen->id.stem != "pre-b") return fail("the newest backup the build can open is restored");
+    if (restore_point(old, std::span(newest_first).first(1))) return fail("no backup the build can open means none");
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -227,6 +238,7 @@ int main() {
     ok &= test_launcher_protocol_gate();
     ok &= test_quarantine_until_newer();
     ok &= test_data_gate_on_newer_builds();
+    ok &= test_restore_point();
     if (ok) std::cout << "update_policy_test: all passed\n";
     return ok ? 0 : 1;
 }

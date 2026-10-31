@@ -174,7 +174,7 @@ std::vector<Row> table() {
          {"Commit", "DeleteBuild 0.9.0.0", "Commit", "Spawn 1.2.0.0"},
          [](auto& s) { return steady_on(s, C) && !s.find(D.id); }});
     row({"staged downgrade on a chosen backup", staged(D, backup_v1, C), StartRequested{}, kV3,
-         {"Commit", "RestoreSnapshot backup-v1 keep " + snap("pre", D, 11), "Commit", "Spawn 0.9.0.0"},
+         {"Commit", "RestoreSnapshot backup-v1 keep " + snap("pre-downgrade", D, 11), "Commit", "Spawn 0.9.0.0"},
          [](auto& s) {
              auto* p = prob(s);
              return p && p->restore_on_rollback && p->pre_snapshot && p->pre_snapshot->data == kV3 &&
@@ -279,6 +279,23 @@ std::vector<Row> table() {
          BuildSealed{B, std::nullopt}, kV1, {}});
     row({"no staging during probation", probation(B), BuildSealed{C, std::nullopt}, kV1, {}});
     row({"sealing good again (repair) changes nothing", steady(), BuildSealed{A, std::nullopt}, kV1, {}});
+    row({"a downgrade stages a new older build", steady(C), UserDowngrade{D, backup_v1}, kV3, {"Commit"},
+         [](auto& s) {
+             auto* st = std::get_if<Staged>(&s.activation);
+             return st && st->build == D.id && st->restore_first && st->restore_first->id.stem == "backup-v1" &&
+                    std::holds_alternative<Unproven>(s.find(D.id)->verdict);
+         }});
+    row({"a downgrade stages previous good again", with_previous(steady(C), A), UserDowngrade{A, backup_v1}, kV3,
+         {"Commit"}, [](auto& s) {
+             auto* st = std::get_if<Staged>(&s.activation);
+             return st && st->build == A.id && s.previous_good == A.id && s.builds.size() == 2;
+         }});
+    row({"a downgrade replaces the staged build", staged(B), UserDowngrade{D, std::nullopt}, kV1,
+         {"Commit", "DeleteBuild 1.1.0.0"}, [](auto& s) { return std::get<Staged>(s.activation).build == D.id; }});
+    row({"a downgrade onto good changes nothing", steady(), UserDowngrade{A, std::nullopt}, kV1, {}});
+    row({"no downgrade during probation", probation(B), UserDowngrade{D, std::nullopt}, kV1, {}});
+    row({"a downgrade never stages a quarantined build", add(steady(), D, Quarantined{FailureReason::InitFailed}),
+         UserDowngrade{D, std::nullopt}, kV1, {}});
 
     row({"user rollback during probation", probation(B, pre_b), UserRollback{A.id, std::nullopt}, kV2,
          {"Commit", "Spawn 1.0.0.0"}, [](auto& s) { return quarantined_for(s, B, FailureReason::UserRolledBack); }});
@@ -434,6 +451,7 @@ std::string event_name(const Event& e) {
             else if constexpr (std::is_same_v<T, HealthDeadlinePassed>) return "HealthDeadlinePassed";
             else if constexpr (std::is_same_v<T, ConfirmTimerElapsed>) return "ConfirmTimer" + std::to_string(x.healthy_uptime_s);
             else if constexpr (std::is_same_v<T, BuildSealed>) return "BuildSealed " + x.record.id.version.to_string() + (x.restore_first ? " restore " + x.restore_first->id.stem : "");
+            else if constexpr (std::is_same_v<T, UserDowngrade>) return "UserDowngrade " + x.record.id.version.to_string() + (x.restore_first ? " restore " + x.restore_first->id.stem : "");
             else if constexpr (std::is_same_v<T, UserRollback>) return "UserRollback " + x.target.version.to_string() + (x.restore ? " restore " + x.restore->id.stem : "");
             else if constexpr (std::is_same_v<T, UserRetry>) return "UserRetry " + x.target.version.to_string();
             else if constexpr (std::is_same_v<T, UserRestore>) return "UserRestore " + x.from.id.stem;
@@ -662,7 +680,15 @@ Event other_event(Walk& w, const World& world, const SupervisorState& s) {
     case 3:
     case 4: return StartRequested{};
     case 5:
-    case 6: return BuildSealed{*universe[1 + w.pick(4)], w.chance(0.2) ? random_snapshot(w, world) : std::nullopt};
+    case 6: {
+        const BuildRecord& r = *universe[1 + w.pick(4)];
+        std::optional<Snapshot> restore = w.chance(0.2) ? random_snapshot(w, world) : std::nullopt;
+        if (w.chance(0.3)) {
+            if (s.previous_good && w.chance(0.5)) return UserDowngrade{*s.find(*s.previous_good), restore};
+            return UserDowngrade{r, restore};
+        }
+        return BuildSealed{r, restore};
+    }
     case 7: {
         BuildId target = s.previous_good && w.chance(0.7) ? *s.previous_good : random_known_id(w, s);
         if (auto* p = std::get_if<Probation>(&s.activation); p && w.chance(0.5)) target = p->fallback;

@@ -114,4 +114,12 @@ ChannelIntent intent_for(const ChannelSwitchPlan& plan) {
     return Follow{};
 }
 
+std::optional<Snapshot> restore_point(const BuildEntry& entry, std::span<const Snapshot> newest_first) {
+    auto it = std::ranges::find_if(newest_first, [&](const Snapshot& s) {
+        return compatibility(entry.data_schema, s.data) != Compatibility::Incompatible;
+    });
+    if (it == newest_first.end()) return std::nullopt;
+    return *it;
+}
+
 } // namespace parties::update
