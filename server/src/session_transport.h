@@ -67,7 +67,7 @@ public:
     FrameStreamResult send_on_new_frame_stream(const QUIC_API_TABLE& api,
                                                QUIC_STREAM_CALLBACK_HANDLER handler, void* ctx,
                                                QUIC_BUFFER* bufs, uint32_t count,
-                                               std::atomic<uint32_t>& charged) {
+                                               std::atomic<uint32_t>& charged, int64_t now_us) {
         std::lock_guard lock(m_);
         if (!open() || !connection_) return FrameStreamResult::NotConnected;
 
@@ -78,13 +78,13 @@ public:
 
         uint32_t total = 0;
         for (uint32_t i = 0; i < count; ++i) total += bufs[i].Length;
-        stats_.video_outstanding_bytes_.fetch_add(total, std::memory_order_relaxed);
+        stats_.charge_video(total, now_us);
         charged.store(total, std::memory_order_release);
 
         if (QUIC_FAILED(api.StreamSend(stream, bufs, count,
                                        QUIC_SEND_FLAG_START | QUIC_SEND_FLAG_FIN, ctx))) {
             if (const uint32_t n = charged.exchange(0, std::memory_order_acq_rel))
-                stats_.video_outstanding_bytes_.fetch_sub(n, std::memory_order_relaxed);
+                stats_.retire_video(n);
             api.StreamShutdown(stream,
                 QUIC_STREAM_SHUTDOWN_FLAG_ABORT | QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE, 0);
             return FrameStreamResult::SendFailed;

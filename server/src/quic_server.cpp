@@ -41,7 +41,7 @@ struct QuicServer::SendCtx {
 
     void uncharge() {
         if (session && len) {
-            session->transport_stats.video_outstanding_bytes_.fetch_sub(len, std::memory_order_relaxed);
+            session->transport_stats.retire_video(len);
             len = 0;
         }
     }
@@ -117,7 +117,7 @@ struct QuicServer::VideoOutStreamContext {
     void uncharge() {
         uint32_t n = charged.exchange(0, std::memory_order_acq_rel);
         if (n && session)
-            session->transport_stats.video_outstanding_bytes_.fetch_sub(n, std::memory_order_relaxed);
+            session->transport_stats.retire_video(n);
     }
 };
 
@@ -341,7 +341,7 @@ bool QuicServer::send_video_frame_to(const std::shared_ptr<Session>& session,
                                     const_cast<uint8_t*>(ctx->frame->data()) };
 
         switch (session->transport_->send_on_new_frame_stream(*api_, video_out_stream_callback, ctx,
-                                                               ctx->bufs, 2, ctx->charged)) {
+                                                               ctx->bufs, 2, ctx->charged, now_us())) {
         case SessionTransport::FrameStreamResult::Sent:
             return true;
         case SessionTransport::FrameStreamResult::NotConnected:
@@ -371,7 +371,7 @@ bool QuicServer::send_video_frame_to(const std::shared_ptr<Session>& session,
     ctx->buf_count = 2;
     ctx->len = 5 + static_cast<uint32_t>(ctx->shared->size());
 
-    session->transport_stats.video_outstanding_bytes_.fetch_add(ctx->len, std::memory_order_relaxed);
+    session->transport_stats.charge_video(ctx->len, now_us());
     const auto status = session->transport_->send_on(*api_, SessionTransport::Stream::LegacyVideo,
                                                      ctx->bufs, ctx->buf_count, ctx);
     if (!status || QUIC_FAILED(*status)) {

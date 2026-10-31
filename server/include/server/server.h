@@ -74,6 +74,7 @@ private:
         Coalescer     pli{200'000};
         Coalescer     drop_log{1'000'000};
         uint32_t      drops_since_log = 0;
+        Coalescer     queue_report{50'000};
         int64_t       max_keyframe_bytes = 0;
         std::optional<int64_t> max_keyframe_at_us;
     };
