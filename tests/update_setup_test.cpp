@@ -224,6 +224,7 @@ public:
     }
     ~World() {
         RegDeleteTreeW(HKEY_CURRENT_USER, key_parent.c_str());
+        RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\PartiesTest");  // fails while another run still uses it
         std::error_code ec;
         fs::remove_all(root_, ec);
     }
