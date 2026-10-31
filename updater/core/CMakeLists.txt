@@ -13,6 +13,8 @@ add_library(parties_update_core STATIC
     src/version.cpp
     src/encoding.cpp
     src/manifest.cpp
+    src/supervisor_state.cpp
+    src/probation.cpp
 )
 target_include_directories(parties_update_core PUBLIC include)
 target_link_libraries(parties_update_core
