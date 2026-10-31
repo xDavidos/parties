@@ -3,7 +3,9 @@
 #include <parties/types.h>
 #include <parties/protocol.h>
 #include <parties/video_backlog.h>
+#include <parties/viewer_queue.h>
 
+#include <chrono>
 #include <string>
 #include <cstdint>
 #include <atomic>
@@ -38,7 +40,13 @@ private:
 class SessionTransportStats {
 public:
     int64_t video_outstanding_bytes() const {
-        return video_outstanding_bytes_.load(std::memory_order_relaxed);
+        const uint64_t retired = video_retired_bytes_.load(std::memory_order_acquire);
+        const uint64_t charged = video_charged_bytes_.load(std::memory_order_relaxed);
+        return charged > retired ? static_cast<int64_t>(charged - retired) : 0;
+    }
+    std::chrono::milliseconds video_queue_delay(int64_t now_us) {
+        return video_queue_clock_.delay(video_retired_bytes_.load(std::memory_order_acquire),
+                                        min_rtt(), now_us);
     }
     MinRtt min_rtt() const {
         return MinRtt::from_quic_min_rtt_us(min_rtt_us_.load(std::memory_order_relaxed));
@@ -49,7 +57,18 @@ private:
     friend class QuicServer;
     friend class SessionTransport;
 
-    std::atomic<int64_t>  video_outstanding_bytes_{0};
+    void charge_video(uint32_t bytes, int64_t now_us) {
+        const uint64_t charged = video_charged_bytes_.load(std::memory_order_relaxed) + bytes;
+        video_charged_bytes_.store(charged, std::memory_order_relaxed);
+        video_queue_clock_.on_sent(charged, now_us);
+    }
+    void retire_video(uint32_t bytes) {
+        video_retired_bytes_.fetch_add(bytes, std::memory_order_release);
+    }
+
+    std::atomic<uint64_t> video_charged_bytes_{0};
+    std::atomic<uint64_t> video_retired_bytes_{0};
+    ViewerQueueClock      video_queue_clock_;
     std::atomic<uint32_t> min_rtt_us_{VIDEO_BACKLOG_DEFAULT_RTT_US};
     std::atomic<bool>     alive_{true};
 };

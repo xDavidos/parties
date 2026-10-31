@@ -1,9 +1,11 @@
 #include <parties/video_send_controller.h>
 
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <optional>
 
+using std::chrono::milliseconds;
 using parties::VideoSendController;
 using parties::VideoSendControllerConfig;
 using parties::video_send_detail::queue_delay_ms;
@@ -381,6 +383,104 @@ bool test_window_starts_at_time_zero() {
     return true;
 }
 
+int64_t g_now_us = T0;
+int64_t fake_clock_us() { return g_now_us; }
+
+bool test_viewer_queue_refusal_drains() {
+    g_now_us = T0;
+    VideoSendController c(default_cfg(), fake_clock_us);
+    if (!c.accounting().admit_frame()) return fail("viewer drain: no report must admit");
+    c.accounting().on_viewer_queue(milliseconds{150});
+    if (c.accounting().admit_frame()) return fail("viewer drain: 150 ms over a 60 ms budget must refuse");
+    g_now_us += 89 * MS;
+    if (c.accounting().admit_frame()) return fail("viewer drain: 61 ms left must still refuse");
+    g_now_us += 1 * MS;
+    if (!c.accounting().admit_frame()) return fail("viewer drain: drained to the budget must admit");
+    return true;
+}
+
+bool test_viewer_queue_at_budget_admits() {
+    g_now_us = T0;
+    VideoSendController c(default_cfg(), fake_clock_us);
+    c.accounting().on_viewer_queue(milliseconds{60});
+    if (!c.accounting().admit_frame()) return fail("viewer budget: a report at the budget must admit");
+    return true;
+}
+
+bool test_viewer_queue_horizon() {
+    g_now_us = T0;
+    VideoSendController c(default_cfg(), fake_clock_us);
+    c.accounting().on_viewer_queue(milliseconds{5000});
+    g_now_us += 499 * MS;
+    if (c.accounting().admit_frame()) return fail("viewer horizon: refusal ended before the horizon");
+    g_now_us += 1 * MS;
+    if (!c.accounting().admit_frame()) return fail("viewer horizon: a report older than the horizon must not refuse");
+    return true;
+}
+
+bool test_newer_viewer_report_replaces_older() {
+    g_now_us = T0;
+    VideoSendController c(default_cfg(), fake_clock_us);
+    c.accounting().on_viewer_queue(milliseconds{300});
+    g_now_us += 10 * MS;
+    c.accounting().on_viewer_queue(milliseconds{20});
+    if (!c.accounting().admit_frame()) return fail("viewer newer: a drained viewer must lift the refusal");
+    return true;
+}
+
+bool test_viewer_congestion_threshold() {
+    const auto cfg = default_cfg();
+    g_now_us = T0;
+    VideoSendController c(cfg, fake_clock_us);
+    (void)c.encode_feedback().take_bitrate_update();
+    c.tick(T0);
+    int64_t t = T0;
+    for (int window = 0; window < 2; ++window) {
+        c.accounting().on_viewer_queue(milliseconds{40});
+        t = run_windows(c, cfg, t, 1);
+    }
+    if (c.accounting().bitrate_bps() != 1'600'000) return fail("viewer congestion: two windows peaking at 40 ms must apply 0.8x");
+    for (int window = 0; window < 4; ++window) {
+        c.accounting().on_viewer_queue(milliseconds{39});
+        t = run_windows(c, cfg, t, 1);
+    }
+    if (c.accounting().bitrate_bps() != 1'728'000) return fail("viewer congestion: windows peaking at 39 ms must count as clean");
+    if (c.stats().admission_drops != 0) return fail("viewer congestion: reports under the budget refused frames");
+    return true;
+}
+
+bool test_viewer_refusals_count_and_congest() {
+    const auto cfg = default_cfg();
+    g_now_us = T0;
+    VideoSendController c(cfg, fake_clock_us);
+    (void)c.encode_feedback().take_bitrate_update();
+    c.tick(T0);
+    int64_t t = T0;
+    for (int window = 0; window < 2; ++window) {
+        c.accounting().on_viewer_queue(milliseconds{100});
+        if (c.accounting().admit_frame()) return fail("viewer refusals: a queue over budget must refuse");
+        c.accounting().on_viewer_queue(milliseconds{0});
+        t = run_windows(c, cfg, t, 1);
+    }
+    const auto s = c.stats();
+    if (s.viewer_admission_drops != 2 || s.admission_drops != 2)
+        return fail("viewer refusals: must count as viewer and as admission drops");
+    if (c.accounting().bitrate_bps() != 1'600'000) return fail("viewer refusals: two refusing windows must decrease");
+    return true;
+}
+
+bool test_start_share_forgets_viewer_report() {
+    const auto cfg = default_cfg();
+    g_now_us = T0;
+    VideoSendController c(cfg, fake_clock_us);
+    c.accounting().on_viewer_queue(milliseconds{400});
+    if (c.accounting().admit_frame()) return fail("viewer restart: setup refusal");
+    c.start_share(cfg);
+    if (!c.accounting().admit_frame()) return fail("viewer restart: a new share must forget the old report");
+    if (c.stats().viewer_admission_drops != 0) return fail("viewer restart: viewer drops not cleared");
+    return true;
+}
+
 bool test_first_publish_after_start_at_time_zero() {
     VideoSendControllerConfig cfg = default_cfg();
     cfg.window_ms = 100;
@@ -415,6 +515,13 @@ int main() {
     if (!test_admission_drops_congest()) return 1;
     if (!test_window_starts_at_time_zero()) return 1;
     if (!test_first_publish_after_start_at_time_zero()) return 1;
+    if (!test_viewer_queue_refusal_drains()) return 1;
+    if (!test_viewer_queue_at_budget_admits()) return 1;
+    if (!test_viewer_queue_horizon()) return 1;
+    if (!test_newer_viewer_report_replaces_older()) return 1;
+    if (!test_viewer_congestion_threshold()) return 1;
+    if (!test_viewer_refusals_count_and_congest()) return 1;
+    if (!test_start_share_forgets_viewer_report()) return 1;
 
     std::cout << "Video send controller admission and AIMD policy passed\n";
     return 0;

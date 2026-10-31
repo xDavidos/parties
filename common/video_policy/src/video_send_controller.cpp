@@ -1,6 +1,7 @@
 #include <parties/video_send_controller.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace parties {
@@ -51,8 +52,21 @@ void VideoSendAccounting::on_send_failed() {
     c_.keyframe_request.store(true);
 }
 
+void VideoSendAccounting::on_viewer_queue(std::chrono::milliseconds worst_viewer_queue) {
+    const int64_t queue_ms = worst_viewer_queue.count();
+    int64_t peak = c_.viewer_queue_peak_ms.load();
+    while (queue_ms > peak && !c_.viewer_queue_peak_ms.compare_exchange_weak(peak, queue_ms)) {}
+
+    const int64_t excess_ms = queue_ms - static_cast<int64_t>(c_.viewer_queue_budget_ms.load());
+    const int64_t refuse_ms = (std::min)(excess_ms,
+                                         static_cast<int64_t>(c_.max_viewer_refusal_ms.load()));
+    c_.viewer_refusal_until_us.store(excess_ms <= 0 ? INT64_MIN : c_.clock_us() + refuse_ms * 1000);
+}
+
 bool VideoSendAccounting::admit_frame() {
-    if (c_.outstanding.load() <= c_.allowance_bytes.load()) return true;
+    const bool viewer_full = c_.clock_us() < c_.viewer_refusal_until_us.load();
+    if (!viewer_full && c_.outstanding.load() <= c_.allowance_bytes.load()) return true;
+    if (viewer_full) c_.viewer_admission_drops.fetch_add(1);
     c_.admission_drops.fetch_add(1);
     c_.admission_drops_window.fetch_add(1);
     return false;
@@ -72,7 +86,13 @@ bool VideoEncodeFeedback::take_keyframe_request() {
     return c_.keyframe_request.exchange(false);
 }
 
-VideoSendController::VideoSendController(const VideoSendControllerConfig& cfg) {
+int64_t steady_clock_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+VideoSendController::VideoSendController(const VideoSendControllerConfig& cfg, int64_t (*clock_us)())
+    : counters_(clock_us) {
     start_share(cfg);
 }
 
@@ -95,6 +115,11 @@ void VideoSendController::start_share(const VideoSendControllerConfig& cfg) {
     counters_.keyframe_request.store(false);
     counters_.bitrate_bps.store(cfg_.ceiling_bitrate_bps);
     counters_.pending_bitrate.store(0);
+    counters_.viewer_queue_budget_ms.store(cfg_.viewer_queue_budget_ms);
+    counters_.max_viewer_refusal_ms.store(cfg_.max_viewer_refusal_ms);
+    counters_.viewer_refusal_until_us.store(INT64_MIN);
+    counters_.viewer_queue_peak_ms.store(0);
+    counters_.viewer_admission_drops.store(0);
 
     rtt_us_ = cfg_.default_rtt_us;
     window_start_us_.reset();
@@ -161,12 +186,14 @@ void VideoSendController::tick(int64_t now_us) {
             : 0.0;
         const uint32_t admission_drops = counters_.admission_drops_window.exchange(0);
         const uint32_t send_failures = counters_.send_failures_window.exchange(0);
+        const int64_t viewer_queue_peak_ms = counters_.viewer_queue_peak_ms.exchange(0);
 
         const bool congested =
             peak_queue_delay_ms_ >= cfg_.congestion_queue_ms ||
             last_loss_ratio_ > cfg_.loss_threshold ||
             admission_drops > 0 ||
-            send_failures > 0;
+            send_failures > 0 ||
+            viewer_queue_peak_ms >= static_cast<int64_t>(cfg_.viewer_congestion_queue_ms);
 
         const uint32_t current = counters_.bitrate_bps.load();
 
@@ -209,6 +236,7 @@ VideoSendController::Stats VideoSendController::stats() const {
     s.queue_delay_ms    = last_queue_delay_ms_;
     s.loss_ratio        = last_loss_ratio_;
     s.admission_drops   = counters_.admission_drops.load();
+    s.viewer_admission_drops = counters_.viewer_admission_drops.load();
     s.send_failures     = counters_.send_failures.load();
     s.decreases         = decreases_;
     return s;

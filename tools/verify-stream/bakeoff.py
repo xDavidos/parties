@@ -116,33 +116,44 @@ def main():
     p.add_argument("--max-freezes", type=int, default=0)
     p.add_argument("--max-g2g-p95-ms", type=float, default=150)
     p.add_argument("--min-fps", type=float, default=40)
+    p.add_argument("--min-link-use", type=float, default=0.6,
+                   help="fail a shaped run that sent less than this share of the link "
+                        "while also sending under 90%% of its target")
     p.add_argument("--out")
     a = p.parse_args()
 
     rows = [measure(Path(e), a.settle, a.freeze_ms) for e in a.evidence]
     lines = [
         f"Steady state after {a.settle:g} s. Pass: freezes (gap >= {a.freeze_ms:g} ms) <= {a.max_freezes}, "
-        f"g2g p95 <= {a.max_g2g_p95_ms:g} ms, glass fps >= {a.min_fps:g}.",
+        f"g2g p95 <= {a.max_g2g_p95_ms:g} ms, glass fps >= {a.min_fps:g}, and not throttled "
+        f"(sent >= {a.min_link_use:g} x link or >= 0.9 x target).",
         "",
         "| run | codec | target | link | rtt | window s | fps | freezes | freeze s | max gap ms "
-        "| g2g p50 | g2g p95 | sent Mbps | recv Mbps | never recv | keys | verdict |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| g2g p50 | g2g p95 | sent Mbps | recv Mbps | link use | never recv | keys | verdict |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     errors = 0
     for r in rows:
         if "error" in r:
             errors += 1
-            lines.append(f"| {r['run']} | | | | | | | | | | | | | | | | ERROR {r['error']} |")
+            lines.append(f"| {r['run']} | | | | | | | | | | | | | | | | | ERROR {r['error']} |")
             continue
+        link, target = r["link_mbps"], r["target_mbps"]
+        throttled = (link is not None and target is not None
+                     and r["sent_mbps"] < a.min_link_use * link
+                     and r["sent_mbps"] < 0.9 * target)
+        link_use = f"{r['recv_mbps'] / link:.0%}" if link else ""
         passed = (r["freezes"] <= a.max_freezes
                   and r["g2g_p95"] is not None and r["g2g_p95"] <= a.max_g2g_p95_ms
-                  and r["fps"] >= a.min_fps)
+                  and r["fps"] >= a.min_fps
+                  and not throttled)
         lines.append(
             f"| {r['run']} | {r['codec']} | {fmt(r['target_mbps'], 'g')} | {fmt(r['link_mbps'], 'g')} "
             f"| {fmt(r['rtt_ms'], 'g')} | {r['window_s']:.0f} | {r['fps']:.1f} | {r['freezes']} "
             f"| {r['freeze_s']:.1f} | {r['max_gap_ms']:.0f} | {fmt(r['g2g_p50'], '.0f')} "
-            f"| {fmt(r['g2g_p95'], '.0f')} | {r['sent_mbps']:.1f} | {r['recv_mbps']:.1f} "
-            f"| {r['never_received']}/{r['frames_sent']} | {r['keyframes']} | {'PASS' if passed else 'FAIL'} |")
+            f"| {fmt(r['g2g_p95'], '.0f')} | {r['sent_mbps']:.1f} | {r['recv_mbps']:.1f} | {link_use} "
+            f"| {r['never_received']}/{r['frames_sent']} | {r['keyframes']} "
+            f"| {'PASS' if passed else ('FAIL throttled' if throttled else 'FAIL')} |")
     counted = sum(r.get("frames_on_glass", 0) for r in rows)
     lines += ["", f"{len(rows)} runs, {errors} errors, {counted} steady-state frames on glass counted."]
     text = "\n".join(lines) + "\n"

@@ -147,10 +147,11 @@ waited for the next packet before releasing a picture.
 
 | Where | Component | Role |
 |-------|-----------|------|
-| Sharer | `VideoSendController` admission (`common/video_policy/include/parties/video_send_controller.h`) | Counts bytes handed to QUIC minus bytes acknowledged in `SEND_COMPLETE`. On the WGC capture thread a frame is encoded only when the outstanding bytes imply no more than ~120 ms of queueing beyond the minimum RTT; otherwise the capture frame is skipped. Skipping at capture keeps the reference chain intact because `frame_seq` is stamped after encode. Atomics only, never blocks |
-| Sharer | `VideoSendController` AIMD bitrate | Evaluated on the main thread in 500 ms windows. A window is congested when its peak queueing delay is >= 80 ms, actual (spurious-corrected) packet loss exceeds 3 %, or any admission, encoder, or send drop occurred in it; after two consecutive congested windows the bitrate is multiplied by 0.8 (not below the 800 kbps floor), and a clean window resets the count. x1.08 after 2 s clean, up to the user target. Encoder reconfigurations are gated to one per 500 ms and a >= 10 % delta, except that the final step onto the user's target (or onto the floor) is always published even when it is smaller than the delta gate. The encoder picks the new bitrate up on the encode thread via `take_bitrate_update()` and a keyframe request via `take_keyframe_request()` |
+| Sharer | `VideoSendController` admission (`common/video_policy/include/parties/video_send_controller.h`) | Counts bytes handed to QUIC minus bytes acknowledged in `SEND_COMPLETE`. On the WGC capture thread a frame is encoded only when the outstanding bytes imply no more than ~120 ms of queueing beyond the minimum RTT and no [viewer queue refusal](#viewer-queue-feedback) is active; otherwise the capture frame is skipped. Skipping at capture keeps the reference chain intact because `frame_seq` is stamped after encode. Atomics only, never blocks |
+| Sharer | `VideoSendController` AIMD bitrate | Evaluated on the main thread in 500 ms windows. A window is congested when its peak queueing delay is >= 80 ms, actual (spurious-corrected) packet loss exceeds 3 %, any admission, encoder, or send drop occurred in it, or a viewer queue report in it reached 40 ms; after two consecutive congested windows the bitrate is multiplied by 0.8 (not below the 800 kbps floor), and a clean window resets the count. x1.08 after 2 s clean, up to the user target. Encoder reconfigurations are gated to one per 500 ms and a >= 10 % delta, except that the final step onto the user's target (or onto the floor) is always published even when it is smaller than the delta gate. The encoder picks the new bitrate up on the encode thread via `take_bitrate_update()` and a keyframe request via `take_keyframe_request()` |
 | Both hops | Per-frame unidirectional QUIC streams (protocol 1.2) | One stream per encoded frame, `[0x12][header 14 B][encoded]` sharer to server and `[0x12][sender_id][header][encoded]` server to viewer, one `StreamSend` with FIN. A lost packet delays only its frame. Stream 1 stays for pre-1.2 peers and PLI |
-| Server | Per-viewer backlog gate (`common/video_policy/include/parties/video_backlog.h`) | Outstanding bytes per viewer connection; a frame is dropped as a whole for a viewer whose outstanding bytes exceed `clamp(viewer_rate x (MinRtt + 250 ms) + keyframe_headroom, 64 KB, 2 MB)`, where `viewer_rate` is the sum of the rates of every sharer the viewer is subscribed to (they share one counter), `MinRtt` is sampled from `QUIC_PARAM_CONN_STATISTICS_V2` inside the connection's QUIC callbacks about once per second; the server loop reads an atomic cache (the smoothed RTT already contains the queueing being detected; with send buffering disabled a send completes only on acknowledgement, so the RTT term keeps a long-RTT viewer from being throttled on a lossless link), and `keyframe_headroom` is the largest recent keyframe. After a drop the viewer resumes only at a keyframe, requested from the sharer once per 200 ms per sharer |
+| Server | Viewer queue clock (`common/video_policy/include/parties/viewer_queue.h`) | Per viewer connection, the age of the oldest unacknowledged video byte minus MinRtt. The worst subscribed viewer's value goes to the sharer as a ViewerQueue datagram at most every 50 ms. See [Viewer queue feedback](#viewer-queue-feedback) |
+| Server | Per-viewer backlog gate (`common/video_policy/include/parties/video_backlog.h`) | Backstop for when the feedback does not keep up; drops are logged at INFO. Outstanding bytes per viewer connection; a frame is dropped as a whole for a viewer whose outstanding bytes exceed `clamp(viewer_rate x (MinRtt + 250 ms) + keyframe_headroom, 64 KB, 2 MB)`, where `viewer_rate` is the sum of the rates of every sharer the viewer is subscribed to (they share one counter), `MinRtt` is sampled from `QUIC_PARAM_CONN_STATISTICS_V2` inside the connection's QUIC callbacks about once per second; the server loop reads an atomic cache (the smoothed RTT already contains the queueing being detected; with send buffering disabled a send completes only on acknowledgement, so the RTT term keeps a long-RTT viewer from being throttled on a lossless link), and `keyframe_headroom` is the largest recent keyframe. After a drop the viewer resumes only at a keyframe, requested from the sharer once per 200 ms per sharer |
 | Server | Per-frame ingress guard (`Session::video_ingress_allowed`, `Session::video_in_buffered_bytes`) | Per-frame streams are accepted only from authenticated sessions currently registered as sharers; any other session's unidirectional stream is aborted at start. At most 16 MB may be buffered across one session's unfinished per-frame streams, and the largest `[header][encoded]` a sharer may send is `VIDEO_FRAME_MAX_PAYLOAD_BYTES` (`VIDEO_FRAME_MAX_BYTES` - 5: 4 MB minus the 5-byte forwarding prefix) |
 | Server and viewer | `VideoFrameReorderBuffer` (`common/video_policy/include/parties/video_frame_reorder.h`) | Per-frame streams complete out of order. The buffer delivers the next expected `frame_seq` immediately, holds newer complete frames for up to 150 ms / 8 frames / 8 MB while an older one is missing, delivers a held keyframe at once, and resets only on an explicit share lifecycle change. Before its first keyframe it holds bounded delta frames without committing a baseline, so a delayed first keyframe is still accepted. Arbitrarily late frames never rewind the active sequence. A gap that is closed by a keyframe is not reported as a loss and sends no PLI: that is how the server resumes a throttled viewer, and the decoder re-anchors on the keyframe. Only a gap resumed at a delta frame (150 ms hold timeout, aborted stream, or buffer overflow) is reported, once, and then the decode gate requests a keyframe through the PLI funnel |
 | Viewer | PLI funnel | Single client entry point with a 500 ms cooldown per sharer, retried every 500 ms while a watched stream still awaits a keyframe, subject to the escalation cap described under [Decode backlog policy](#decode-backlog-policy). The self-preview stream never sends PLIs |
@@ -162,6 +163,48 @@ interval (nominally 1 ms). Reorder storage is separately capped at 8 MB per
 sharer. Queued frames from a stopped share are invalidated by its generation.
 RTT sampling never calls the blocking off-worker `GetParam` API while holding
 the transport mutex needed by the worker's callbacks.
+
+### Viewer queue feedback
+
+Without feedback, a viewer whose downlink is narrower than the stream cycles:
+its queue grows, the backlog gate drops every frame until a keyframe, the
+viewer freezes, and the sharer never slows down because its own uplink is fine.
+The feedback loop tells the sharer about the slowest viewer instead.
+
+1. Every video byte the server charges to a viewer connection is also
+   timestamped by that connection's `ViewerQueueClock`. Bytes retired in
+   `SEND_COMPLETE` (acknowledged, since send buffering is disabled) advance a
+   monotonic retired counter, and outstanding bytes are charged minus retired.
+2. When a sharer's frame arrives, the server reads each subscribed viewer's
+   queue before forwarding the frame: the age of the oldest unacknowledged
+   byte minus MinRtt. At most every 50 ms it sends the sharer the worst value
+   in a ViewerQueue datagram (`docs/protocol.md`).
+3. The sharer turns each report into a refusal deadline. A report above the
+   60 ms budget makes `admit_frame()` skip capture frames for
+   `min(queue - 60 ms, 500 ms)`. Reports arrive only while the sharer sends, so
+   the reported queue must drain by its age on the sharer; holding it until the
+   next report would stop the sharer for good.
+4. A report of 40 ms or more, and any refusal, makes the 500 ms AIMD window
+   congested, so a lasting queue also lowers the encoder bitrate.
+
+The queue is a time, never bytes divided by a rate. In the gate bakeoff, every
+rate-normalised estimate paired with frame skipping collapsed to about 6 fps on
+two of the five links: when the sharer sends little, one frame in flight over a
+small measured rate reads as a full frame interval of queue, and the sharer's
+own skipping drives the spiral.
+
+The thresholds were measured on shaped links, not derived. 60 ms budget and
+40 ms congestion gave zero freezes in all five bakeoff scenarios. 30 ms and
+20 ms throttled a clean link to 47 % of its capacity, because QUIC ACK delay
+(up to about 25 ms) puts a noise floor under the sojourn signal.
+
+The backlog gate stays unchanged as the backstop and should rarely fire. Two
+gaps are known and out of scope here: an encoder that overshoots its bitrate
+target (H.264 at 4K sends several times its target) leaves a standing queue
+at the budget, because frame skipping is then the only lever, and there is no
+per-viewer quality, so one slow viewer lowers the stream for everyone watching
+that sharer.
+
 ### Decode backlog policy
 
 The decode thread queues complete frames per sharer. Two rules trigger a

@@ -1,7 +1,11 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -214,7 +218,7 @@ enum class VideoControl : uint8_t {
     ReservedShareStart     = 0x02,
     ReservedShareStop      = 0x03,
     ReservedNack           = 0x04,
-    ReservedReceiverReport = 0x05,
+    ViewerQueue            = 0x05,  // server -> sharer only
 };
 
 #pragma GCC diagnostic push
@@ -225,11 +229,30 @@ constexpr std::string_view video_control_name(VideoControl control) {
     case VideoControl::ReservedShareStart:     return "ReservedShareStart";
     case VideoControl::ReservedShareStop:      return "ReservedShareStop";
     case VideoControl::ReservedNack:           return "ReservedNack";
-    case VideoControl::ReservedReceiverReport: return "ReservedReceiverReport";
+    case VideoControl::ViewerQueue:            return "ViewerQueue";
     }
     return "UNKNOWN";
 }
 #pragma GCC diagnostic pop
+
+// ViewerQueue datagram: [VIDEO_CONTROL_TYPE][ViewerQueue][queue_ms(u16 LE)].
+// The subtype is the version, so readers ignore trailing bytes and a future
+// field can be appended without breaking older sharers.
+constexpr size_t VIEWER_QUEUE_REPORT_BYTES = 4;
+
+constexpr std::array<uint8_t, VIEWER_QUEUE_REPORT_BYTES> encode_viewer_queue(std::chrono::milliseconds queue) {
+    const auto ms = static_cast<uint16_t>(
+        std::clamp<std::chrono::milliseconds::rep>(queue.count(), 0, 0xFFFF));
+    return {VIDEO_CONTROL_TYPE, static_cast<uint8_t>(VideoControl::ViewerQueue),
+            static_cast<uint8_t>(ms & 0xFF), static_cast<uint8_t>(ms >> 8)};
+}
+
+constexpr std::optional<std::chrono::milliseconds> decode_viewer_queue(const uint8_t* data, size_t len) {
+    if (len < VIEWER_QUEUE_REPORT_BYTES || data[0] != VIDEO_CONTROL_TYPE ||
+        data[1] != static_cast<uint8_t>(VideoControl::ViewerQueue))
+        return std::nullopt;
+    return std::chrono::milliseconds(data[2] | (data[3] << 8));
+}
 
 // CHAT_HISTORY_REQ / CHAT_SEARCH before_id: no upper bound, start from the newest.
 constexpr uint64_t CHAT_BEFORE_ID_LATEST = 0;

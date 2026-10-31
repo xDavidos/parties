@@ -1468,6 +1468,7 @@ void Server::forward_video_frame(const Session& sharer_session, const ParsedVide
     std::shared_ptr<const std::vector<uint8_t>> shared_frame = std::move(frame);
 
     std::vector<std::shared_ptr<Session>> targets;
+    std::optional<std::chrono::milliseconds> worst_viewer_queue;
     bool     want_keyframe = false;
     uint32_t dropped = 0;
     for (auto& s : quic_.get_sessions()) {
@@ -1476,6 +1477,9 @@ void Server::forward_video_frame(const Session& sharer_session, const ParsedVide
             s->channel_id != channel ||
             !s->subscribed_sharers.count(sharer))
             continue;
+
+        const auto queue = s->transport_stats.video_queue_delay(now);
+        worst_viewer_queue = (std::max)(worst_viewer_queue.value_or(queue), queue);
 
         const int64_t threshold = viewer_backlog_threshold(*s, sharer_rates, keyframe_headroom);
         auto& gate = s->video_gates[sharer];
@@ -1501,12 +1505,19 @@ void Server::forward_video_frame(const Session& sharer_session, const ParsedVide
         }
     }
 
+    if (worst_viewer_queue && sharer_video_state_[sharer].queue_report.allow(now)) {
+        const auto report = protocol::encode_viewer_queue(*worst_viewer_queue);
+        quic_.send_datagram(sharer_session.id, report.data(), report.size(),
+                            DatagramPriority::AheadOfVideo);
+    }
+
     if (dropped) {
         auto& st = sharer_video_state_[sharer];
         st.drops_since_log += dropped;
         if (st.drop_log.allow(now)) {
-            LOG_DEBUG("Sharer {}: dropped {} viewer-frame(s) over backlog threshold in the last interval (sharer rate {:.0f} B/s, keyframe headroom {} B)",
-                      sharer, st.drops_since_log, sharer_rate, keyframe_headroom);
+            LOG_INFO("Sharer {}: backlog gate dropped {} viewer-frame(s) in the last interval (worst viewer queue {} ms, sharer rate {:.0f} B/s, keyframe headroom {} B)",
+                     sharer, st.drops_since_log, worst_viewer_queue.value_or(std::chrono::milliseconds{0}).count(),
+                     sharer_rate, keyframe_headroom);
             st.drops_since_log = 0;
         }
     }
