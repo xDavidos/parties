@@ -4,6 +4,7 @@
 #include <client/exit_codes.h>
 #include <client/legacy_import.h>
 #include <client/sqlite_file.h>
+#include <client/supervisor_link.h>
 #include <client/win32_single_instance.h>
 #include <parties/version.h>
 #include <parties/crypto.h>
@@ -19,6 +20,7 @@
 #include "system_diagnostics.h"
 
 #include <dwmapi.h>
+#include <shellapi.h>
 #include <windowsx.h>
 #ifndef PARTIES_RETAIL
 #include <RmlUi/Debugger.h>
@@ -306,6 +308,16 @@ static int refuse_to_start(ExitCode code, const std::filesystem::path& where, co
 
 static constexpr int kInitFailed = static_cast<int>(ExitCode::InitFailed);
 
+static std::unique_ptr<SupervisorLink> connect_supervisor() {
+    int argc = 0;
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    std::vector<std::wstring> args;
+    for (int i = 1; argv && i < argc; ++i) args.emplace_back(argv[i]);
+    LocalFree(argv);
+    const auto version = parties::update::Version::parse(parties::APP_VERSION);
+    return SupervisorLink::from_args(args, version.value_or(parties::update::Version{}));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Entry point
 // ═══════════════════════════════════════════════════════════════════════
@@ -364,6 +376,7 @@ int main(int argc, char* argv[]) {
 #endif
     LOG_INFO("{} Client v{}", parties::APP_NAME, parties::APP_VERSION);
     LOG_INFO("Data directory: {}", utf8_path(data.data_dir));
+    std::unique_ptr<SupervisorLink> supervisor = connect_supervisor();
     parties::alloctrack::start_reporting(10);
 
 #ifdef PARTIES_RETAIL
@@ -383,6 +396,7 @@ int main(int argc, char* argv[]) {
 #endif
 
     App app;
+    app.attach_supervisor(std::move(supervisor));
     const Settings::OpenResult opened = app.open_data(data.settings_paths());
     if (opened.status != Settings::OpenStatus::Ready)
         return refuse_to_start(opened.status == Settings::OpenStatus::TooNew

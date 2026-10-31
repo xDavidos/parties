@@ -15,6 +15,9 @@
 #include <parties/video_common.h>
 #include <parties/video_frame_reorder.h>
 #include <parties/video_send_controller.h>
+#ifdef _WIN32
+#include <parties/update/link.h>
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -102,6 +105,12 @@ public:
     // refuse to start, with a native message, when the data is unusable.
     bool init(PlatformBridge bridge, Rml::Context* rml_context);
     void shutdown();
+#ifdef _WIN32
+    // Call before init(). A supervising launcher owns updates, so the legacy
+    // updater stays off and "restart to update" goes to the launcher.
+    void supervise_updates(std::function<void()> restart_to_update);
+    void apply_update_status(const update::link::Status& status);
+#endif
     void tick();
     void load_saved_prefs();
 
@@ -383,6 +392,7 @@ private:
 
 #ifdef _WIN32
     std::unique_ptr<class AutoUpdater> updater_;
+    std::function<void()> restart_to_update_;  // set only when supervised
 #endif
 
     // Pending file uploads: file data cached until CHAT_MESSAGE assigns attachment IDs

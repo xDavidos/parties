@@ -133,6 +133,7 @@ else()
         src/windows/ui_manager.cpp
         src/windows/context_window_manager.cpp
         src/windows/win32_tray.cpp
+        src/windows/supervisor_link.cpp
 
         # Parties application adapter over RmlUi's upstream Win32/DX12 backend
 
@@ -307,6 +308,9 @@ target_link_libraries(parties_client
         $<$<NOT:$<BOOL:${BUILD_IN_RETAIL}>>:RmlUi::Debugger>
         ${SPEEXDSP_LIBRARY}
 )
+if(WIN32)
+    target_link_libraries(parties_client PRIVATE parties_update_link)
+endif()
 
 if(APPLE)
     # Shared Apple frameworks
