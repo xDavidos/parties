@@ -370,6 +370,17 @@ if(TARGET parties_update_core)
             $<TARGET_FILE:parties_boot_stub> $<TARGET_FILE:update_fake_launcher>)
         set_tests_properties(update_stub PROPERTIES TIMEOUT 300)
     endif()
+
+    add_executable(update_release_ops_test update_release_ops_test.cpp)
+    target_link_libraries(update_release_ops_test PRIVATE parties_release_ops parties_common)
+    add_test(NAME update_release_ops COMMAND update_release_ops_test)
+    if(PARTIES_UPDATE_TESTING)
+        # The tool's --keyring flag exists only in testing builds.
+        add_executable(update_manifest_tool_test update_manifest_tool_test.cpp)
+        target_link_libraries(update_manifest_tool_test PRIVATE parties_update_release_keys parties_common)
+        add_dependencies(update_manifest_tool_test parties_manifest_tool)
+        add_test(NAME update_manifest_tool COMMAND update_manifest_tool_test $<TARGET_FILE:parties_manifest_tool>)
+    endif()
     # 100000 seeded random-walk sequences; about two minutes in a Debug build.
     set_tests_properties(update_probation PROPERTIES TIMEOUT 900)
 endif()
