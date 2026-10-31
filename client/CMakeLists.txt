@@ -72,6 +72,7 @@ set(CLIENT_COMMON_SOURCES
     src/lobby_model.cpp
     src/server_list_model.cpp
     src/settings.cpp
+    src/sqlite_file.cpp
     src/audio_engine.cpp
     src/voice_mixer.cpp
     src/miniaudio_impl.cpp
