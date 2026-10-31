@@ -344,3 +344,10 @@ if(WIN32 AND BUILD_CLIENT)
     add_test(NAME parties_rmlui_dx12_resize_msaa COMMAND parties_rmlui_dx12_multiwindow_test --resize --msaa)
     set_tests_properties(parties_rmlui_dx12_resize parties_rmlui_dx12_resize_msaa PROPERTIES TIMEOUT 60)
 endif()
+
+# ── Update manager pure core (offline, deterministic) ────────────────────────
+foreach(update_test version)
+    add_executable(update_${update_test}_test update_${update_test}_test.cpp)
+    target_link_libraries(update_${update_test}_test PRIVATE parties_update_core parties_common)
+    add_test(NAME update_${update_test} COMMAND update_${update_test}_test)
+endforeach()
