@@ -12,6 +12,7 @@
 #include "state_store.h"
 #include "testing.h"
 
+#include <parties/crypto.h>
 #include <parties/update/install_layout.h>
 
 #include <algorithm>
@@ -299,6 +300,8 @@ std::expected<std::optional<BuildId>, std::string> apply_state(const InstallPlan
     return std::optional<BuildId>();
 }
 
+ChooseIdentity identity_chooser(const SetupOptions& o);
+
 Outcome install(const SetupOptions& o, const Payload& payload) {
     auto lock = Mutex::setup(o);
     if (!lock) return failed("Another Parties setup is running. Wait for it to finish.");
@@ -309,7 +312,7 @@ Outcome install(const SetupOptions& o, const Payload& payload) {
     // pointer to a portable copy, and before the first start the data root
     // must already hold its identity.
     testing::before_effect();
-    const LegacyData legacy = move_legacy_data(o.data, legacy_dirs(o.legacy));
+    const LegacyData legacy = move_legacy_data(o.data, legacy_dirs(o.legacy), identity_chooser(o));
     if (!legacy.error.empty())
         return failed("Parties could not copy your data, so nothing was installed: " + legacy.error);
 
@@ -481,6 +484,44 @@ int show(const wchar_t* instruction, const std::wstring& content, PCWSTR icon,
     if (FAILED(TaskDialogIndirect(&cfg, &pressed, nullptr, checkbox ? &verified : nullptr))) return IDCANCEL;
     if (checked) *checked = verified != FALSE;
     return pressed;
+}
+
+constexpr int kKeepLive = 101;
+constexpr int kUseLegacy = 102;
+
+IdentityChoice ask_identity(const DataPaths& data, const client::IdentityConflict& c) {
+    const std::wstring legacy = widen(public_key_fingerprint(c.legacy));
+    const std::wstring live = c.live ? widen(public_key_fingerprint(*c.live)) : std::wstring();
+    const std::wstring installed = c.live ? L"The installed Parties uses the identity with fingerprint " + live + L"."
+                                          : std::wstring(L"The installed Parties has no identity yet.");
+    const std::wstring content =
+        L"People you talk to know you by your identity.\n\n" + installed + L"\n\nThe portable copy in " +
+        c.legacy_db.parent_path().wstring() + L" uses the identity with fingerprint " + legacy +
+        L".\n\nThe data you do not choose stays saved as a backup in " + data.backups().wstring() + L".";
+    const std::wstring keep = c.live ? L"Keep the installed identity\n" + live : std::wstring(L"Keep the installed data");
+    const std::wstring use = L"Use the portable copy's identity, with its servers and settings\n" + legacy;
+    const TASKDIALOG_BUTTON buttons[] = {{kKeepLive, keep.c_str()}, {kUseLegacy, use.c_str()}};
+    TASKDIALOGCONFIG cfg{sizeof cfg};
+    cfg.dwFlags = TDF_USE_COMMAND_LINKS;
+    cfg.pszWindowTitle = L"Parties";
+    cfg.pszMainIcon = TD_WARNING_ICON;
+    cfg.pszMainInstruction = L"Which identity should Parties use?";
+    cfg.pszContent = content.c_str();
+    cfg.pButtons = buttons;
+    cfg.cButtons = static_cast<UINT>(std::size(buttons));
+    cfg.nDefaultButton = kKeepLive;
+    int pressed = kKeepLive;
+    if (FAILED(TaskDialogIndirect(&cfg, &pressed, nullptr, nullptr))) return IdentityChoice::KeepLive;
+    return pressed == kUseLegacy ? IdentityChoice::UseLegacy : IdentityChoice::KeepLive;
+}
+
+ChooseIdentity identity_chooser(const SetupOptions& o) {
+    if (auto scripted = testing::identity_choice())
+        return [legacy = *scripted == "legacy"](const client::IdentityConflict&) {
+            return legacy ? IdentityChoice::UseLegacy : IdentityChoice::KeepLive;
+        };
+    if (o.silent) return {};
+    return [data = o.data](const client::IdentityConflict& c) { return ask_identity(data, c); };
 }
 
 // Runs `work` on a worker thread behind a marquee progress dialog.

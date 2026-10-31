@@ -92,6 +92,7 @@ void before_effect() {
 }
 
 std::optional<std::string> scripted_recovery() { return env("PARTIES_TEST_RECOVERY"); }
+std::optional<std::string> identity_choice() { return env("PARTIES_TEST_IDENTITY_CHOICE"); }
 
 std::optional<std::chrono::milliseconds> exit_after_healthy() {
     auto text = env("PARTIES_TEST_EXIT_AFTER_HEALTHY_MS");
@@ -132,6 +133,7 @@ bool enabled() { return false; }
 Timing timing() { return {}; }
 void before_effect() {}
 std::optional<std::string> scripted_recovery() { return std::nullopt; }
+std::optional<std::string> identity_choice() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> exit_after_healthy() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> job_cap() { return std::nullopt; }
 // Empty until a production key is committed, so no manifest verifies.

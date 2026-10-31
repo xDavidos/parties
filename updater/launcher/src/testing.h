@@ -31,6 +31,10 @@ void before_effect();
 // PARTIES_TEST_RECOVERY=<choice>: answer the recovery dialog without showing it.
 std::optional<std::string> scripted_recovery();
 
+// PARTIES_TEST_IDENTITY_CHOICE=live|legacy: answer setup's identity question
+// without showing it, even with --silent.
+std::optional<std::string> identity_choice();
+
 // PARTIES_TEST_EXIT_AFTER_HEALTHY_MS=<n>: ask the app to exit n ms after it
 // reports healthy, so a harness can end a real client through its normal path.
 std::optional<std::chrono::milliseconds> exit_after_healthy();

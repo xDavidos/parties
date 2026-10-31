@@ -5,9 +5,12 @@
 #include "shell_integration.h"
 #include "testing.h"
 
-#include <client/legacy_import.h>
+#include <parties/crypto.h>
 
 #include <algorithm>
+#include <charconv>
+#include <format>
+#include <fstream>
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -50,6 +53,35 @@ std::vector<fs::path> portable_process_dirs() {
     return dirs;
 }
 
+std::string hex(const PublicKey& key) {
+    std::string out;
+    for (uint8_t b : key) out += std::format("{:02x}", b);
+    return out;
+}
+
+std::vector<PublicKey> declined(const DataPaths& data) {
+    std::vector<PublicKey> out;
+    std::ifstream in(data.declined_identities());
+    for (std::string line; std::getline(in, line);) {
+        PublicKey key{};
+        bool ok = line.size() >= 64;
+        for (size_t i = 0; ok && i < key.size(); ++i)
+            ok = std::from_chars(line.data() + 2 * i, line.data() + 2 * i + 2, key[i], 16).ec == std::errc{};
+        if (ok) out.push_back(key);
+    }
+    return out;
+}
+
+void decline(const DataPaths& data, const PublicKey& key) {
+    std::error_code ec;
+    fs::create_directories(data.declined_identities().parent_path(), ec);
+    std::ofstream(data.declined_identities(), std::ios::app) << hex(key) << "\n";
+}
+
+std::string fingerprint(const std::optional<PublicKey>& key) {
+    return key ? public_key_fingerprint(*key) : std::string("(none)");
+}
+
 } // namespace
 
 std::vector<fs::path> legacy_dirs(const LegacyHints& hints) {
@@ -84,7 +116,7 @@ bool wait_for_portable_exit(const std::wstring& object_prefix, std::chrono::mill
     return released;
 }
 
-LegacyData move_legacy_data(const DataPaths& data, std::span<const fs::path> dirs) {
+LegacyData move_legacy_data(const DataPaths& data, std::span<const fs::path> dirs, const ChooseIdentity& choose) {
     const client::DataLocation location{data.data(), data.backups()};
     std::error_code ec;
     fs::create_directories(location.data_dir, ec);
@@ -101,6 +133,32 @@ LegacyData move_legacy_data(const DataPaths& data, std::span<const fs::path> dir
     const bool saved = !imported.preserved.empty() || !kept.preserved.empty();
     if (saved && imported.status != client::LegacyImportResult::Status::Imported)
         out.note = "A copy of your older Parties data was saved in " + utf8(data.backups()) + ".";
+
+    const auto conflict = client::find_identity_conflict(location, dirs, declined(data));
+    if (!conflict) return out;
+    log("the live identity {} differs from the portable identity {} in {}", fingerprint(conflict->live),
+        fingerprint(conflict->legacy), utf8(conflict->legacy_db));
+    const IdentityChoice choice = choose ? choose(*conflict) : IdentityChoice::KeepLive;
+    auto add_note = [&](const std::string& sentence) { out.note += (out.note.empty() ? "" : " ") + sentence; };
+    if (choice == IdentityChoice::KeepLive) {
+        if (choose) {
+            decline(data, conflict->legacy);
+            return out;
+        }
+        add_note((conflict->live ? "Parties kept the identity it already had, with fingerprint " +
+                                       fingerprint(conflict->live) + "."
+                                 : std::string("This Parties has no identity yet.")) +
+                 " The identity of the portable copy in " + utf8(conflict->legacy_db.parent_path()) +
+                 ", with fingerprint " + fingerprint(conflict->legacy) + ", is saved in " + utf8(data.backups()) +
+                 ". Run the installer again to choose it.");
+        return out;
+    }
+    fs::path replaced;
+    std::string error;
+    if (!client::adopt_legacy_database(location, conflict->legacy_db, replaced, error)) return {error, {}};
+    add_note("Parties now uses the identity of the portable copy in " + utf8(conflict->legacy_db.parent_path()) +
+             ", with fingerprint " + fingerprint(conflict->legacy) + ". The data it replaced is saved as " +
+             utf8(replaced) + ".");
     return out;
 }
 
