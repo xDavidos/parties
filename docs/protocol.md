@@ -21,7 +21,7 @@ Parties is a self-hosted VOIP application with screen sharing. All communication
 | Control plane | QUIC bidirectional stream 0 | Auth, channels, admin, screen share signaling |
 | Video plane (1.2+) | QUIC unidirectional streams, one per frame | Screen share frames, sharer -> server and server -> viewer; a lost packet delays only its own frame |
 | Video plane (legacy) + video control | QUIC bidirectional stream 1 | Screen share frames for pre-1.2 peers (reliable, ordered); viewer -> server PLI keyframe requests |
-| Voice plane + sharer-bound control | QUIC datagrams | Opus audio (unreliable, unordered, `DGRAM_PRIORITY`); server -> sharer PLI (priority datagram, never queued behind video) |
+| Voice plane + sharer-bound control | QUIC datagrams | Opus audio (unreliable, unordered, `DGRAM_PRIORITY`); server -> sharer PLI and ViewerQueue reports (priority datagrams, never queued behind video) |
 
 - **ALPN**: `parties` (7 bytes)
 - **TLS**: 1.3 via wolfSSL (QUIC-aware)
@@ -529,6 +529,11 @@ Dropping is per (viewer, sharer) and never affects other viewers of the same
 sharer. Dropping a keyframe is deliberate when the viewer is over threshold:
 queueing it would only add delay.
 
+The gate is a backstop. The sharer is expected to slow down before a viewer
+reaches the threshold, driven by [ViewerQueue reports](#viewerqueue-report-server---sharer),
+so the server logs gate drops at INFO with the worst viewer queue: a drop
+means the feedback did not keep up.
+
 The RTT term is required because the counter also holds bytes that are merely in
 flight: with send buffering disabled a send completes only when it is
 acknowledged, never before one RTT, so without it a long-RTT viewer would be
@@ -542,7 +547,8 @@ The sharer keeps the same outstanding-bytes counter toward the server
 | Control | Rule |
 |---------|------|
 | Admission | A capture frame is encoded only when the outstanding bytes imply no more than ~120 ms of queueing beyond the RTT at the current bitrate; otherwise the capture frame is skipped (no keyframe needed because `frame_seq` is stamped after encode) |
-| Decrease (x0.8) | A 500 ms window is congested when its peak queueing delay is >= 80 ms, actual (spurious-corrected) packet loss exceeds 3 %, or any admission, encoder, or send drop occurred in it; after two consecutive congested windows the bitrate is multiplied by 0.8 (not below the 800 kbps floor). A clean window resets the count |
+| Viewer admission | A ViewerQueue report above the 60 ms budget refuses capture frames for `min(queue - 60 ms, 500 ms)` after it arrives, that is until the reported queue has drained to the budget. A newer report replaces the deadline. These refusals count as admission drops |
+| Decrease (x0.8) | A 500 ms window is congested when its peak queueing delay is >= 80 ms, actual (spurious-corrected) packet loss exceeds 3 %, any admission, encoder, or send drop occurred in it, or a ViewerQueue report in it was >= 40 ms; after two consecutive congested windows the bitrate is multiplied by 0.8 (not below the 800 kbps floor). A clean window resets the count |
 | Increase (x1.08) | After 2 s (four consecutive 500 ms windows) without congestion, loss, or drops, up to the user's target bitrate |
 | Floor | 800 kbps (`VIDEO_ADAPT_MIN_BITRATE`); below this the sender drops frames instead of lowering quality further |
 | Reconfigure rate | Encoder bitrate changes at most every 500 ms and only when they differ by >= 10 %; the final step onto the user's target (or onto the floor) is always published to the encoder even when it is smaller than the 10 % delta gate |
@@ -599,7 +605,7 @@ Both forms are accepted on receive. The body is:
 | SHARE_START | 0x02 | -- | (reserved, unused) |
 | SHARE_STOP | 0x03 | -- | (reserved, unused) |
 | NACK | 0x04 | -- | (reserved for a possible datagram video path; not implemented, do not reuse) |
-| RECEIVER_REPORT | 0x05 | -- | (reserved, same as above) |
+| VIEWER_QUEUE | 0x05 | queue_ms (u16) | Server -> sharer only: worst current viewer queue (see below) |
 
 PLI rate limits:
 
@@ -608,6 +614,29 @@ PLI rate limits:
 | Client (sender of PLI) | One funnel with a 500 ms cooldown per target; while a watched stream is still waiting for a keyframe the PLI is retried every 500 ms. Escalation cap: after two consecutive stale-backlog flushes without a keyframe the viewer stops sending PLIs for that stream (logs "decoder too slow") and waits for the sharer's periodic keyframe. The self-preview stream never sends PLIs |
 | Client (receiver of PLI, sharer) | Incoming PLIs force a keyframe through a 500 ms cooldown |
 | Server | Per-session token bucket of 4 PLIs/s with a burst of 4, checked before any work; PLIs from a viewer that is currently over its backlog threshold are not forwarded (the viewer would drop the keyframe anyway); forwarded PLIs are coalesced per sharer |
+
+### ViewerQueue report (server -> sharer)
+
+```
++------+------+-------------------+
+| 0x03 | 0x05 | queue_ms (u16 LE) |
+| 1 B  | 1 B  |       2 B         |
++------+------+-------------------+
+```
+
+`queue_ms` is the largest queue delay among the viewers currently subscribed to
+this sharer, clamped to 0-65535. A viewer's queue delay is the age of the oldest
+video byte the server has sent on that viewer's connection and not yet seen
+acknowledged, minus the connection's MinRtt. It is a time on purpose: bytes
+divided by a measured rate inflate when the sharer sends little.
+
+| Rule | Value |
+|------|-------|
+| Transport | Priority QUIC datagram (`DGRAM_PRIORITY`), like the server -> sharer PLI. A lost report is replaced by the next one |
+| Rate | At most one per sharer per 50 ms, sampled when one of the sharer's frames reaches the server and before that frame is forwarded, and only when the sharer has at least one subscribed viewer |
+| Multiple viewers | The slowest viewer sets the pace for every viewer of the sharer. A viewer watching several sharers reports the same connection queue to each of them |
+| Direction | Server -> sharer only. The server's `handle_video_control` accepts only PLI from clients, so a client cannot inject a report toward another sharer |
+| Compatibility | No protocol version bump. Older clients ignore unknown video control subtypes, and older servers never send it. Readers require at least 4 bytes and ignore trailing bytes; an incompatible change takes a new subtype |
 
 ## 8. Screen Sharing Protocol
 
