@@ -532,6 +532,7 @@ struct Scenario {
     std::function<void(const World&, const std::string&)> verify;
     bool http = false;                             // the feed comes from FeedServer
     bool kill_points = true;
+    std::map<std::string, std::string> env{};      // overrides the launcher's environment
 };
 
 enum class Outcome { Converged, KillNotReached, Failed };
@@ -546,6 +547,7 @@ Outcome run_scenario(const Scenario& sc, std::optional<int> kill_at) {
         {"PARTIES_FAKE_RUN_MS", "700"},
         {"PARTIES_FAKE_FAULT", sc.b_fault.empty() ? "" : "2.0.0.0:" + sc.b_fault},
     };
+    for (const auto& [k, v] : sc.env) env[k] = v;
     if (sc.prepare) sc.prepare(w);
 
     bool killed = false;
@@ -758,7 +760,7 @@ std::vector<Scenario> scenarios() {
                        if (w.state()->find(w.b.entry.id())) fail(label, "a stale manifest staged a build");
                        if (markers(w.db(), "1.0.0.0") < 1) fail(label, "A stopped working");
                    },
-                   true, false});
+                   true, false, {{"PARTIES_FAKE_FAULT", "1.0.0.0:run-until-checked"}}});
 
     // B cannot talk to this launcher, so the newest build A can leave its revoked self for is the older D.
     out.push_back({"good-revoked", "", 1, 1, true,
@@ -825,7 +827,7 @@ std::vector<Scenario> scenarios() {
                            fail(label, "the app was not told about the newer build it cannot take yet");
                        if (w.state()->find(w.b.entry.id())) fail(label, "a build this launcher cannot run was staged");
                    },
-                   true, false});
+                   true, false, {{"PARTIES_FAKE_FAULT", "1.0.0.0:run-until-checked"}}});
 
     out.push_back({"retention", "", 1, 1, false,
                    [](World& w) {

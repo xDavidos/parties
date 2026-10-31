@@ -218,8 +218,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     const std::string status_log = env("PARTIES_FAKE_STATUS_LOG");
     bool restart_asked = false;
     bool downgrade_asked = false;
-    auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(run_ms > 0 ? run_ms : 1000);
-    while (std::chrono::steady_clock::now() < end) {
+    // These faults assert on what the check told the app, so the app stays
+    // until the check of its channel answers, however long that takes.
+    const bool until_checked = fault == "run-until-checked" || fault == "wait-then-downgrade";
+    const Channel channel = fault == "wait-then-downgrade" ? Channel::Beta : Channel::Stable;
+    bool checking = false;
+    bool answered = false;
+    const auto started = std::chrono::steady_clock::now();
+    auto running = [&] {
+        auto elapsed = std::chrono::steady_clock::now() - started;
+        if (until_checked && !answered) return elapsed < std::chrono::seconds(30);
+        return elapsed < std::chrono::milliseconds(run_ms > 0 ? run_ms : 1000);
+    };
+    while (running()) {
         auto m = peer.poll();
         if (!m) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -228,6 +239,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         if (std::holds_alternative<link::ExitRequested>(*m)) break;
         if (std::holds_alternative<link::Status>(*m) && !status_log.empty())
             std::ofstream(status_log, std::ios::app) << link::write(*m);
+        if (auto* status = std::get_if<link::Status>(&*m)) {
+            if (status->phase == link::Phase::Checking) checking = true;
+            else if (checking && status->channel == channel) answered = true;
+        }
         if (auto* status = std::get_if<link::Status>(&*m); status && fault == "wait-then-downgrade" &&
                                                           !downgrade_asked && status->phase == link::Phase::Pinned &&
                                                           status->downgrade) {
