@@ -342,7 +342,7 @@ void AppCore::tick()
             ofn.lpstrFile = save_buf;
             ofn.nMaxFile = MAX_PATH;
             ofn.lpstrFilter = "All Files\0*.*\0";
-            ofn.Flags = OFN_OVERWRITEPROMPT;
+            ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
 
             if (GetSaveFileNameA(&ofn)) {
                 std::ofstream out(save_buf, std::ios::binary);
@@ -3387,7 +3387,7 @@ void AppCore::setup_chat_model_callbacks()
         ofn.lpstrFile = file_buf;
         ofn.nMaxFile = sizeof(file_buf);
         ofn.lpstrFilter = "All Files\0*.*\0";
-        ofn.Flags = OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_EXPLORER;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_EXPLORER | OFN_NOCHANGEDIR;
 
         if (GetOpenFileNameA(&ofn)) {
             namespace fs = std::filesystem;
