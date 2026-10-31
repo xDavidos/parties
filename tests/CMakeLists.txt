@@ -346,7 +346,7 @@ if(WIN32 AND BUILD_CLIENT)
 endif()
 
 # ── Update manager pure core (offline, deterministic) ────────────────────────
-foreach(update_test version)
+foreach(update_test version data_compat)
     add_executable(update_${update_test}_test update_${update_test}_test.cpp)
     target_link_libraries(update_${update_test}_test PRIVATE parties_update_core parties_common)
     add_test(NAME update_${update_test} COMMAND update_${update_test}_test)
