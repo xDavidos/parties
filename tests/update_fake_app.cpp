@@ -186,7 +186,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (pipe.empty() || data_dir.empty()) return 2;
     Link peer(pipe);
     if (!peer.ok()) return 2;
-    peer.send(link::Hello{link::kProtocol, 1, *Version::parse(build.version)});
+    peer.send(link::Hello{kLinkProtocol, kMinLauncherLink, *Version::parse(build.version)});
     auto welcome_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     bool welcomed = false;
     while (!welcomed && std::chrono::steady_clock::now() < welcome_deadline) {

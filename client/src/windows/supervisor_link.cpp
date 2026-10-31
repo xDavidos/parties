@@ -13,8 +13,6 @@ namespace parties::client {
 namespace {
 
 constexpr std::wstring_view kFlag = L"--supervisor-pipe=";
-// The oldest launcher link protocol this app still speaks.
-constexpr uint32_t kMinLauncherLink = 1;
 
 } // namespace
 
@@ -38,7 +36,7 @@ std::unique_ptr<SupervisorLink> SupervisorLink::from_args(std::span<const std::w
         return link;
     }
     LOG_INFO("Supervised by the Parties launcher");
-    link->send(update::link::Hello{update::link::kProtocol, kMinLauncherLink, version});
+    link->send(update::link::Hello{update::kLinkProtocol, update::kMinLauncherLink, version});
     return link;
 }
 

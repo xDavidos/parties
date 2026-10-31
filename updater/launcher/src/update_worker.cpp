@@ -120,7 +120,7 @@ CheckOutcome UpdateWorker::run(const CheckRequest& request) {
     if (!durable_replace(trust_file_, write_trust(trust), write_error)) return error(write_error);
 
     out.events.push_back(ManifestSeen{manifest->payload().revoked});
-    UpdateDecision plan = plan_update(request.state, *manifest, link::kProtocol, request.live_db);
+    UpdateDecision plan = plan_update(request.state, *manifest, kLinkProtocol, request.live_db);
     if (plan.new_intent) out.events.push_back(ChannelIntentSet{channel, *plan.new_intent});
 
     if (auto* stage = std::get_if<StageBuild>(&plan.plan)) {

@@ -6,6 +6,7 @@
 // without a protocol bump. Both sides link this codec; it depends on RapidJSON
 // only, so the app does not pull in the rest of the update core.
 
+#include <parties/update/link_protocol.h>
 #include <parties/update/manifest.h>
 #include <parties/update/version.h>
 
@@ -18,15 +19,11 @@
 
 namespace parties::update::link {
 
-// The link protocol this code speaks. The app supports every launcher
-// protocol from its min_launcher_link up to this.
-inline constexpr uint32_t kProtocol = 1;
-
 // --- App to launcher ---
 
 struct Hello {
-    uint32_t link_protocol = kProtocol;
-    uint32_t min_launcher_link = 1;
+    uint32_t link_protocol = kLinkProtocol;
+    uint32_t min_launcher_link = kMinLauncherLink;
     Version version;
     friend bool operator==(const Hello&, const Hello&) = default;
 };
@@ -54,7 +51,7 @@ using AppMessage = std::variant<Hello, Healthy, Request>;
 // --- Launcher to app ---
 
 struct Welcome {
-    uint32_t link_protocol = kProtocol;
+    uint32_t link_protocol = kLinkProtocol;
     friend bool operator==(const Welcome&, const Welcome&) = default;
 };
 
