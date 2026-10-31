@@ -83,8 +83,10 @@ public:
 
         if (QUIC_FAILED(api.StreamSend(stream, bufs, count,
                                        QUIC_SEND_FLAG_START | QUIC_SEND_FLAG_FIN, ctx))) {
-            if (const uint32_t n = charged.exchange(0, std::memory_order_acq_rel))
+            if (const uint32_t n = charged.exchange(0, std::memory_order_acq_rel)) {
                 stats_.video_outstanding_bytes_.fetch_sub(n, std::memory_order_relaxed);
+                stats_.video_retired_bytes_.fetch_add(n, std::memory_order_relaxed);
+            }
             api.StreamShutdown(stream,
                 QUIC_STREAM_SHUTDOWN_FLAG_ABORT | QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE, 0);
             return FrameStreamResult::SendFailed;

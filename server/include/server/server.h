@@ -76,6 +76,14 @@ private:
         uint32_t      drops_since_log = 0;
         int64_t       max_keyframe_bytes = 0;
         std::optional<int64_t> max_keyframe_at_us;
+        struct ReportSnap {
+            uint64_t retired = 0;
+            int64_t  outstanding = 0;
+            int64_t  at_us = 0;
+            uint32_t kbps = 0;
+        };
+        Coalescer report{50'000};
+        std::unordered_map<uint32_t, ReportSnap> report_snaps;
     };
     std::unordered_map<UserId, SharerVideoState> sharer_video_state_;
 

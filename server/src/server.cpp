@@ -75,6 +75,7 @@ bool Server::start(const Config& cfg) {
     }
 
     LOG_INFO("{} started successfully", config_.server_name);
+    LOG_INFO("Proto gate variant: {}", proto_gate_name());
     return true;
 }
 
@@ -1468,6 +1469,13 @@ void Server::forward_video_frame(const Session& sharer_session, const ParsedVide
     std::shared_ptr<const std::vector<uint8_t>> shared_frame = std::move(frame);
 
     std::vector<std::shared_ptr<Session>> targets;
+    struct ReportViewer {
+        std::shared_ptr<Session> session;
+        int64_t  outstanding;
+        uint64_t retired;
+    };
+    std::vector<ReportViewer> report_viewers;
+    const int proto = proto_gate_variant();
     bool     want_keyframe = false;
     uint32_t dropped = 0;
     for (auto& s : quic_.get_sessions()) {
@@ -1479,7 +1487,22 @@ void Server::forward_video_frame(const Session& sharer_session, const ParsedVide
 
         const int64_t threshold = viewer_backlog_threshold(*s, sharer_rates, keyframe_headroom);
         auto& gate = s->video_gates[sharer];
-        switch (gate.admit(s->transport_stats.video_outstanding_bytes(), threshold, keyframe)) {
+        const int64_t outstanding = s->transport_stats.video_outstanding_bytes();
+        if (proto_gate_reports())
+            report_viewers.push_back({s, outstanding, s->transport_stats.video_retired_bytes()});
+        GateDecision decision;
+        if (proto == 4) {
+            const bool was_awaiting = gate.awaiting_keyframe();
+            if (keyframe && was_awaiting && outstanding <= 2 * threshold) {
+                decision = gate.admit(0, threshold, true);
+            } else {
+                decision = gate.admit(outstanding, threshold, keyframe);
+                if (!was_awaiting && outstanding > threshold) want_keyframe = true;
+            }
+        } else {
+            decision = gate.admit(outstanding, threshold, keyframe);
+        }
+        switch (decision) {
         case GateDecision::Forward:
             targets.push_back(s);
             break;
@@ -1508,6 +1531,54 @@ void Server::forward_video_frame(const Session& sharer_session, const ParsedVide
             LOG_DEBUG("Sharer {}: dropped {} viewer-frame(s) over backlog threshold in the last interval (sharer rate {:.0f} B/s, keyframe headroom {} B)",
                       sharer, st.drops_since_log, sharer_rate, keyframe_headroom);
             st.drops_since_log = 0;
+        }
+    }
+
+    if (!report_viewers.empty()) {
+        auto& st = sharer_video_state_[sharer];
+        if (st.report.allow(now)) {
+            uint32_t max_backlog = 0;
+            uint32_t max_queue_ms = 0;
+            uint32_t min_kbps = 0;
+            for (auto& rv : report_viewers) {
+                const auto& v = rv.session;
+                const int64_t out = (std::max<int64_t>)(0, rv.outstanding);
+                const uint64_t retired = rv.retired;
+                double viewer_rate = 0.0;
+                for (UserId sid : v->subscribed_sharers) {
+                    auto it = sharer_rates.find(sid);
+                    if (it != sharer_rates.end()) viewer_rate += it->second;
+                }
+                max_backlog = (std::max)(max_backlog,
+                    static_cast<uint32_t>((std::min<int64_t>)(out, 0xFFFFFFFFll)));
+                if (viewer_rate > 0.0) {
+                    const double q = static_cast<double>(out) / viewer_rate * 1000.0;
+                    max_queue_ms = (std::max)(max_queue_ms,
+                        static_cast<uint32_t>((std::min)(q, 65535.0)));
+                }
+                auto& snap = st.report_snaps[v->id];
+                if (snap.at_us == 0) {
+                    snap = {retired, out, now, 0};
+                } else if (now - snap.at_us >= 250'000) {
+                    const bool backlogged = snap.outstanding >= 32 * 1024 && out >= 32 * 1024;
+                    snap.kbps = backlogged
+                        ? static_cast<uint32_t>((retired - snap.retired) * 8 * 1000 /
+                                                static_cast<uint64_t>(now - snap.at_us))
+                        : 0;
+                    snap.retired = retired;
+                    snap.outstanding = out;
+                    snap.at_us = now;
+                }
+                if (snap.kbps > 0 && (min_kbps == 0 || snap.kbps < min_kbps)) min_kbps = snap.kbps;
+            }
+            const uint16_t queue16 = static_cast<uint16_t>(max_queue_ms);
+            uint8_t rr[12];
+            rr[0] = protocol::VIDEO_CONTROL_TYPE;
+            rr[1] = static_cast<uint8_t>(protocol::VideoControl::ReservedReceiverReport);
+            std::memcpy(rr + 2, &max_backlog, 4);
+            std::memcpy(rr + 6, &queue16, 2);
+            std::memcpy(rr + 8, &min_kbps, 4);
+            quic_.send_datagram(sharer_session.id, rr, sizeof(rr), DatagramPriority::AheadOfVideo);
         }
     }
 

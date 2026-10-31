@@ -9,6 +9,7 @@
 #include <parties/permissions.h>
 #include <parties/server_query.h>
 #include <parties/log.h>
+#include <parties/video_backlog.h>
 
 #include <RmlUi/Core/Core.h>
 
@@ -152,6 +153,7 @@ AppCore::~AppCore() { shutdown(); }
 
 bool AppCore::init(const std::string& settings_path, PlatformBridge bridge, Rml::Context* rml_context)
 {
+    LOG_INFO("Proto gate variant: {}", proto_gate_name());
     bridge_ = std::move(bridge);
 
     if (const auto* multi = multi_stream_video();
@@ -241,6 +243,17 @@ bool AppCore::init(const std::string& settings_path, PlatformBridge bridge, Rml:
                 bridge_.request_keyframe &&
                 pli_.admit_incoming(std::chrono::steady_clock::now()))
                 bridge_.request_keyframe();
+            else if (len >= 12 &&
+                     static_cast<protocol::VideoControl>(data[1]) ==
+                         protocol::VideoControl::ReservedReceiverReport) {
+                uint32_t backlog;
+                uint16_t queue_ms;
+                uint32_t kbps;
+                std::memcpy(&backlog, data + 2, 4);
+                std::memcpy(&queue_ms, data + 6, 2);
+                std::memcpy(&kbps, data + 8, 4);
+                video_sender_.accounting().on_receiver_report(backlog, queue_ms, kbps);
+            }
         }
     };
 
@@ -347,6 +360,16 @@ void AppCore::tick()
 
     feed_video_sender_stats();
     video_sender_.tick(steady_now_us());
+    if (proto_gate_variant() == 3) {
+        static uint32_t logged_caps = 0;
+        const auto st = video_sender_.stats();
+        if (st.proto_caps != logged_caps) {
+            logged_caps = st.proto_caps;
+            LOG_INFO("Proto gate v3: capped bitrate to {} kbps (viewer delivery {} kbps, viewer queue {} ms, cap #{})",
+                     st.proto_last_cap_bps / 1000, st.proto_cap_delivery_kbps,
+                     st.proto_cap_queue_ms, st.proto_caps);
+        }
+    }
     for (UserId id : reorder_.poll(steady_now_us())) send_pli(id);
     retry_pending_plis();
 
@@ -1364,10 +1387,11 @@ void AppCore::begin_video_share(uint32_t ceiling_bitrate_bps)
     cfg.ceiling_bitrate_bps = std::clamp(ceiling_bitrate_bps, VIDEO_MIN_BITRATE, VIDEO_MAX_BITRATE);
     cfg.floor_bitrate_bps = (std::min)(cfg.floor_bitrate_bps, cfg.ceiling_bitrate_bps);
     video_sender_.start_share(cfg);
-    LOG_INFO("Video sender reset: target {} kbps, {} transport",
+    LOG_INFO("Video sender reset: target {} kbps, {} transport, proto gate {}",
              cfg.ceiling_bitrate_bps / 1000,
              protocol::protocol_supports_frame_streams(server_protocol_version_)
-                 ? "per-frame streams" : "legacy stream 1");
+                 ? "per-frame streams" : "legacy stream 1",
+             proto_gate_name());
 }
 
 void AppCore::set_video_ceiling_bitrate(uint32_t bps)

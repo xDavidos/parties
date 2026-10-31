@@ -40,6 +40,9 @@ public:
     int64_t video_outstanding_bytes() const {
         return video_outstanding_bytes_.load(std::memory_order_relaxed);
     }
+    uint64_t video_retired_bytes() const {
+        return video_retired_bytes_.load(std::memory_order_relaxed);
+    }
     MinRtt min_rtt() const {
         return MinRtt::from_quic_min_rtt_us(min_rtt_us_.load(std::memory_order_relaxed));
     }
@@ -50,6 +53,7 @@ private:
     friend class SessionTransport;
 
     std::atomic<int64_t>  video_outstanding_bytes_{0};
+    std::atomic<uint64_t> video_retired_bytes_{0};
     std::atomic<uint32_t> min_rtt_us_{VIDEO_BACKLOG_DEFAULT_RTT_US};
     std::atomic<bool>     alive_{true};
 };

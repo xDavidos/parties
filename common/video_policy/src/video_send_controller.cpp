@@ -1,11 +1,31 @@
 #include <parties/video_send_controller.h>
+#include <parties/video_backlog.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace parties {
 
 namespace {
+
+constexpr int64_t PROTO_REPORT_FRESH_US = 500'000;
+
+int64_t proto_steady_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool proto_report_fresh(const video_send_detail::SharedCounters& c) {
+    const int64_t at = c.report_at_us.load(std::memory_order_acquire);
+    return at != 0 && proto_steady_us() - at <= PROTO_REPORT_FRESH_US;
+}
+
+bool proto_viewer_refuses(const video_send_detail::SharedCounters& c) {
+    const int v = proto_gate_variant();
+    if (v != 2 && v != 3) return false;
+    return proto_report_fresh(c) && c.report_queue_ms.load() > c.queue_budget_ms.load();
+}
 
 uint32_t scale_bitrate(uint32_t bps, double factor) {
     const double scaled = static_cast<double>(bps) * factor;
@@ -51,8 +71,18 @@ void VideoSendAccounting::on_send_failed() {
     c_.keyframe_request.store(true);
 }
 
+void VideoSendAccounting::on_receiver_report(uint32_t max_backlog_bytes, uint16_t max_queue_ms,
+                                             uint32_t min_delivery_kbps) {
+    c_.report_backlog_bytes.store(max_backlog_bytes);
+    c_.report_queue_ms.store(max_queue_ms);
+    c_.report_delivery_kbps.store(min_delivery_kbps);
+    uint32_t peak = c_.report_peak_queue_ms.load();
+    while (max_queue_ms > peak && !c_.report_peak_queue_ms.compare_exchange_weak(peak, max_queue_ms)) {}
+    c_.report_at_us.store(proto_steady_us(), std::memory_order_release);
+}
+
 bool VideoSendAccounting::admit_frame() {
-    if (c_.outstanding.load() <= c_.allowance_bytes.load()) return true;
+    if (c_.outstanding.load() <= c_.allowance_bytes.load() && !proto_viewer_refuses(c_)) return true;
     c_.admission_drops.fetch_add(1);
     c_.admission_drops_window.fetch_add(1);
     return false;
@@ -95,6 +125,10 @@ void VideoSendController::start_share(const VideoSendControllerConfig& cfg) {
     counters_.keyframe_request.store(false);
     counters_.bitrate_bps.store(cfg_.ceiling_bitrate_bps);
     counters_.pending_bitrate.store(0);
+    counters_.queue_budget_ms.store(cfg_.queue_budget_ms);
+    counters_.report_peak_queue_ms.store(0);
+    counters_.report_at_us.store(0);
+    proto_last_cap_us_.reset();
 
     rtt_us_ = cfg_.default_rtt_us;
     window_start_us_.reset();
@@ -161,12 +195,15 @@ void VideoSendController::tick(int64_t now_us) {
             : 0.0;
         const uint32_t admission_drops = counters_.admission_drops_window.exchange(0);
         const uint32_t send_failures = counters_.send_failures_window.exchange(0);
+        const uint32_t viewer_peak_queue_ms =
+            proto_gate_reports() ? counters_.report_peak_queue_ms.exchange(0) : 0;
 
         const bool congested =
             peak_queue_delay_ms_ >= cfg_.congestion_queue_ms ||
             last_loss_ratio_ > cfg_.loss_threshold ||
             admission_drops > 0 ||
-            send_failures > 0;
+            send_failures > 0 ||
+            (proto_gate_reports() && viewer_peak_queue_ms >= cfg_.congestion_queue_ms);
 
         const uint32_t current = counters_.bitrate_bps.load();
 
@@ -197,6 +234,27 @@ void VideoSendController::tick(int64_t now_us) {
         window_sent_ = 0;
     }
 
+    if (proto_gate_variant() == 3 && proto_report_fresh(counters_) &&
+        (!proto_last_cap_us_ || now_us - *proto_last_cap_us_ >= 500'000)) {
+        const uint32_t kbps = counters_.report_delivery_kbps.load();
+        const uint32_t queue_ms = counters_.report_queue_ms.load();
+        if (kbps > 0 && queue_ms >= cfg_.congestion_queue_ms) {
+            const uint32_t current = counters_.bitrate_bps.load();
+            const uint32_t measured = scale_bitrate(kbps, 0.9 * 1000.0);
+            const uint32_t capped = std::max(floor_bps(), std::min(current, measured));
+            if (capped < current) {
+                counters_.bitrate_bps.store(capped);
+                proto_last_cap_us_ = now_us;
+                ++proto_caps_;
+                proto_last_cap_bps_ = capped;
+                proto_cap_delivery_kbps_ = kbps;
+                proto_cap_queue_ms_ = queue_ms;
+                refresh_allowance();
+                publish_bitrate(now_us);
+            }
+        }
+    }
+
     refresh_allowance();
     publish_bitrate_if_due(now_us);
 }
@@ -211,6 +269,10 @@ VideoSendController::Stats VideoSendController::stats() const {
     s.admission_drops   = counters_.admission_drops.load();
     s.send_failures     = counters_.send_failures.load();
     s.decreases         = decreases_;
+    s.proto_caps        = proto_caps_;
+    s.proto_last_cap_bps = proto_last_cap_bps_;
+    s.proto_cap_delivery_kbps = proto_cap_delivery_kbps_;
+    s.proto_cap_queue_ms = proto_cap_queue_ms_;
     return s;
 }
 

@@ -46,6 +46,12 @@ struct SharedCounters {
     std::atomic<uint32_t> send_failures{0};
     std::atomic<uint32_t> send_failures_window{0};
     std::atomic<bool>     keyframe_request{false};
+    std::atomic<uint32_t> queue_budget_ms{120};
+    std::atomic<uint32_t> report_backlog_bytes{0};
+    std::atomic<uint32_t> report_queue_ms{0};
+    std::atomic<uint32_t> report_peak_queue_ms{0};
+    std::atomic<uint32_t> report_delivery_kbps{0};
+    std::atomic<int64_t>  report_at_us{0};
 };
 
 }
@@ -55,6 +61,7 @@ public:
     void on_bytes_queued(size_t bytes);
     void on_bytes_retired(size_t bytes);
     void on_send_failed();
+    void on_receiver_report(uint32_t max_backlog_bytes, uint16_t max_queue_ms, uint32_t min_delivery_kbps);
     [[nodiscard]] bool admit_frame();
     uint32_t bitrate_bps() const;
 
@@ -100,6 +107,10 @@ public:
         uint32_t admission_drops    = 0;
         uint32_t send_failures      = 0;
         uint32_t decreases          = 0;
+        uint32_t proto_caps         = 0;
+        uint32_t proto_last_cap_bps = 0;
+        uint32_t proto_cap_delivery_kbps = 0;
+        uint32_t proto_cap_queue_ms = 0;
     };
     Stats stats() const;
 
@@ -122,6 +133,11 @@ private:
     uint32_t published_bitrate_ = 0;
     std::optional<int64_t> last_publish_us_;
     uint32_t decreases_ = 0;
+    std::optional<int64_t> proto_last_cap_us_;
+    uint32_t proto_caps_ = 0;
+    uint32_t proto_last_cap_bps_ = 0;
+    uint32_t proto_cap_delivery_kbps_ = 0;
+    uint32_t proto_cap_queue_ms_ = 0;
 
     uint32_t floor_bps() const;
     void publish_bitrate(std::optional<int64_t> at_us);

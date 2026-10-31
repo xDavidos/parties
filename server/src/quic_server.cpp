@@ -42,6 +42,7 @@ struct QuicServer::SendCtx {
     void uncharge() {
         if (session && len) {
             session->transport_stats.video_outstanding_bytes_.fetch_sub(len, std::memory_order_relaxed);
+            session->transport_stats.video_retired_bytes_.fetch_add(len, std::memory_order_relaxed);
             len = 0;
         }
     }
@@ -116,8 +117,10 @@ struct QuicServer::VideoOutStreamContext {
 
     void uncharge() {
         uint32_t n = charged.exchange(0, std::memory_order_acq_rel);
-        if (n && session)
+        if (n && session) {
             session->transport_stats.video_outstanding_bytes_.fetch_sub(n, std::memory_order_relaxed);
+            session->transport_stats.video_retired_bytes_.fetch_add(n, std::memory_order_relaxed);
+        }
     }
 };
 

@@ -4,8 +4,42 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <cstdlib>
+#include <string>
 
 namespace parties {
+
+inline int proto_gate_variant() {
+    static const int v = [] {
+        std::string s;
+#ifdef _WIN32
+        char* value = nullptr;
+        size_t size = 0;
+        if (_dupenv_s(&value, &size, "PARTIES_PROTO_GATE") == 0 && value) {
+            s = value;
+            std::free(value);
+        }
+#else
+        if (const char* e = std::getenv("PARTIES_PROTO_GATE")) s = e;
+#endif
+        if (s == "v1") return 1;
+        if (s == "v2") return 2;
+        if (s == "v3") return 3;
+        if (s == "v4") return 4;
+        return 0;
+    }();
+    return v;
+}
+
+inline const char* proto_gate_name() {
+    static const char* names[] = {"off", "v1", "v2", "v3", "v4"};
+    return names[proto_gate_variant()];
+}
+
+inline bool proto_gate_reports() {
+    const int v = proto_gate_variant();
+    return v >= 1 && v <= 3;
+}
 
 constexpr int64_t VIDEO_BACKLOG_MIN_THRESHOLD_BYTES = 64 * 1024;
 constexpr int64_t VIDEO_BACKLOG_MAX_THRESHOLD_BYTES = 2 * 1024 * 1024;
