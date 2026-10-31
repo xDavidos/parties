@@ -2,6 +2,7 @@ add_library(parties_video_policy STATIC
     src/video_common.cpp
     src/video_frame_reorder.cpp
     src/video_send_controller.cpp
+    src/viewer_queue.cpp
 )
 set_target_properties(parties_video_policy PROPERTIES XCODE_ATTRIBUTE_SKIP_INSTALL "YES")
 

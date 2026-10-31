@@ -181,6 +181,10 @@ target_link_libraries(parties_video_frame_reorder_test PRIVATE parties_video_pol
 add_executable(parties_video_backlog_test video_backlog_test.cpp)
 target_link_libraries(parties_video_backlog_test PRIVATE parties_video_policy)
 
+add_executable(parties_viewer_queue_test viewer_queue_test.cpp)
+target_include_directories(parties_viewer_queue_test PRIVATE ../common/include)
+target_link_libraries(parties_viewer_queue_test PRIVATE parties_video_policy)
+
 add_executable(parties_video_decode_inbox_test video_decode_inbox_test.cpp)
 target_include_directories(parties_video_decode_inbox_test PRIVATE ../client/include)
 target_link_libraries(parties_video_decode_inbox_test PRIVATE parties_video_policy)
@@ -332,6 +336,7 @@ add_test(NAME parties_video_rate_control COMMAND parties_video_rate_control_test
 add_test(NAME parties_video_send_controller COMMAND parties_video_send_controller_test)
 add_test(NAME parties_video_frame_reorder COMMAND parties_video_frame_reorder_test)
 add_test(NAME parties_video_backlog COMMAND parties_video_backlog_test)
+add_test(NAME parties_viewer_queue COMMAND parties_viewer_queue_test)
 add_test(NAME parties_video_decode_inbox COMMAND parties_video_decode_inbox_test)
 add_test(NAME parties_share_settings COMMAND parties_share_settings_test)
 add_test(NAME parties_hotkey_binding COMMAND parties_hotkey_binding_test)
