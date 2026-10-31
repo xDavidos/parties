@@ -55,6 +55,10 @@ jobs:
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
 
+      # Only the user-data tests: most other tests need a GPU or audio devices.
+      - name: Run data safety tests
+        run: ctest --test-dir ${{ matrix.preset == 'release' && 'build-release' || 'build' }} -R "^parties_data_" --output-on-failure --no-tests=error
+
       - name: Upload client artifact
         if: matrix.preset == 'release'
         uses: actions/upload-artifact@v7
