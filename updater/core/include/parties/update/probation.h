@@ -76,8 +76,10 @@ struct BuildCorrupt {
     BuildId build;
     friend bool operator==(const BuildCorrupt&, const BuildCorrupt&) = default;
 };
-// An accepted manifest for the current channel.
+// An accepted manifest of `channel`. Its revoked[] replaces the list kept for
+// that channel.
 struct ManifestSeen {
+    Channel channel = Channel::Stable;
     std::vector<Version> revoked;
     friend bool operator==(const ManifestSeen&, const ManifestSeen&) = default;
 };

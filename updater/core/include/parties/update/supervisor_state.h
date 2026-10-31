@@ -134,6 +134,18 @@ struct Notice {
     friend bool operator==(const Notice&, const Notice&) = default;
 };
 
+// revoked[] of the last verified manifest of each channel, so a revocation
+// holds while the feed is unreachable. A version listed in either is never
+// started as a candidate and never becomes good.
+struct Revocations {
+    std::vector<Version> stable;
+    std::vector<Version> beta;
+
+    std::vector<Version>& of(Channel channel) { return channel == Channel::Beta ? beta : stable; }
+    bool contains(const Version& version) const;
+    friend bool operator==(const Revocations&, const Revocations&) = default;
+};
+
 struct SupervisorState {
     uint64_t generation = 0;  // +1 per commit
     Channel channel = Channel::Stable;
@@ -142,6 +154,7 @@ struct SupervisorState {
     std::optional<BuildId> previous_good;
     std::vector<BuildRecord> builds;  // good, previous_good, staged, candidate, kept quarantines
     std::optional<Notice> notice;
+    Revocations revoked;
     Activation activation = Steady{};
     Operation operation = Idle{};
 

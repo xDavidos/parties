@@ -279,6 +279,22 @@ std::optional<Operation> parse_operation(const Value* v) {
     return std::nullopt;
 }
 
+// Absent in states written before revocations were kept: none known.
+std::optional<Revocations> parse_revocations(const Value* v) {
+    Revocations r;
+    if (!v) return r;
+    for (Channel c : {Channel::Stable, Channel::Beta}) {
+        const Value* list = json::array(*v, std::string(channel_name(c)).c_str());
+        if (!list) continue;
+        for (const auto& item : list->GetArray()) {
+            auto version = item.IsString() ? Version::parse({item.GetString(), item.GetStringLength()}) : std::nullopt;
+            if (!version) return std::nullopt;
+            r.of(c).push_back(*version);
+        }
+    }
+    return r;
+}
+
 std::optional<ChannelIntent> parse_intent(const Value* v) {
     if (!v) return std::nullopt;
     auto kind = json::string(*v, "kind");
@@ -381,6 +397,15 @@ std::string write_state(const SupervisorState& s) {
         }
         w.EndObject();
     }
+    json::key(w, "revoked");
+    w.StartObject();
+    for (Channel c : {Channel::Stable, Channel::Beta}) {
+        json::key(w, channel_name(c));
+        w.StartArray();
+        for (const Version& v : (c == Channel::Beta ? s.revoked.beta : s.revoked.stable)) json::str(w, v.to_string());
+        w.EndArray();
+    }
+    w.EndObject();
     write_activation(w, s.activation);
     write_operation(w, s.operation);
     w.EndObject();
@@ -400,10 +425,12 @@ std::expected<SupervisorState, StateParseError> parse_state(std::string_view tex
     auto good = id_at(doc, "good");
     auto previous = optional_member<BuildId>(doc, "previous_good", parse_id);
     auto notice = optional_member<Notice>(doc, "notice", parse_notice);
+    auto revoked = parse_revocations(json::object(doc, "revoked"));
     auto activation = parse_activation(json::object(doc, "activation"));
     auto operation = parse_operation(json::object(doc, "operation"));
     const Value* builds = json::array(doc, "builds");
-    if (!generation || !channel || !intent || !good || !previous || !notice || !activation || !operation || !builds)
+    if (!generation || !channel || !intent || !good || !previous || !notice || !revoked || !activation || !operation ||
+        !builds)
         return std::unexpected(StateParseError::Malformed);
     s.generation = *generation;
     s.channel = *channel;
@@ -411,6 +438,7 @@ std::expected<SupervisorState, StateParseError> parse_state(std::string_view tex
     s.good = *good;
     s.previous_good = *previous;
     s.notice = *notice;
+    s.revoked = std::move(*revoked);
     s.activation = *activation;
     s.operation = *operation;
     for (const auto& b : builds->GetArray()) {

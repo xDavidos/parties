@@ -220,7 +220,7 @@ JobOutcome UpdateWorker::run(const JobRequest& request) {
         return out;
     }
 
-    out.events.push_back(ManifestSeen{manifest->payload().revoked});
+    out.events.push_back(ManifestSeen{channel, manifest->payload().revoked});
     UpdateDecision decision = plan_update(state, *manifest, kLinkProtocol, request.live_db);
     if (decision.new_intent) out.events.push_back(ChannelIntentSet{channel, *decision.new_intent});
     out.ok = true;

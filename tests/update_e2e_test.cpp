@@ -887,7 +887,9 @@ std::vector<Scenario> scenarios() {
                    },
                    false, false});
 
-    // ADV2: B is downloaded and staged while A runs; then B is revoked before B ever starts.
+    // B is downloaded and staged while A runs; then B is revoked before B ever starts. The next
+    // start runs B before any check can tell it is revoked, so B may run that once; the
+    // revocation then blocks its confirmation and its exit rolls back to A.
     out.push_back({"adv-revoked-staged", "", 1, 1, true,
                    [](World& w) {
                        // Ends session 1 right after B is staged (before the restart's AppExited commit),
@@ -911,7 +913,10 @@ std::vector<Scenario> scenarios() {
                        std::cout << "good after revocation: " << s->good.version.to_string()
                                  << ", runs of revoked 2.0.0.0: " << markers(w.db(), "2.0.0.0") << "\n";
                        if (s->good == w.b.entry.id()) fail(label, "the revoked build B became good");
-                       if (markers(w.db(), "2.0.0.0") > 0) fail(label, "the revoked build B was started");
+                       if (markers(w.db(), "2.0.0.0") > 1) fail(label, "the revoked build B was started again");
+                       const BuildRecord* b = record(*s, w.b);
+                       if (b && b->verdict != Verdict{Quarantined{FailureReason::Revoked}})
+                           fail(label, "B is kept without being quarantined as revoked");
                    },
                    false, false});
 

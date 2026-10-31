@@ -50,6 +50,8 @@ SnapshotId snapshot_name(std::string_view kind, const BuildId& id, uint64_t gene
     return {std::string(kind) + "-" + id.dir_name() + "-g" + std::to_string(generation)};
 }
 
+bool revoked(const SupervisorState& s, const BuildId& id) { return s.revoked.contains(id.version); }
+
 Probation* probation(SupervisorState& s) { return std::get_if<Probation>(&s.activation); }
 Running* running(SupervisorState& s) { return std::get_if<Running>(&s.operation); }
 bool idle(const SupervisorState& s) { return std::holds_alternative<Idle>(s.operation); }
@@ -102,13 +104,12 @@ void start_good(Tx& tx, const std::optional<DataInfo>& data) {
 
 // Leaves Probation for good. Restores the pre-candidate data when good cannot
 // read what the candidate left, or when the candidate ran on restored data.
-void rollback(Tx& tx, FailureReason reason, bool start_fallback) {
+void rollback(Tx& tx, FailureReason reason, bool start_fallback, std::optional<DataInfo> data) {
     Probation p = std::get<Probation>(tx.s.activation);
     if (BuildRecord* c = record(tx.s, p.candidate)) c->verdict = Quarantined{reason};
     tx.s.activation = Steady{};
     tx.s.operation = Idle{};
     Notice notice{Notice::Kind::RolledBack, p.candidate.version, p.fallback.version, std::nullopt};
-    std::optional<DataInfo> data = tx.ctx.live_db;
     bool restore = p.restore_on_rollback ||
                    compat_of(tx.s, p.fallback, data) == Compatibility::Incompatible;
     if (restore && p.pre_snapshot) {
@@ -121,6 +122,10 @@ void rollback(Tx& tx, FailureReason reason, bool start_fallback) {
     }
     if (start_fallback) start_good(tx, data);
     else tx.settle();
+}
+
+void rollback(Tx& tx, FailureReason reason, bool start_fallback) {
+    rollback(tx, reason, start_fallback, tx.ctx.live_db);
 }
 
 void confirm(Tx& tx) {
@@ -153,7 +158,7 @@ void strike(Tx& tx, FailureReason reason) {
 void start_staged(Tx& tx, Staged staged, const std::optional<DataInfo>& data) {
     const BuildId c = staged.build;
     std::optional<DataInfo> candidate_data = staged.restore_first ? std::optional(staged.restore_first->data) : data;
-    if (compat_of(tx.s, c, candidate_data) == Compatibility::Incompatible) {
+    if (revoked(tx.s, c) || compat_of(tx.s, c, candidate_data) == Compatibility::Incompatible) {
         std::optional<BuildId> dropped = unstage(tx);
         tx.commit();
         if (dropped) tx.emit(DeleteBuild{*dropped});
@@ -180,6 +185,7 @@ void start_staged(Tx& tx, Staged staged, const std::optional<DataInfo>& data) {
 
 void restart_candidate(Tx& tx, const std::optional<DataInfo>& data) {
     Probation& p = std::get<Probation>(tx.s.activation);
+    if (revoked(tx.s, p.candidate)) return rollback(tx, FailureReason::Revoked, true, data);
     bool migrates = data && compat_of(tx.s, p.candidate, data) == Compatibility::MigratesForward;
     if (migrates && !(p.pre_snapshot && p.pre_snapshot->data == *data)) {
         Snapshot snap{snapshot_name("pre", p.candidate, tx.next_generation()), *data};
@@ -201,6 +207,12 @@ FailureReason before_health_reason(ExitKind kind) {
 
 void candidate_exited(Tx& tx, const Running& run, ExitKind kind) {
     tx.s.operation = Idle{};
+    if (revoked(tx.s, run.build)) {
+        bool startup_failure = !run.healthy && kind != ExitKind::Clean && kind != ExitKind::DataUnavailable;
+        rollback(tx, FailureReason::Revoked, startup_failure);
+        if (kind == ExitKind::DataUnavailable) show(tx, RecoveryReason::DataUnavailable);
+        return;
+    }
     switch (kind) {
     case ExitKind::Clean:
         if (run.healthy && run.healthy_uptime_s >= tx.ctx.policy.confirm_on_clean_exit_after_s)
@@ -263,7 +275,13 @@ void handle(Tx& tx, const Resumed&) {
         return tx.commit();
     }
     if (!running(tx.s)) return;
-    if (running_candidate(tx.s)) return strike(tx, FailureReason::UnknownOutcomeRepeated);
+    if (running_candidate(tx.s)) {
+        if (revoked(tx.s, running(tx.s)->build)) {
+            tx.s.operation = Idle{};
+            return rollback(tx, FailureReason::Revoked, false);
+        }
+        return strike(tx, FailureReason::UnknownOutcomeRepeated);
+    }
     tx.s.operation = Idle{};
     tx.commit();
 }
@@ -293,7 +311,7 @@ void handle(Tx& tx, const HealthDeadlinePassed&) {
 void handle(Tx& tx, const ConfirmTimerElapsed& e) {
     if (!running_candidate(tx.s)) return;
     Running* r = running(tx.s);
-    if (!r->healthy || e.healthy_uptime_s <= r->healthy_uptime_s) return;
+    if (!r->healthy || e.healthy_uptime_s <= r->healthy_uptime_s || revoked(tx.s, r->build)) return;
     r->healthy_uptime_s = e.healthy_uptime_s;
     if (r->healthy_uptime_s >= tx.ctx.policy.confirm_uptime_s) return confirm(tx);
     tx.commit();
@@ -313,14 +331,14 @@ void stage(Tx& tx, const BuildRecord& rec, const std::optional<Snapshot>& restor
 }
 
 void handle(Tx& tx, const BuildSealed& e) {
-    if (tx.s.find(e.record.id) || probation(tx.s)) return;
+    if (tx.s.find(e.record.id) || probation(tx.s) || revoked(tx.s, e.record.id)) return;
     stage(tx, e.record, e.restore_first);
 }
 
 // Unlike BuildSealed, a known previous_good is staged again: it is the build a
 // user most often switches back to, and its directory is still intact.
 void handle(Tx& tx, const UserDowngrade& e) {
-    if (probation(tx.s) || e.record.id == tx.s.good) return;
+    if (probation(tx.s) || e.record.id == tx.s.good || revoked(tx.s, e.record.id)) return;
     const BuildRecord* known = tx.s.find(e.record.id);
     if (known && (tx.s.previous_good != e.record.id || known->quarantined())) return;
     stage(tx, e.record, e.restore_first);
@@ -332,7 +350,7 @@ void handle(Tx& tx, const UserRollback& e) {
         if (e.target == p->fallback) rollback(tx, FailureReason::UserRolledBack, true);
         return;
     }
-    if (!tx.s.previous_good || e.target != *tx.s.previous_good) return;
+    if (!tx.s.previous_good || e.target != *tx.s.previous_good || revoked(tx.s, e.target)) return;
     const BuildRecord* target = tx.s.find(e.target);
     if (!target || !std::holds_alternative<Proven>(target->verdict)) return;
     std::optional<DataInfo> data = e.restore ? std::optional(e.restore->data) : tx.ctx.live_db;
@@ -360,7 +378,7 @@ void handle(Tx& tx, const UserRollback& e) {
 void handle(Tx& tx, const UserRetry& e) {
     if (!idle(tx.s) || probation(tx.s)) return;
     const BuildRecord* target = tx.s.find(e.target);
-    if (!target || !target->quarantined()) return;
+    if (!target || !target->quarantined() || revoked(tx.s, e.target)) return;
     std::optional<BuildId> replaced = unstage(tx);
     record(tx.s, e.target)->verdict = Unproven{};
     tx.s.activation = Staged{e.target, std::nullopt};
@@ -408,15 +426,18 @@ void handle(Tx& tx, const BuildCorrupt& e) {
     if (tx.s.previous_good && e.build == *tx.s.previous_good) tx.emit(Redownload{e.build});
 }
 
+// A candidate revoked while it runs is never confirmed; its exit rolls back.
 void handle(Tx& tx, const ManifestSeen& e) {
-    auto revoked = [&](const BuildId& id) { return std::ranges::find(e.revoked, id.version) != e.revoked.end(); };
-    if (auto* staged = std::get_if<Staged>(&tx.s.activation); staged && revoked(staged->build)) {
+    std::vector<Version> list = e.revoked;
+    std::ranges::sort(list);
+    tx.s.revoked.of(e.channel) = std::move(list);
+    if (auto* staged = std::get_if<Staged>(&tx.s.activation); staged && revoked(tx.s, staged->build)) {
         std::optional<BuildId> dropped = unstage(tx);
         tx.commit();
         if (dropped) tx.emit(DeleteBuild{*dropped});
         return;
     }
-    if (Probation* p = probation(tx.s); p && idle(tx.s) && revoked(p->candidate))
+    if (Probation* p = probation(tx.s); p && idle(tx.s) && revoked(tx.s, p->candidate))
         rollback(tx, FailureReason::Revoked, false);
 }
 

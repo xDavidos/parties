@@ -93,6 +93,11 @@ SupervisorState with_op(SupervisorState s, Operation op) {
 
 Running run(const BuildRecord& b, bool healthy = false, uint32_t uptime = 0) { return {b.id, healthy, uptime}; }
 
+SupervisorState revoked(SupervisorState s, const BuildRecord& b, Channel channel = Channel::Stable) {
+    s.revoked.of(channel).push_back(b.id.version);
+    return s;
+}
+
 
 std::string describe(const Effect& e) {
     return std::visit(
@@ -330,10 +335,40 @@ std::vector<Row> table() {
          {"Redownload 1.0.0.0", "Commit", "ShowRecovery Repairing", "SignalBootOk"}});
     row({"previous good corrupt", with_previous(steady(), D), BuildCorrupt{D.id}, kV1, {"Redownload 0.9.0.0"}});
     row({"staged corrupt", staged(B), BuildCorrupt{B.id}, kV1, {"Commit", "DeleteBuild 1.1.0.0"}});
-    row({"revoked staged build", staged(B), ManifestSeen{{B.id.version}}, kV1, {"Commit", "DeleteBuild 1.1.0.0"}});
-    row({"revoked candidate between runs", probation(B, pre_b), ManifestSeen{{B.id.version}}, kV2, {"Commit"},
-         [](auto& s) { return quarantined_for(s, B, FailureReason::Revoked); }});
-    row({"revoked candidate while it runs waits", with_op(probation(B), run(B)), ManifestSeen{{B.id.version}}, kV2, {}});
+    row({"revoked staged build", staged(B), ManifestSeen{Channel::Stable, {B.id.version}}, kV1,
+         {"Commit", "DeleteBuild 1.1.0.0"}, [](auto& s) { return s.revoked.stable == std::vector{B.id.version}; }});
+    row({"revoked candidate between runs", probation(B, pre_b), ManifestSeen{Channel::Stable, {B.id.version}}, kV2,
+         {"Commit"}, [](auto& s) { return quarantined_for(s, B, FailureReason::Revoked); }});
+    row({"revoked candidate while it runs is kept until it exits", with_op(probation(B), run(B, true)),
+         ManifestSeen{Channel::Beta, {B.id.version}}, kV2, {"Commit"},
+         [](auto& s) { return prob(s) && s.revoked.beta == std::vector{B.id.version} && s.revoked.stable.empty(); }});
+    row({"a manifest replaces its channel's revocations", revoked(steady(), B), ManifestSeen{Channel::Stable, {}}, kV1,
+         {"Commit"}, [](auto& s) { return !s.revoked.contains(B.id.version); }});
+    row({"the same revocations change nothing", revoked(steady(), B), ManifestSeen{Channel::Stable, {B.id.version}},
+         kV1, {}});
+    row({"a revoked candidate is never confirmed", revoked(with_op(probation(B), run(B, true, 60)), B),
+         ConfirmTimerElapsed{600}, kV2, {}});
+    row({"a revoked candidate's clean exit rolls back", revoked(with_op(probation(B, pre_b), run(B, true, 60)), B),
+         AppExited{ExitKind::Clean}, kV2, {"Commit"},
+         [](auto& s) { return steady_on(s, A) && quarantined_for(s, B, FailureReason::Revoked) && !running(s); }});
+    row({"a revoked candidate's crash before health starts good", revoked(with_op(probation(B, pre_b), run(B)), B),
+         AppExited{ExitKind::Abnormal}, kV2, {"Commit", "Spawn 1.0.0.0"},
+         [](auto& s) { return steady_on(s, A) && quarantined_for(s, B, FailureReason::Revoked); }});
+    row({"an unobserved run of a revoked candidate rolls back", revoked(with_op(probation(B, pre_b), run(B, true)), B),
+         Resumed{}, kV2, {"Commit"},
+         [](auto& s) { return steady_on(s, A) && quarantined_for(s, B, FailureReason::Revoked); }});
+    row({"a revoked candidate is not restarted", revoked(probation(B, pre_b), B), StartRequested{}, kV2,
+         {"Commit", "Spawn 1.0.0.0"},
+         [](auto& s) { return steady_on(s, A) && quarantined_for(s, B, FailureReason::Revoked); }});
+    row({"a revoked staged build is not started", revoked(staged(B), B, Channel::Beta), StartRequested{}, kV1,
+         {"Commit", "DeleteBuild 1.1.0.0", "Commit", "Spawn 1.0.0.0"}});
+    row({"a revoked build is not staged", revoked(steady(), B), BuildSealed{B, std::nullopt}, kV1, {}});
+    row({"a revoked build is not retried", revoked(add(steady(), B, Quarantined{FailureReason::Revoked}), B),
+         UserRetry{B.id}, kV1, {}});
+    row({"no rollback to a revoked previous good", revoked(with_previous(steady(), D), D),
+         UserRollback{D.id, std::nullopt}, kV1, {}});
+    row({"no downgrade to a revoked build", revoked(with_previous(steady(), D), D), UserDowngrade{D, std::nullopt},
+         kV1, {}});
     row({"channel switch drops the staged build", staged(B), ChannelIntentSet{Channel::Beta, Follow{}}, kV1,
          {"Commit", "DeleteBuild 1.1.0.0"}, [](auto& s) { return s.channel == Channel::Beta && !s.find(B.id); }});
     row({"pin lift keeps the staged build", staged(B), ChannelIntentSet{Channel::Stable, PinnedUntilAtLeast{B.id.version}},
@@ -481,12 +516,16 @@ void check_state(Walk& w, const SupervisorState& s) {
     if (auto* st = std::get_if<Staged>(&s.activation)) {
         const BuildRecord* r = s.find(st->build);
         w.check(r && st->build != s.good && !r->quarantined(), "staged is a distinct, eligible record");
+        w.check(!s.revoked.contains(st->build.version), "a revoked build is never staged");
     }
     if (auto* p = std::get_if<Probation>(&s.activation)) {
         w.check(p->candidate != s.good, "good is never the candidate");
         w.check(p->fallback == s.good, "fallback is good during probation");
         const BuildRecord* r = s.find(p->candidate);
         w.check(r && !r->quarantined(), "the candidate is an eligible record");
+        auto* run = std::get_if<Running>(&s.operation);
+        w.check(!s.revoked.contains(p->candidate.version) || (run && run->build == p->candidate),
+                "a revoked candidate is only the app that ran when the revocation arrived");
     }
     if (auto* r = std::get_if<Running>(&s.operation)) w.check(s.find(r->build) != nullptr, "running build has a record");
 }
@@ -506,6 +545,8 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
         } else if (auto* sp = std::get_if<Spawn>(&e)) {
             auto* r = std::get_if<Running>(&committed->operation);
             w.check(r && r->build == sp->build && !r->healthy, "every spawn is committed as Running first");
+            w.check(sp->build == committed->good || !committed->revoked.contains(sp->build.version),
+                    "a revoked build is never spawned as a candidate");
         } else if (auto* rs = std::get_if<RestoreSnapshot>(&e)) {
             w.check(!rs->preserve_live_as.stem.empty() && rs->preserve_live_as != rs->from,
                     "every restore preserves the live data under its own name");
@@ -546,6 +587,9 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
                 w.check(has_spawn_or_recovery(start.effects, p->fallback), "after a rollback the next start runs the fallback");
         }
     }
+
+    if (out.next.good != before.good)
+        w.check(!out.next.revoked.contains(out.next.good.version), "a revoked build never becomes good");
 
     Step r1 = step(out.next, Resumed{}, ctx);
     Step r2 = step(r1.next, Resumed{}, ctx);
@@ -706,7 +750,7 @@ Event other_event(Walk& w, const World& world, const SupervisorState& s) {
         return BuildCorrupt{id};
     }
     case 11: {
-        ManifestSeen m;
+        ManifestSeen m{w.chance(0.5) ? Channel::Stable : Channel::Beta, {}};
         for (const BuildRecord* r : universe)
             if (w.chance(0.2)) m.revoked.push_back(r->id.version);
         return m;
