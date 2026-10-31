@@ -1,5 +1,4 @@
 #include <client/app.h>
-#include <client/auto_updater.h>
 #include <client/data_location.h>
 #include <client/exit_codes.h>
 #include <client/legacy_import.h>
@@ -344,8 +343,6 @@ int main(int argc, char* argv[]) {
 
     for (int i = 1; i + 1 < argc; ++i)
         if (std::strcmp(argv[i], "--write-build-info") == 0) return write_build_info(argv[i + 1]);
-
-    if (AutoUpdater::handle_update_args(argc, argv)) return 1;
 
     Win32SingleInstance instance;
     bool allow_multiple_instances = false;

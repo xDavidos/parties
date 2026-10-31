@@ -1,6 +1,5 @@
 #include <client/app_core.h>
 #ifdef _WIN32
-#include <client/auto_updater.h>
 #include <client/update_view.h>
 #endif
 #include <parties/protocol.h>
@@ -218,13 +217,6 @@ bool AppCore::init(PlatformBridge bridge, Rml::Context* rml_context)
     audio_.init();
     stream_audio_player_.init();
 
-#ifdef _WIN32
-    if (!send_update_request_) {
-        updater_ = std::make_unique<AutoUpdater>();
-        updater_->start();
-    }
-#endif
-
     start_query_thread();
 
     return true;
@@ -251,10 +243,6 @@ void AppCore::on_update_action(UpdateAction action)
 
 void AppCore::shutdown()
 {
-#ifdef _WIN32
-    if (updater_) updater_->stop();
-    updater_.reset();
-#endif
     stop_query_thread();
     apply_sleep_inhibit(false);
     intentional_disconnect_ = true;
@@ -326,18 +314,6 @@ void AppCore::tick()
     video_sender_.tick(steady_now_us());
     poll_video_reorder_buffers();
     retry_pending_plis();
-
-#ifdef _WIN32
-    if (updater_ && updater_->poll()) {
-        auto s = updater_->state();
-        model_.update_available  = (s == AutoUpdater::State::UpdateAvailable
-                                 || s == AutoUpdater::State::Downloading
-                                 || s == AutoUpdater::State::ReadyToInstall);
-        model_.update_downloading = (s == AutoUpdater::State::Downloading);
-        model_.update_ready       = (s == AutoUpdater::State::ReadyToInstall);
-        model_.update_version     = Rml::String("v") + updater_->latest_version().c_str();
-    }
-#endif
 
     // Process completed file downloads on main thread
     {
@@ -2758,19 +2734,7 @@ void AppCore::setup_model_callbacks()
     };
 
 #ifdef _WIN32
-    model_.on_apply_update = [this]() {
-        if (send_update_request_) {
-            on_update_action(UpdateAction::ClickPill);
-            return;
-        }
-        if (!updater_) return;
-        auto s = updater_->state();
-        if (s == AutoUpdater::State::UpdateAvailable) {
-            updater_->download();
-        } else if (s == AutoUpdater::State::ReadyToInstall) {
-            updater_->apply_and_restart();
-        }
-    };
+    model_.on_apply_update = [this]() { on_update_action(UpdateAction::ClickPill); };
     model_.on_update_action = [this](UpdateAction action) { on_update_action(action); };
 #endif
 
