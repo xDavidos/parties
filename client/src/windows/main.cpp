@@ -304,6 +304,8 @@ static int refuse_to_start(ExitCode code, const std::filesystem::path& where, co
     return static_cast<int>(code);
 }
 
+static constexpr int kInitFailed = static_cast<int>(ExitCode::InitFailed);
+
 // ═══════════════════════════════════════════════════════════════════════
 // Entry point
 // ═══════════════════════════════════════════════════════════════════════
@@ -337,7 +339,7 @@ int main(int argc, char* argv[]) {
     if (instance_result == Win32SingleInstance::Result::Error) {
         MessageBoxW(nullptr, L"Unable to access the running Parties client.",
                     L"Parties", MB_OK | MB_ICONERROR);
-        return 1;
+        return kInitFailed;
     }
 
     parties::TimerResolutionGuard timer_resolution(1);
@@ -393,20 +395,20 @@ int main(int argc, char* argv[]) {
 
     if (!parties::crypto_init()) {
         LOG_ERROR("Failed to initialize crypto");
-        return 1;
+        return kInitFailed;
     }
 
     if (!parties::net_init()) {
         LOG_ERROR("Failed to initialize networking");
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     if (!parties::quic_init()) {
         LOG_ERROR("Failed to initialize QUIC");
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     // Register window class
@@ -424,7 +426,7 @@ int main(int argc, char* argv[]) {
         LOG_ERROR("Failed to register window class");
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     // Create borderless window. WS_CAPTION enables DWM minimize/restore
@@ -443,7 +445,7 @@ int main(int argc, char* argv[]) {
         UnregisterClassW(window_class, wc.hInstance);
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     // Enable DWM shadow on borderless window
@@ -460,7 +462,7 @@ int main(int argc, char* argv[]) {
         UnregisterClassW(window_class, wc.hInstance);
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     ShowWindow(hwnd, SW_SHOW);
