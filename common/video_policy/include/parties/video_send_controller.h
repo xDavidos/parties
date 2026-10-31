@@ -24,11 +24,11 @@ struct VideoSendControllerConfig {
     uint32_t default_rtt_us       = 50'000;
     uint32_t min_reconfigure_ms   = 500;
     double   min_reconfigure_ratio = 0.10;
-    // Measured in the gate bakeoff: 30/20 throttled a clean link to under half
-    // its capacity, because QUIC ACK delay puts a ~25 ms floor under the signal.
+    // QUIC max_ack_delay (25 ms default, not overridden here) floors the viewer
+    // queue signal: https://www.rfc-editor.org/rfc/rfc9000#section-18.2
     uint32_t viewer_queue_budget_ms     = 60;
     uint32_t viewer_congestion_queue_ms = 40;
-    uint32_t viewer_report_horizon_ms   = 500;
+    uint32_t max_viewer_refusal_ms      = 500;
 };
 
 int64_t steady_clock_us();
@@ -58,7 +58,7 @@ struct SharedCounters {
     std::atomic<uint32_t> send_failures_window{0};
     std::atomic<bool>     keyframe_request{false};
     std::atomic<uint32_t> viewer_queue_budget_ms{0};
-    std::atomic<uint32_t> viewer_report_horizon_ms{0};
+    std::atomic<uint32_t> max_viewer_refusal_ms{0};
     std::atomic<int64_t>  viewer_refusal_until_us{INT64_MIN};
     std::atomic<int64_t>  viewer_queue_peak_ms{0};
     std::atomic<uint32_t> viewer_admission_drops{0};

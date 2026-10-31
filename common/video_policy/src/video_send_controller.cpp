@@ -57,11 +57,9 @@ void VideoSendAccounting::on_viewer_queue(std::chrono::milliseconds worst_viewer
     int64_t peak = c_.viewer_queue_peak_ms.load();
     while (queue_ms > peak && !c_.viewer_queue_peak_ms.compare_exchange_weak(peak, queue_ms)) {}
 
-    // Reports only arrive while this sharer sends, so a refusal must expire on
-    // its own: the reported queue drains while no frames are sent.
     const int64_t excess_ms = queue_ms - static_cast<int64_t>(c_.viewer_queue_budget_ms.load());
     const int64_t refuse_ms = (std::min)(excess_ms,
-                                         static_cast<int64_t>(c_.viewer_report_horizon_ms.load()));
+                                         static_cast<int64_t>(c_.max_viewer_refusal_ms.load()));
     c_.viewer_refusal_until_us.store(excess_ms <= 0 ? INT64_MIN : c_.clock_us() + refuse_ms * 1000);
 }
 
@@ -118,7 +116,7 @@ void VideoSendController::start_share(const VideoSendControllerConfig& cfg) {
     counters_.bitrate_bps.store(cfg_.ceiling_bitrate_bps);
     counters_.pending_bitrate.store(0);
     counters_.viewer_queue_budget_ms.store(cfg_.viewer_queue_budget_ms);
-    counters_.viewer_report_horizon_ms.store(cfg_.viewer_report_horizon_ms);
+    counters_.max_viewer_refusal_ms.store(cfg_.max_viewer_refusal_ms);
     counters_.viewer_refusal_until_us.store(INT64_MIN);
     counters_.viewer_queue_peak_ms.store(0);
     counters_.viewer_admission_drops.store(0);

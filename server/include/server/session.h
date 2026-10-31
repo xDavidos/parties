@@ -37,8 +37,6 @@ private:
     std::atomic<SessionPhase> phase_{SessionPhase::Handshaking};
 };
 
-// charge_video, video_queue_delay and video_outstanding_bytes run on the server
-// loop; retire_video runs on MsQuic threads.
 class SessionTransportStats {
 public:
     int64_t video_outstanding_bytes() const {
