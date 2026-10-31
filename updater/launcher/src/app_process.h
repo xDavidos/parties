@@ -13,10 +13,8 @@
 
 namespace parties::update::launcher {
 
-// contracts.md, "App exit codes".
 ExitKind classify_exit_code(unsigned long code);
 
-// Quotes one argument so CommandLineToArgvW returns it unchanged.
 std::wstring quote_argument(const std::wstring& arg);
 
 class AppJob {
@@ -48,7 +46,6 @@ public:
     void* handle() const { return process_; }
     unsigned long pid() const { return pid_; }
 
-    // Kills the process and waits for it.
     void terminate();
     // Valid once handle() is signalled.
     ExitKind exit_kind() const;

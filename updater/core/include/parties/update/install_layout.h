@@ -1,7 +1,5 @@
 #pragma once
 
-// Names the installed layout shares between setup, the launcher and the app.
-
 #include <filesystem>
 #include <optional>
 

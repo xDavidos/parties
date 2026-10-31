@@ -20,8 +20,6 @@
 
 namespace parties::update::link {
 
-// --- App to launcher ---
-
 struct Hello {
     uint32_t link_protocol = kLinkProtocol;
     uint32_t min_launcher_link = kMinLauncherLink;
@@ -48,8 +46,6 @@ struct SetChannel {
 using Request = std::variant<RestartToUpdate, CheckNow, AcknowledgeNotice, SetChannel>;
 
 using AppMessage = std::variant<Hello, Healthy, Request>;
-
-// --- Launcher to app ---
 
 struct Welcome {
     uint32_t link_protocol = kLinkProtocol;

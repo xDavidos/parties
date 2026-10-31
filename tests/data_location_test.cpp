@@ -92,7 +92,6 @@ int main() {
                     "non-retail data directory is not the exe directory");
     }
 
-    // Every resolution is absolute, so the working directory can never be used.
     const std::vector<std::wstring> cases[] = {none, {L"--data-dir=C:\\x"}};
     for (const auto& args : cases) {
         for (bool retail : {false, true}) {

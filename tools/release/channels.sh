@@ -36,8 +36,6 @@ trap 'rm -rf "$WORK"' EXIT
 die() { echo "::error::$*" >&2; exit 1; }
 notice() { echo "::notice::$*"; }
 
-# TOOL_ARGS is split into words on purpose.
-# shellcheck disable=SC2086
 tool() { "$TOOL" "$@" ${TOOL_ARGS:-}; }
 
 gh_write() {
@@ -48,8 +46,6 @@ check_version() {
     [[ "$1" =~ ^(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){3}$ ]] || die "version '$1' is not A.B.C.D"
 }
 
-# 0: ready to sign. 1: this commit pins no production key, so nothing could
-# verify a manifest. 2: keys are pinned but the signing secret is missing.
 signing_state() {
     if [ -z "$(tool pinned-keys)" ]; then
         notice "This commit pins no production update key (updater/keys/production), so no channel manifest is signed. See 'Set up the signing key the first time' in docs/releasing.md."
@@ -62,7 +58,6 @@ signing_state() {
     return 0
 }
 
-# Prints the path of the published <channel>.manifest.json, or "none".
 fetch() {
     local channel=$1 dir="$WORK/published"
     mkdir -p "$dir"

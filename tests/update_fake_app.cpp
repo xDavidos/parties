@@ -1,8 +1,3 @@
-// Stands in for parties_client.exe under the launcher in the e2e harness. It
-// speaks the link protocol, opens the database the way Settings does
-// (parties_schema, forward-only migration, refusal of incompatible data), and
-// records each run as a row in `markers`.
-//
 // Its version and data schema come from fake-build.json next to the exe, so
 // one binary plays every build. Faults are chosen per version by
 // PARTIES_FAKE_FAULT=<version>:<fault>[;<version>:<fault>...]. Every status
@@ -97,7 +92,6 @@ public:
         WriteFile(pipe_, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
     }
 
-    // Never blocks: reads only what is already in the pipe.
     std::optional<link::LauncherMessage> poll() {
         for (;;) {
             if (auto line = reader_.next()) {
@@ -131,7 +125,6 @@ bool has_table(sqlite3* db, const char* name) {
     return found;
 }
 
-// A database from before data versioning (the portable zip's) is version 1, floor 1.
 std::optional<DataInfo> read_schema(sqlite3* db) {
     if (has_table(db, "identity") && !has_table(db, "parties_schema")) return DataInfo{1, 1};
     sqlite3_stmt* stmt = nullptr;
@@ -145,7 +138,6 @@ std::optional<DataInfo> read_schema(sqlite3* db) {
     return info;
 }
 
-// Returns the schema the database had when opened.
 uint32_t open_data(const fs::path& db_path, const BuildInfo& build, sqlite3*& db) {
     bool fresh = !fs::exists(db_path);
     const auto u8 = db_path.u8string();
@@ -242,7 +234,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         die(kCrash);
     }
 
-    // Switches to Beta and waits, then takes "switch now" once it is offered.
     if (fault == "downgrade-then-stable") fault_alias = true;
     if (fault == "wait-then-downgrade" || fault_alias)
         peer.send(link::Request{link::SetChannel{Channel::Beta, link::ChannelChoice::Wait}});
@@ -281,7 +272,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                                                           status->downgrade) {
             downgrade_asked = true;
             peer.send(link::Request{link::SetChannel{Channel::Beta, link::ChannelChoice::DowngradeNow}});
-            // ADV2: the user changes their mind right away and picks Stable again.
             if (fault_alias) peer.send(link::Request{link::SetChannel{Channel::Stable, link::ChannelChoice::Wait}});
         }
         if (auto* status = std::get_if<link::Status>(&*m); status && !restart_asked &&

@@ -59,8 +59,6 @@ bool is_safe_stem(std::string_view stem) {
     });
 }
 
-// --- Writing ---
-
 void write_id(Writer& w, std::string_view k, const BuildId& id) {
     json::key(w, k);
     w.StartObject();
@@ -163,8 +161,6 @@ void write_operation(Writer& w, const Operation& o) {
         o);
     w.EndObject();
 }
-
-// --- Parsing ---
 
 std::optional<BuildId> parse_id(const Value* v) {
     if (!v) return std::nullopt;

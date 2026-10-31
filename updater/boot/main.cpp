@@ -30,13 +30,13 @@ constexpr wchar_t kReleasesUrl[] = L"https://github.com/emcifuntik/parties/relea
 enum Button { kSafeMode = 101, kDownload, kDataFolder };
 
 struct Options {
-    std::wstring root;  // install root, no trailing separator
+    std::wstring root;
     bool recover = false;
     std::vector<std::wstring> forward;
     std::wstring objects = L"Local\\Parties.";
     DWORD boot_wait_ms = kBootWaitMs;
-    int forced_button = 0;  // testing builds: the recovery button, chosen without the dialog
-    std::vector<std::wstring> launcher_tests;  // testing builds: --test-namespace and --data-root, passed on
+    int forced_button = 0;
+    std::vector<std::wstring> launcher_tests;
 };
 
 struct Handle {
@@ -142,8 +142,7 @@ auto load(const std::wstring& path, Parse parse) -> decltype(parse(std::string_v
     return parse(*text);
 }
 
-// The only file the stub writes. A failed write is not fatal: starting Parties
-// matters more than the bookkeeping.
+// A failed write is not fatal: starting Parties matters more than the bookkeeping.
 void persist(const std::wstring& state, const boot::BootRecord& record) {
     std::string text = boot::write_boot_record(record);
     std::wstring path = state + L"\\boot-record.json", tmp = path + L".tmp";
@@ -197,8 +196,8 @@ Handle spawn(const std::wstring& exe, std::wstring cmd, const std::wstring& cwd,
     return Handle(pi.hProcess);
 }
 
-// True once the launcher signals boot_ok. On exit or timeout first, the
-// launcher is terminated, and its job object takes the app with it.
+// On exit or timeout before boot_ok, terminating the launcher is enough:
+// its job object takes the app with it.
 bool boot_launcher(const Options& o, const std::wstring& exe, const boot::RunLauncher& run, Handle lease) {
     SECURITY_ATTRIBUTES inheritable{sizeof(inheritable), nullptr, TRUE};
     Handle boot_ok(CreateEventW(&inheritable, TRUE, FALSE, nullptr));
@@ -222,7 +221,6 @@ bool boot_launcher(const Options& o, const std::wstring& exe, const boot::RunLau
     return false;
 }
 
-// Runs the last good app without a supervisor: no updates, same data directory.
 bool start_safe_mode(const Options& o, const boot::BootContract& c) {
     std::wstring exe = o.root + L"\\" + widen(c.last_good_app.dir) + L"\\parties_client.exe";
     Handle lease = open_verified(exe, c.last_good_app.sha256);
@@ -271,7 +269,6 @@ int ask(bool can_safe_mode, std::wstring& data_dir, const wchar_t* content) {
     return SUCCEEDED(TaskDialogIndirect(&cfg, &pressed, nullptr, nullptr)) ? pressed : IDCLOSE;
 }
 
-// Exit code 0 when safe mode started, 1 when the user closed the dialog.
 int recover(const Options& o, const std::optional<boot::BootContract>& c) {
 #ifdef PARTIES_UPDATE_TESTING
     if (o.forced_button) return o.forced_button == kSafeMode && c && start_safe_mode(o, *c) ? 0 : 1;

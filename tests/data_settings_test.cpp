@@ -323,9 +323,6 @@ bool identity_history_is_append_only() {
     return ok;
 }
 
-// The narrowest real seam for "a raw-key identity survives a restart":
-// AppCore::load_or_generate_identity needs the whole UI stack, and with the
-// delete removed it only reads back what Settings returns here.
 bool raw_key_identity_survives_restart() {
     TempDir dir;
     const SettingsPaths paths = paths_in(dir);

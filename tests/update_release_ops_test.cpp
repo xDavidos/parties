@@ -1,5 +1,3 @@
-// The release pipeline's payload edits, without the tool's file and process shell.
-
 #include "release_ops.h"
 
 #include <chrono>
@@ -65,8 +63,6 @@ bool test_make_entry() {
 bool test_retention() {
     std::vector<BuildEntry> builds{build("1.0.0.0"), build("1.4.0.0"), build("1.2.0.0"), build("1.3.0.0")};
     if (versions(retained(builds, 2)) != "1.4.0.0 1.3.0.0 ") return fail("keeps the newest n: " + versions(retained(builds, 2)));
-    // 1.5 and 1.6 need launcher link 2; a launcher still on link 1 can only
-    // stage 1.4, so 1.4 stays even though it is not among the newest two.
     builds.push_back(build("1.5.0.0", 2, 2));
     builds.push_back(build("1.6.0.0", 2, 2));
     if (versions(retained(builds, 2)) != "1.6.0.0 1.5.0.0 1.4.0.0 ")

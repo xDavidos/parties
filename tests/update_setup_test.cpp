@@ -1,18 +1,3 @@
-// End to end: PartiesSetup.exe (PartiesLauncher.exe packed with a payload)
-// installing, repairing and uninstalling fake builds in a throwaway install
-// root and data root. The Apps entry, the Start menu folder and the Recycle
-// Bin are redirected into the test's own HKCU key, folder and log, so the
-// real ones are never touched. Every process the test starts runs in a job
-// object, and "done" means the job has no process left.
-//
-// The "bridge-" scenarios run the setup the way the legacy in-app updater
-// does: as parties_client.exe in a portable folder, started with
-// --update-cleanup while the old app still holds its instance mutex.
-//
-// usage: update_setup_test --launcher <exe> --stub <exe> --fake-app <exe> [--only <name>]
-//        update_setup_test --launcher <exe> --stub <exe> --fake-app <exe> --real-client <exe>
-//        update_setup_test --no-updater-in <client exe>
-
 #include "build_info.h"
 #include "build_store.h"
 #include "data_test_support.h"
@@ -54,7 +39,6 @@ namespace {
 
 // Matches the harness key pinned in testing launchers (updater/launcher/src/testing.cpp).
 constexpr std::string_view kTestSeed = "f769e71268cc70210831656bcc920641326a5bd43fe4a015881f3515a8f908a8";
-// One policy second is 10 ms: health deadline 2 s, confirm 6 s, clean exit after 0.3 s.
 constexpr const char* kTiming = "10,200,600,30";
 
 fs::path g_launcher, g_stub, g_fake_app;
@@ -90,7 +74,6 @@ void write_bytes(const fs::path& file, const std::string& bytes) {
     std::ofstream(file, std::ios::binary | std::ios::trunc) << bytes;
 }
 
-// Every file under `dir` with its digest, keyed by relative path.
 std::map<std::string, std::string> tree(const fs::path& dir) {
     std::map<std::string, std::string> out;
     std::error_code ec;
@@ -103,7 +86,6 @@ std::map<std::string, std::string> tree(const fs::path& dir) {
     return out;
 }
 
-// A process tree in its own job object, started in `cwd` (default: the exe's folder).
 class Run {
 public:
     Run(const fs::path& exe, const std::vector<std::wstring>& args, const std::map<std::wstring, std::wstring>& env,
@@ -137,7 +119,6 @@ public:
     Run(const Run&) = delete;
     Run& operator=(const Run&) = delete;
 
-    // The exit code of the first process, once every process in the job is gone.
     std::optional<DWORD> finish(std::chrono::milliseconds timeout = 90s) {
         if (!process_ || !wait_empty(timeout)) {
             check(false, "processes still running after " + std::to_string(timeout.count()) + " ms");
@@ -204,7 +185,7 @@ private:
 
 struct Build {
     BuildEntry entry;
-    fs::path dir;  // the build's files as released
+    fs::path dir;
     BuildId id() const { return entry.id(); }
 };
 
@@ -262,7 +243,6 @@ public:
         return b;
     }
 
-    // PartiesSetup.exe for `b`, packed by the launcher's own --pack mode.
     fs::path setup_for(const Build& b) const {
         const fs::path payload = root_ / "payloads" / b.entry.version.to_string();
         fs::create_directories(payload);
@@ -317,7 +297,6 @@ public:
         return start_setup(setup, std::move(args))->finish();
     }
 
-    // What the Start menu shortcut does, plus the test's own roots.
     std::optional<DWORD> start_via(const fs::path& target) const {
         Run run(target, {L"--data-root=" + data.wstring(), L"--test-namespace=" + ns}, env());
         return run.finish();
@@ -430,7 +409,6 @@ std::optional<WindowIdentity> identity_of(HWND hwnd) {
     return id;
 }
 
-// The first top-level window owned by one of `pids` whose identity is set.
 std::optional<WindowIdentity> wait_for_window_identity(const Run& run, std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -489,7 +467,6 @@ std::wstring expected_uninstall(const World& w, const Build& b) {
            L"\" --uninstall \"--install-root=" + w.install.wstring() + L"\"";
 }
 
-// Fresh install of `b` that starts the app through the stub, as a user's first run does.
 void install_and_run(const World& w, const Build& b) {
     check(w.setup(w.setup_for(b)) == 0u, "setup " + b.entry.version.to_string() + " exited 0");
 }
@@ -509,8 +486,6 @@ void uninstall(const World& w, std::vector<std::wstring> extra) {
     Run run(exe, args, w.env());
     check(run.finish() == 0u, "the UninstallString command exited 0");
 }
-
-// --- Scenarios ---
 
 void fresh_install() {
     World w("fresh");
@@ -735,13 +710,8 @@ void pin_survives_gc() {
     check(markers(w, "3.0.0.0") == runs_before + 1, "the pin started the current good build");
 }
 
-// --- The bridge from the portable zip ---
-
 constexpr unsigned char kLegacyKey = 0x42;
 
-// The legacy updater's swap: the packed setup as parties_client.exe, the
-// previous app as parties_client.old.exe, and the portable database with its
-// last writes still in -wal, as ExitProcess leaves it.
 struct Portable {
     fs::path dir, carrier, old_exe, db;
     std::string db_bytes, wal_bytes;
@@ -796,8 +766,6 @@ fs::path self_path() {
 
 std::string setup_log() { return read_file(fs::temp_directory_path() / "PartiesSetup.log").value_or(""); }
 
-// Holds the portable app's instance mutex the way the old process does until
-// it exits, and records whether anything was installed before it let go.
 std::unique_ptr<Run> hold_instance(const World& w, std::chrono::milliseconds hold) {
     const fs::path result = w.root_ / "holder-result.txt";
     auto holder = std::make_unique<Run>(
@@ -829,7 +797,6 @@ int hold_instance_main(int argc, char** argv) {
 
 std::vector<std::wstring> handoff_args(const Portable& p) { return {L"--update-cleanup", p.old_exe.wstring()}; }
 
-// The carrier started like the legacy updater or a double-click starts it: from the portable folder.
 std::optional<DWORD> run_carrier(const World& w, const Portable& p, std::vector<std::wstring> args,
                                  std::map<std::wstring, std::wstring> extra_env = {}) {
     args.push_back(L"--silent");
@@ -921,8 +888,6 @@ void bridge_manual_setup_finds_shortcuts() {
     World w("bridge-manual");
     Build a = w.build("1.0.0.0", g_fake_app, true, 2);
     const fs::path setup = w.setup_for(a);
-    // As on a real machine: the portable exe lives in the Start menu Programs
-    // folder itself, next to a Parties.lnk that starts it.
     fs::create_directories(w.start_menu);
     fs::create_directories(w.desktop);
     fs::copy_file(g_fake_app, w.start_menu / "parties_client.exe");
@@ -1036,7 +1001,6 @@ void adv_manual_setup_default_shortcut_name() {
     std::printf("  [adv] after manual setup: live db exists=%d, live has portable identity=%d, legacy backups=%zu\n",
                 (int)fs::exists(w.db()), (int)has_identity(w.db(), kLegacyKey), legacy_backups(w).size());
     check(has_identity(w.db(), kLegacyKey), "ADV: the portable identity was imported by a manual setup");
-    // Later the user opens the portable copy; its legacy updater swaps in the carrier.
     fs::rename(portable / "parties_client.exe", portable / "parties_client.old.exe");
     fs::copy_file(setup, portable / "parties_client.exe");
     std::vector<std::wstring> h{L"--update-cleanup", (portable / "parties_client.old.exe").wstring(), L"--silent"};
@@ -1061,8 +1025,6 @@ void adv_restore_from_damaged_backup() {
     std::printf("  [adv] boot-record before: %s\n", read_file(w.install / "state" / "boot-record.json").value_or("").c_str());
     auto s = w.state();
     if (!check(s.has_value(), "state readable")) return;
-    // The user picked a backup in Recovery; the launcher committed Restoring and
-    // was cut off; the backup is then gone (deleted / quarantined).
     s->operation = Restoring{Snapshot{SnapshotId{"chosen"}, DataInfo{2, 2}}, SnapshotId{"pre-restore-adv-g99"}};
     s->generation += 1;
     write_bytes(w.install / "state" / "supervisor.json", write_state(*s));
@@ -1227,8 +1189,6 @@ int bridge_real_client(const fs::path& client) {
     return g_failures ? 1 : 0;
 }
 
-// The in-app updater is gone from the client: none of its strings remain in
-// the exe, nor its class in the PDB next to it.
 int no_updater_in(const fs::path& client) {
     g_scenario = "no-updater";
     const std::string exe = bytes_of(client);

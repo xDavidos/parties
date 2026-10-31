@@ -17,7 +17,6 @@
 
 namespace parties::update::launcher {
 
-// nullopt when none of these modes applies, so the caller runs the launcher.
 std::optional<int> run_setup_modes(const std::vector<std::wstring>& args);
 
 } // namespace parties::update::launcher

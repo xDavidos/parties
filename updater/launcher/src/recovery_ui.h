@@ -1,7 +1,7 @@
 #pragma once
 
 // Native TaskDialog recovery. It runs exactly when the app cannot, so it
-// depends on nothing but Windows. Choices go back into step() as events.
+// depends on nothing but Windows.
 
 #include "data_guard.h"
 
@@ -26,12 +26,11 @@ struct RecoveryRequest {
     const SupervisorState& state;
     std::vector<Backup> backups;
     fs::path data_dir;
-    std::function<void()> on_shown;  // the dialog is on screen
+    std::function<void()> on_shown;
 };
 
 RecoveryChoice show_recovery(const RecoveryRequest& request);
 
-// The events that carry out a choice, in order.
 std::vector<Event> events_for(const RecoveryChoice& choice);
 
 } // namespace parties::update::launcher

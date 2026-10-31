@@ -1,8 +1,5 @@
 #pragma once
 
-// Strict field readers shared by the codecs. Every reader returns nullopt on a
-// missing member or wrong type, so a parse is one chain of checked lookups.
-
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>

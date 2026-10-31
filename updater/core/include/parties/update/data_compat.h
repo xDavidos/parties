@@ -16,12 +16,11 @@ struct DataInfo {
 };
 
 enum class Compatibility : uint8_t {
-    MigratesForward,  // the build migrates the database up to its schema
+    MigratesForward,
     ReadsAsIs,        // same schema, or newer data whose floor admits the build
-    Incompatible,     // the build must not open this database
+    Incompatible,
 };
 
-// The one rule for "can a build with data schema S open this database".
 // A build never lowers a newer database's version or floor.
 constexpr Compatibility compatibility(uint32_t build_schema, DataInfo db) {
     if (build_schema > db.version) return Compatibility::MigratesForward;

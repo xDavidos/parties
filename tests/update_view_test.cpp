@@ -1,6 +1,3 @@
-// The managed update UI: a launcher status in, what the user sees and the
-// link request each action sends out.
-
 #include <client/update_view.h>
 
 #include <chrono>

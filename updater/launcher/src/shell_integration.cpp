@@ -120,7 +120,6 @@ bool set_values(HKEY key, const std::vector<RegValue>& values, std::string& erro
     return true;
 }
 
-// The entry's key, opened only if it describes this install root.
 HKEY open_own_entry(const InstallPaths& install, REGSAM access) {
     HKEY key = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, uninstall_key().c_str(), 0, access | KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)

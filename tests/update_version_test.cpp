@@ -1,5 +1,3 @@
-// Offline tests for the release version grammar and build directory names.
-
 #include <parties/update/version.h>
 
 #include <iostream>

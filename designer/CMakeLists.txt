@@ -263,8 +263,6 @@ if(BUILD_TESTING)
             --frames 5
             --screenshot "${CMAKE_BINARY_DIR}/ui-designer-stream-fps-overflow.bmp"
     )
-    # Launcher-managed update UI: each fixture also clicks its controls and
-    # checks the request that would reach the launcher.
     foreach(scenario update-downloading update-ready update-rolled-back
             update-data-restored update-withdrawn update-restore-failed settings-updates settings-updates-pinned settings-updates-restore
             settings-updates-impossible settings-updates-feed-stale settings-updates-blocked

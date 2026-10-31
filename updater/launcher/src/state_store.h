@@ -13,13 +13,11 @@
 
 namespace parties::update::launcher {
 
-struct NoState {};            // fresh install or repair: adopt the running build
+struct NoState {};
 struct NewerLauncherState {}; // written by a newer launcher: leave it alone
-struct UnreadableState {};    // neither the file nor .prev can be used
+struct UnreadableState {};
 using LoadResult = std::variant<SupervisorState, NoState, NewerLauncherState, UnreadableState>;
 
-// First-run adoption (contracts.md, "Launcher first run"): `installed` becomes
-// good on the Stable channel. Shared by the launcher and setup.
 SupervisorState adopted_state(const BuildRecord& installed);
 
 class StateStore {

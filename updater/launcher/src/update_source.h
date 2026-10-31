@@ -23,7 +23,6 @@ struct SourceError {
     std::string detail;
 };
 
-// Bytes written so far for the current file.
 using Progress = std::function<void(uint64_t bytes_done)>;
 
 class UpdateSource {
@@ -45,12 +44,9 @@ public:
     virtual void abort() {}
 };
 
-// Where retail launchers read channel manifests: assets of the GitHub release
-// tagged "channels".
 inline constexpr std::string_view kFeedBase = "https://github.com/emcifuntik/parties/releases/download/channels/";
 
-// A folder holding <channel>.manifest.json and files\<sha256 hex>. Used by the
-// e2e harness, and by anyone testing a release from disk.
+// A folder holding <channel>.manifest.json and files\<sha256 hex>.
 std::unique_ptr<UpdateSource> make_local_dir_source(std::filesystem::path dir);
 
 // WinHTTP over `base` (ending in '/'). Manifests are <base><channel>.manifest.json

@@ -21,9 +21,9 @@ struct DataLocation {
 };
 
 struct DataLocationInputs {
-    std::span<const std::wstring> args;      // command line without the program name
+    std::span<const std::wstring> args;
     bool retail = false;
-    std::filesystem::path local_app_data;    // empty when unknown
+    std::filesystem::path local_app_data;
     std::filesystem::path exe_dir;
 };
 
@@ -36,8 +36,6 @@ struct DataLocationResult {
 // other builds use the exe's directory so dev copies (build/client2..4) stay separate.
 DataLocationResult resolve_data_location(const DataLocationInputs& inputs);
 
-// resolve_data_location over this process's command line, known folders and
-// exe path, then creates the data directory.
 DataLocationResult resolve_process_data_location();
 
 } // namespace parties::client

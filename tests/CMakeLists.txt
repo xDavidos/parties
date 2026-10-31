@@ -194,7 +194,6 @@ if(BUILD_CLIENT)
         ${SPEEXDSP_LIBRARY})
 endif()
 
-# ── User data safety: schema migrations, data location, legacy import ────────
 if(WIN32 AND BUILD_CLIENT)
     foreach(data_test settings location legacy_import)
         add_executable(parties_data_${data_test}_test
@@ -346,7 +345,6 @@ if(WIN32 AND BUILD_CLIENT)
     set_tests_properties(parties_rmlui_dx12_resize parties_rmlui_dx12_resize_msaa PROPERTIES TIMEOUT 60)
 endif()
 
-# ── Update manager pure core (offline, deterministic) ────────────────────────
 if(TARGET parties_update_core)
     foreach(update_test version data_compat manifest probation state_codec policy link retention)
         add_executable(update_${update_test}_test update_${update_test}_test.cpp)
@@ -360,7 +358,6 @@ if(TARGET parties_update_core)
     target_link_libraries(update_boot_test PRIVATE parties_update_boot)
     add_test(NAME update_boot COMMAND update_boot_test)
     if(PARTIES_UPDATE_TESTING)
-        # Runs the real Parties.exe against fake launchers in temporary install roots.
         add_executable(update_fake_launcher WIN32 update_fake_launcher.cpp)
         target_link_libraries(update_fake_launcher PRIVATE parties_update_boot)
         add_executable(update_stub_test update_stub_test.cpp)
@@ -375,7 +372,6 @@ if(TARGET parties_update_core)
     target_link_libraries(update_release_ops_test PRIVATE parties_release_ops parties_common)
     add_test(NAME update_release_ops COMMAND update_release_ops_test)
     if(PARTIES_UPDATE_TESTING)
-        # The tool's --keyring flag exists only in testing builds.
         add_executable(update_manifest_tool_test update_manifest_tool_test.cpp)
         target_link_libraries(update_manifest_tool_test PRIVATE parties_update_release_keys parties_common)
         add_dependencies(update_manifest_tool_test parties_manifest_tool)
@@ -398,7 +394,7 @@ if(TARGET parties_update_core)
     endif()
 endif()
 
-# â”€â”€ Update launcher end to end (testing builds only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Update launcher end to end (testing builds only) ─────────────────────────
 # Drives the real PartiesLauncher.exe over fake builds in a temp install root.
 if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
     find_package(RapidJSON CONFIG REQUIRED)
@@ -425,8 +421,6 @@ if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
         set_tests_properties(update_e2e_smoke PROPERTIES TIMEOUT 300)
     endif()
 
-    # Setup, repair and uninstall over fake builds. The Apps entry, the Start
-    # menu and the Recycle Bin are redirected into the test's own places.
     add_executable(update_setup_test update_setup_test.cpp)
     target_include_directories(update_setup_test PRIVATE ../client/include)
     target_link_libraries(update_setup_test PRIVATE
@@ -436,18 +430,14 @@ if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
         --fake-app $<TARGET_FILE:update_fake_app>)
     add_test(NAME update_setup COMMAND update_setup_test ${update_setup_args})
     set_tests_properties(update_setup PROPERTIES TIMEOUT 900)
-    # The move from the portable zip: the setup as the zip's parties_client.exe,
-    # started the way the legacy in-app updater starts it.
     add_test(NAME update_bridge COMMAND update_setup_test ${update_setup_args} --only bridge-)
     set_tests_properties(update_bridge PROPERTIES TIMEOUT 900)
     if(TARGET parties_client)
         add_test(NAME update_bridge_no_updater COMMAND update_setup_test --no-updater-in $<TARGET_FILE:parties_client>)
-        # Needs a GPU, like update_e2e_smoke.
         add_test(NAME update_bridge_smoke COMMAND update_setup_test ${update_setup_args}
             --real-client $<TARGET_FILE:parties_client> --only bridge-)
         set_tests_properties(update_bridge_smoke PROPERTIES TIMEOUT 300)
     endif()
-    # Needs a GPU, like update_e2e_smoke.
     if(TARGET parties_client)
         add_test(NAME update_e2e_setup_smoke COMMAND update_setup_test ${update_setup_args}
             --real-client $<TARGET_FILE:parties_client>)

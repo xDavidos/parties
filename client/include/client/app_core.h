@@ -101,13 +101,9 @@ public:
     AppCore();
     ~AppCore();
 
-    // settings_ must already be open: the platform shell opens it so it can
-    // refuse to start, with a native message, when the data is unusable.
     bool init(PlatformBridge bridge, Rml::Context* rml_context);
     void shutdown();
 #ifdef _WIN32
-    // Call before init(). Only a supervising launcher updates the app; without
-    // one the app shows no update UI.
     void supervise_updates(std::function<void(const update::link::Request&)> send);
     void apply_update_status(const update::link::Status& status);
 #endif
@@ -391,7 +387,7 @@ private:
     uint64_t datagram_drops_logged_ = 0;
 
 #ifdef _WIN32
-    std::function<void(const update::link::Request&)> send_update_request_;  // set only when supervised
+    std::function<void(const update::link::Request&)> send_update_request_;
     std::optional<update::link::Status> update_status_;
     void on_update_action(UpdateAction action);
 #endif

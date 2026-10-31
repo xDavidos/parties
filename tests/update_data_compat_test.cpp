@@ -1,5 +1,3 @@
-// Offline tests for the data compatibility rule shared by the app and launcher.
-
 #include <parties/update/data_compat.h>
 
 #include <iostream>
@@ -13,8 +11,7 @@ bool fail(const char* msg) {
     return false;
 }
 
-// The rule as design.md states it, written independently: a build with schema
-// S opens {v, f} if S >= v or f <= S; it migrates only when S > v.
+// The rule as design.md states it, written independently of data_compat.cpp.
 Compatibility expected(uint32_t s, DataInfo d) {
     bool opens = s >= d.version || d.compat_floor <= s;
     if (!opens) return Compatibility::Incompatible;

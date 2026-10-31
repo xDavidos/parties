@@ -129,7 +129,6 @@ bool copy_raw(const fs::path& from, const fs::path& to, std::string& error) {
     return commit_file(partial, to, error);
 }
 
-// Missing files count as equal, so a copy without a -wal matches a backup without one.
 bool same_bytes(const fs::path& a, const fs::path& b) {
     std::error_code ec_a, ec_b;
     const bool has_a = fs::exists(a, ec_a), has_b = fs::exists(b, ec_b);
@@ -140,7 +139,6 @@ bool same_bytes(const fs::path& a, const fs::path& b) {
                       std::istreambuf_iterator<char>(in_b), std::istreambuf_iterator<char>());
 }
 
-// A legacy-* backup holding exactly `db` and its -wal.
 std::optional<fs::path> existing_copy(const fs::path& backups_dir, const fs::path& db) {
     std::error_code ec;
     for (const auto& entry : fs::directory_iterator(backups_dir, ec)) {
@@ -152,9 +150,6 @@ std::optional<fs::path> existing_copy(const fs::path& backups_dir, const fs::pat
     return std::nullopt;
 }
 
-// Copies `candidate` to `dest` and returns `dest`, or returns an empty path
-// when a legacy backup already holds the same bytes. VACUUM INTO writes the
-// same file for the same content, so an unchanged source is copied once.
 std::optional<fs::path> preserve(const LegacyCandidate& candidate, const fs::path& dest, std::string& error) {
     const fs::path backups_dir = dest.parent_path();
     std::error_code ec;
@@ -174,8 +169,6 @@ std::optional<fs::path> preserve(const LegacyCandidate& candidate, const fs::pat
             return dest;
         }
     }
-    // Unreadable files are kept byte for byte so nothing is lost even when
-    // SQLite cannot make sense of them.
     if (existing_copy(backups_dir, candidate.path)) return fs::path();
     const fs::path wal = sidecar(candidate.path, "-wal");
     if (fs::exists(wal, ec) && !copy_raw(wal, sidecar(dest, "-wal"), error)) return std::nullopt;

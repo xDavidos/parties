@@ -20,7 +20,6 @@ struct Facts {
     bool reads_data(const BuildEntry& e) const {
         return !live || compatibility(e.data_schema, *live) != Compatibility::Incompatible;
     }
-    // Could run here today, ignoring the data.
     bool offerable(const BuildEntry& e) const {
         return !manifest.is_revoked(e.version) && talks_to_launcher(e) && !quarantined(e);
     }

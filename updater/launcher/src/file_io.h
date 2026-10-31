@@ -22,7 +22,6 @@ std::optional<std::string> read_file(const fs::path& path);
 // a reader sees the old bytes or the new bytes, never a mix.
 bool durable_replace(const fs::path& file, std::string_view bytes, std::string& error);
 
-// Flushes an existing file to stable storage.
 bool flush_file(const fs::path& path, std::string& error);
 
 struct FileDigest {

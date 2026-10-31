@@ -1,4 +1,3 @@
-// Stands in for PartiesLauncher.exe and parties_client.exe in update_stub_test.
 // behavior.txt next to the exe holds "<behavior> <launcher sha256 hex>":
 //   ok     write an unclean session report, signal boot_ok, then stay alive
 //   clean  write a session report, signal boot_ok, mark the session clean, exit 0

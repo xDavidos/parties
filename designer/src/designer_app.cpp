@@ -239,7 +239,6 @@ struct DesignerApp::PartiesFixture {
 		return scenario.rfind("settings-updates", 0) == 0;
 	}
 
-	// The launcher status each update scenario receives over the link.
 	static std::optional<parties::update::link::Status> UpdateStatus(const std::string& scenario) {
 		using namespace parties::update;
 		using namespace parties::update::link;
@@ -291,8 +290,6 @@ struct DesignerApp::PartiesFixture {
 		return status;
 	}
 
-	// What the visible update controls must have sent once ApplyDocumentFixture
-	// clicked them.
 	static std::vector<parties::update::link::Request> ExpectedUpdateRequests(const std::string& scenario) {
 		using namespace parties::update;
 		using namespace parties::update::link;
@@ -755,8 +752,6 @@ struct DesignerApp::PartiesFixture {
 	void ApplyDocumentFixture(Rml::ElementDocument* document, const std::string& scenario) {
 		if (!document) return;
 		if (update_status) {
-			// Click every update control the scenario shows, through the real
-			// data events, so validation can compare what reached the launcher.
 			document->GetContext()->Update();
 			for (const char* id : {"titlebar-update", "update-notice-dismiss", "settings-update-stable",
 				"settings-update-beta", "settings-update-switch-now"}) {
@@ -1190,7 +1185,6 @@ struct DesignerApp::PartiesFixture {
 					? settings_nav->GetBox().GetSize(Rml::BoxArea::Border).x : 0.0f;
 				// The Camera page exists only where the platform can capture one.
 				const bool camera_page = lobby.camera_available.get();
-				// The Updates page exists only while the launcher reports status.
 				const bool updates_page = lobby.update_managed.get();
 				valid = settings_nav && visible_nav_items == 4u + (camera_page ? 1u : 0u) + (updates_page ? 1u : 0u) &&
 					(!camera_page || document->GetElementById("settings-nav-camera")) &&

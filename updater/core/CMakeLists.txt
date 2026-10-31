@@ -3,7 +3,6 @@
 add_library(parties_update_data INTERFACE)
 target_include_directories(parties_update_data INTERFACE include)
 
-# The update manager is Windows-only for now; its core is portable C++.
 if(NOT WIN32)
     return()
 endif()
@@ -19,7 +18,7 @@ add_library(parties_update_boot STATIC
 target_include_directories(parties_update_boot PUBLIC include)
 target_link_libraries(parties_update_boot PRIVATE rapidjson)
 
-# The launcher <-> app link codec. The client links it, so it stays free of
+# The client links the launcher <-> app link codec, so it stays free of
 # OpenSSL like the boot library.
 add_library(parties_update_link STATIC
     src/encoding.cpp

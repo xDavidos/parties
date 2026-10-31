@@ -16,7 +16,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// Returns the absolute path given by --<name>=, an error, or nothing when absent.
 std::optional<std::variant<fs::path, std::string>> path_flag(std::span<const std::wstring> args,
                                                              std::wstring_view flag) {
     for (const std::wstring& arg : args) {

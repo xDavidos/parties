@@ -1,8 +1,5 @@
 #pragma once
 
-// The app end of the launcher link (updater contracts, "Launcher to app").
-// Present only when the app was started with --supervisor-pipe; then the
-// launcher owns updates and judges this build by the health report.
 // Message-thread only: every call is non-blocking.
 
 #include <parties/update/link.h>
@@ -25,12 +22,10 @@ public:
     SupervisorLink(const SupervisorLink&) = delete;
     SupervisorLink& operator=(const SupervisorLink&) = delete;
 
-    // Reads whatever the launcher sent. Returns true when status() changed.
     bool poll();
     const std::optional<update::link::Status>& status() const { return status_; }
     bool exit_requested() const { return exit_requested_; }
 
-    // Once, after ui/lobby.rml is loaded and the first frame is presented.
     void report_healthy(uint32_t data_schema);
     bool healthy_reported() const { return healthy_reported_; }
 
@@ -40,7 +35,7 @@ private:
     explicit SupervisorLink(void* pipe) : pipe_(pipe) {}
     void send(const update::link::AppMessage& message);
 
-    void* pipe_;  // INVALID_HANDLE_VALUE when the connect failed
+    void* pipe_;
     update::link::LineReader reader_;
     std::optional<uint32_t> protocol_;
     std::optional<update::link::Status> status_;

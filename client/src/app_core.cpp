@@ -553,7 +553,6 @@ constexpr const char* kIdentityNotSaved = "Parties could not save your identity.
 
 void AppCore::load_or_generate_identity(const std::string& username_hint)
 {
-    // An empty seed phrase is a raw-key import and as valid as any other identity.
     auto identity = settings_.load_identity();
     if (identity) {
         seed_phrase_ = identity->seed_phrase;

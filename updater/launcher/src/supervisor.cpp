@@ -165,11 +165,11 @@ private:
     std::optional<DataInfo> last_live_db_;
     FeedView feed_view_;
     bool restart_requested_ = false;
-    bool quitting_ = false;  // setup or uninstall asked; ends the session once no app runs
+    bool quitting_ = false;
     bool quit_ = false;
     bool session_ended_ = false;
     Clock::time_point next_check_ = Clock::time_point::max();
-    std::optional<Clock::time_point> jobs_cut_off_;  // set while no app runs
+    std::optional<Clock::time_point> jobs_cut_off_;
     std::deque<Job> jobs_;
     std::optional<Job> running_job_;
 
@@ -406,7 +406,6 @@ void Supervisor::on_request(const link::Request& request) {
         request);
 }
 
-// Closes the app through its normal path; the loop ends once none runs.
 void Supervisor::on_quit() {
     quitting_ = true;
     restart_requested_ = false;
@@ -471,7 +470,6 @@ void Supervisor::submit(Job job) {
     pump();
 }
 
-// Setup and uninstall end the launcher through here as well.
 void Supervisor::cancel_jobs() {
     jobs_.clear();
     worker_.cancel();
@@ -644,7 +642,6 @@ int Supervisor::run() {
     write_session(false);
 
     HANDLE activate = CreateEventW(nullptr, FALSE, FALSE, object_name(L".Launcher.Activate").c_str());
-    // Set by setup and uninstall, which then wait for the Running mutex.
     HANDLE quit = CreateEventW(nullptr, FALSE, FALSE, object_name(L".Launcher.Quit").c_str());
     WNDCLASSW wc{};
     wc.lpfnWndProc = window_proc;

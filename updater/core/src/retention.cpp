@@ -14,7 +14,6 @@ bool lower_hex(std::string_view s) {
     return std::ranges::all_of(s, [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
 }
 
-// "pre-<version>-<sha8>-g<generation>"
 bool pre_build(std::string_view stem) {
     if (!stem.starts_with("pre-")) return false;
     stem.remove_prefix(4);
@@ -27,7 +26,6 @@ bool pre_build(std::string_view stem) {
     return sha.size() == 8 && lower_hex(sha) && Version::parse(stem.substr(0, dash)).has_value();
 }
 
-// "pre-migration-v<schema>-<utc>[-<n>]"
 bool pre_migration(std::string_view stem) {
     constexpr std::string_view prefix = "pre-migration-v";
     if (!stem.starts_with(prefix)) return false;

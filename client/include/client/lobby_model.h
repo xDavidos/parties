@@ -71,7 +71,6 @@ struct WatchedStream {
     bool mirror = false;     // our own camera: shown as a mirror image
 };
 
-// What the user did in the launcher-managed update UI.
 enum class UpdateAction { ClickPill, ChooseStable, ChooseBeta, SwitchNow, DismissNotice };
 
 class LobbyModel : public rml::Model {
@@ -196,18 +195,17 @@ public:
     rml::Prop<bool>        update_downloading{false};
     rml::Prop<bool>        update_ready{false};
     rml::Prop<Rml::String> update_version;
-    rml::Prop<int>         update_percent{-1};       // download progress, -1 = not reported
+    rml::Prop<int>         update_percent{-1};
 
-    // Launcher-managed updates: set only while the launcher reports status
     rml::Prop<bool>        update_managed{false};
-    rml::Prop<Rml::String> update_current;           // installed version
-    rml::Prop<int>         update_channel{0};        // 0 = Stable, 1 = Beta
+    rml::Prop<Rml::String> update_current;
+    rml::Prop<int>         update_channel{0};
     rml::Prop<Rml::String> update_status_line;
-    rml::Prop<Rml::String> update_hold;              // why Parties stays on this version ("" = it does not)
-    rml::Prop<bool>        update_can_switch{false}; // an immediate switch to the older build is offered
-    rml::Prop<Rml::String> update_switch_note;       // what switching now does to your data
-    rml::Prop<Rml::String> update_notice;            // rollback banner ("" = none)
-    rml::Prop<Rml::String> update_notice_detail;     // where changes made in the failed build went
+    rml::Prop<Rml::String> update_hold;
+    rml::Prop<bool>        update_can_switch{false};
+    rml::Prop<Rml::String> update_switch_note;
+    rml::Prop<Rml::String> update_notice;
+    rml::Prop<Rml::String> update_notice_detail;
 
     // Admin / permissions
     rml::Prop<int>         my_role{3};                  // current user's role (0=Owner..3=User)

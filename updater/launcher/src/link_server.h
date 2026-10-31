@@ -21,7 +21,6 @@ public:
     LinkServer& operator=(const LinkServer&) = delete;
     ~LinkServer();
 
-    // Signalled when a connect or read completes; then call poll().
     void* event() const { return read_event_; }
 
     // Only this process may talk to us; anything else is disconnected.
@@ -45,7 +44,7 @@ private:
     void* pipe_;
     void* read_event_;
     void* write_event_;
-    void* overlapped_ = nullptr;  // OVERLAPPED for connect and reads
+    void* overlapped_ = nullptr;
     State state_ = State::Connecting;
     unsigned long client_pid_ = 0;
     char buffer_[4096];

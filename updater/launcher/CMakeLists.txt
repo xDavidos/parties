@@ -1,12 +1,6 @@
-# PartiesLauncher.exe: the update supervisor that ships in every build
-# directory. The shell lives in a library so the e2e harness can reuse its
-# file primitives; the decisions live in parties_update_core.
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
 find_package(RapidJSON CONFIG REQUIRED)
 
-# Defense in depth behind the signed manifests: when set, every downloaded
-# executable must carry a valid Authenticode signature whose signer's common
-# name is exactly this (docs/releasing.md). Empty skips the check.
 set(PARTIES_AUTHENTICODE_PUBLISHER "" CACHE STRING "Common name of the Authenticode signer every downloaded executable must carry")
 
 add_library(parties_launcher_shell STATIC
@@ -53,9 +47,6 @@ endif()
 add_executable(PartiesLauncher WIN32 src/main.cpp)
 target_link_libraries(PartiesLauncher PRIVATE parties_launcher_shell)
 
-# PartiesSetup.exe: PartiesLauncher.exe packed with a payload directory
-# (manifest.json, Parties.exe and the build's files, see setup_payload.h).
-# Not part of "all"; build it with --target PartiesSetup.
 set(PARTIES_SETUP_PAYLOAD_DIR "" CACHE PATH
     "Payload directory for PartiesSetup.exe. Empty: testing builds stage this build's own executables.")
 set(setup_exe "${CMAKE_CURRENT_BINARY_DIR}/PartiesSetup.exe")
@@ -65,7 +56,7 @@ if(PARTIES_SETUP_PAYLOAD_DIR)
 elseif(PARTIES_UPDATE_TESTING AND BUILD_CLIENT)
     set(setup_payload "${CMAKE_CURRENT_BINARY_DIR}/setup-payload")
     set(setup_payload_depends "${setup_payload}/manifest.json")
-    # The e2e harness key (src/testing.cpp), which only testing launchers trust.
+    # The e2e harness signing seed (tests/update_e2e_test.cpp); only testing launchers pin its public key (src/testing.cpp).
     set(harness_key f769e71268cc70210831656bcc920641326a5bd43fe4a015881f3515a8f908a8)
     add_custom_command(OUTPUT "${setup_payload}/manifest.json"
         COMMAND ${CMAKE_COMMAND} -DSTUB=$<TARGET_FILE:parties_boot_stub> -DLAUNCHER=$<TARGET_FILE:PartiesLauncher>

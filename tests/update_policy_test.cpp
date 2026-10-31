@@ -1,5 +1,3 @@
-// Offline tests for update and channel-switch decisions.
-
 #include <parties/update/update_policy.h>
 
 #include <parties/crypto.h>
@@ -64,8 +62,6 @@ SupervisorState installed(const BuildEntry& good, Channel channel = Channel::Sta
     return initial_state(BuildRecord::from_entry(good), channel);
 }
 
-// Released builds: 1.5.2 (schema 2), 1.6.0 (schema 3, additive), 1.6.1 (schema 3),
-// 1.7.0 (schema 4, raises the floor to 4, needs launcher protocol 3).
 const BuildEntry k152 = entry("1.5.2.0", 2, 1);
 const BuildEntry k160 = entry("1.6.0.0", 3, 1);
 const BuildEntry k161 = entry("1.6.1.0", 3, 1);
@@ -131,7 +127,6 @@ bool test_switch_to_older_channel_pins() {
     if (!restoring || !restoring->downgrade || restoring->downgrade->data_effect != DataEffect::NeedsRestore)
         ok &= fail("switch now onto data the older build cannot read restores a backup");
 
-    // Stable catches up with the promoted, byte-identical build: the pin lifts, nothing downloads.
     auto caught_up = plan_update(s, manifest(Channel::Stable, {k152, k160}), kProtocol, kData3);
     if (!as<NothingToDo>(caught_up) || caught_up.new_intent != ChannelIntent{Follow{}})
         ok &= fail("the pin lifts when the channel reaches it");
@@ -159,7 +154,6 @@ bool test_downgrade_offers() {
     auto none = std::get<StayPinned>(plan_channel_switch(installed(k161), manifest(Channel::Stable, {}), kProtocol, kData3));
     if (none.downgrade) ok &= fail("an empty channel offers nothing");
 
-    // Following a channel that is older than the install offers, never stages.
     auto offer = plan_update(installed(k161), manifest(Channel::Stable, {k152}), kProtocol, kData3Floor3);
     auto* o = as<OfferDowngrade>(offer);
     if (!o || o->offer.data_effect != DataEffect::NeedsRestore) ok &= fail("an older channel is only an offer");
@@ -224,7 +218,6 @@ bool test_quarantine_until_newer() {
 }
 
 bool test_data_gate_on_newer_builds() {
-    // Data from a newer beta whose floor no stable build reaches yet.
     auto s = installed(k161);
     auto m = manifest(Channel::Stable, {k152, k161, entry("1.6.2.0", 3, 1)});
     auto* nothing = as<NothingToDo>(plan_update(s, m, kProtocol, DataInfo{5, 5}));

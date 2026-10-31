@@ -1,5 +1,3 @@
-// Offline tests for which backups the launcher may delete.
-
 #include <parties/update/retention.h>
 
 #include <algorithm>

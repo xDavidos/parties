@@ -16,7 +16,6 @@ struct Version {
     friend constexpr bool operator==(const Version&, const Version&) = default;
 };
 
-// A database with tables but no parties_schema predates versioning.
 inline constexpr Version kLegacy{1, 1};
 
 // SQLite has no ADD COLUMN IF NOT EXISTS, and v1 databases exist both with
@@ -29,7 +28,7 @@ struct ColumnAddition {
 
 struct Migration {
     int to_version;
-    int raises_floor_to;   // 0 keeps the current floor
+    int raises_floor_to;
     const char* sql;
     std::span<const ColumnAddition> add_columns = {};
 };
@@ -100,7 +99,6 @@ inline constexpr Migration kMigrations[] = {
     {3, 0, kVersion1Tables},
 };
 
-// The version a database reaches after every step in `migrations` ran.
 constexpr Version target_of(std::span<const Migration> migrations) {
     Version v;
     for (const Migration& m : migrations) {

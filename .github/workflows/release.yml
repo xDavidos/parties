@@ -21,8 +21,6 @@ jobs:
       version: ${{ steps.layout.outputs.version }}
     env:
       VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/emcifuntik/index.json,readwrite"
-      # The update layout ships these next to parties_client.exe once their
-      # targets exist; until then the release goes out without it.
       LAUNCHER_EXE: build-retail/updater/launcher/PartiesLauncher.exe
       STUB_EXE: build-retail/updater/boot/Parties.exe
     steps:
@@ -546,7 +544,6 @@ jobs:
             dist/appcast/appcast.xml
             dist/update/assets/*
 
-  # ── Beta channel ────────────────────────────────────────────────────────────
   publish-beta:
     needs: [windows, create-release]
     if: needs.windows.outputs.update_layout == 'true'
@@ -557,7 +554,6 @@ jobs:
     with:
       version: ${{ needs.windows.outputs.version }}
 
-  # ── Setup ───────────────────────────────────────────────────────────────────
   # PartiesSetup.exe embeds the signed build and the Beta manifest that lists
   # it, so it exists only once publish-beta has signed that manifest. Without
   # a production key nothing is signed, and setup is skipped rather than
@@ -595,8 +591,6 @@ jobs:
           name: release-windows-setup-manifest
           path: manifest
 
-      # --pack verifies the manifest against the carrier's pinned production
-      # keys and every file against its digest, and refuses anything else.
       - name: Pack PartiesSetup.exe
         if: env.SIGNED == 'true'
         shell: pwsh
@@ -645,9 +639,7 @@ jobs:
       # extracts it with Expand-Archive, requires a valid Authenticode
       # signature on its parties_client.exe and starts that with
       # --update-cleanup. Putting the signed setup there under that name moves
-      # portable users onto the installer; promote.yml still decides when they
-      # see the release. Without a signed setup this step does not run, and the
-      # zip keeps the client that create-release put in it.
+      # portable users onto the installer.
       - name: Replace the legacy zip's client with the setup
         if: env.SIGNED == 'true'
         shell: pwsh
