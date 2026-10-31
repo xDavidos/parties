@@ -38,7 +38,7 @@ struct LegacyImportResult {
     };
     Status status = Status::Skipped;
     std::filesystem::path imported_from;
-    std::vector<std::filesystem::path> preserved;
+    std::vector<std::filesystem::path> preserved;  // backups this run wrote
     std::string error;
 };
 
@@ -48,5 +48,12 @@ struct LegacyImportResult {
 // next start) or a complete one.
 LegacyImportResult import_legacy_data(const DataLocation& location,
                                       std::span<const std::filesystem::path> search_dirs);
+
+// Copies every legacy database found to backups\legacy-* and imports
+// nothing, whether or not the data directory has a database. A source whose
+// copy is already there is not copied again, so a repeat writes nothing.
+// Status is Skipped, or Failed when a copy could not be written.
+LegacyImportResult preserve_legacy_data(const DataLocation& location,
+                                        std::span<const std::filesystem::path> search_dirs);
 
 } // namespace parties::client

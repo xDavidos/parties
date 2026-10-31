@@ -17,6 +17,7 @@ using parties::client::import_legacy_data;
 using parties::client::LegacyCandidate;
 using parties::client::LegacyImportResult;
 using parties::client::plan_legacy_import;
+using parties::client::preserve_legacy_data;
 using parties::client::Settings;
 using Status = LegacyImportResult::Status;
 
@@ -211,6 +212,58 @@ bool nothing_found_creates_nothing() {
     return ok;
 }
 
+bool preserving_with_a_live_database_copies_each_source_once() {
+    Layout layout;
+    write_legacy_db(layout.location.db_path(), 0x01);
+    const auto live_before = read_bytes(layout.location.db_path());
+    const fs::path source = layout.cwd / "parties_client.db";
+    write_legacy_db(source, 0x02);
+    {
+        std::ofstream out(layout.exe / "parties_client.db", std::ios::binary);
+        out << "not a database";
+    }
+    const auto source_before = read_bytes(source);
+    const auto wal_before = bytes_or_empty(fs::path(source) += "-wal");
+
+    const fs::path dirs[] = {layout.cwd, layout.exe};
+    const auto first = preserve_legacy_data(layout.location, dirs);
+    bool ok = Check(first.status == Status::Skipped, "preserving failed");
+    ok &= Check(first.preserved.size() == 2, "expected one backup per source");
+    ok &= Check(files_in(layout.location.backups_dir).size() == 2, "expected two files in backups");
+    ok &= Check(read_bytes(layout.location.db_path()) == live_before, "the live database was changed");
+    ok &= Check(read_bytes(source) == source_before, "the source database was modified");
+    ok &= Check(bytes_or_empty(fs::path(source) += "-wal") == wal_before, "the source -wal file was modified");
+    bool copied_identity = false;
+    for (const fs::path& kept : first.preserved) copied_identity |= identity_in(kept) == key(0x02);
+    ok &= Check(copied_identity, "no backup holds the legacy identity");
+
+    const auto again = preserve_legacy_data(layout.location, dirs);
+    ok &= Check(again.status == Status::Skipped && again.preserved.empty(), "a second run copied again");
+    ok &= Check(files_in(layout.location.backups_dir).size() == 2, "a second run added files to backups");
+    return ok;
+}
+
+bool preserving_after_an_import_adds_only_the_imported_source() {
+    using namespace std::chrono_literals;
+    Layout layout;
+    write_legacy_db(layout.cwd / "parties_client.db", 0xA1);
+    write_legacy_db(layout.exe / "parties_client.db", 0xB2);
+    const auto now = fs::file_time_type::clock::now();
+    for (const char* suffix : {"", "-wal"}) {
+        fs::last_write_time(layout.cwd / (std::string("parties_client.db") + suffix), now - 2h);
+        fs::last_write_time(layout.exe / (std::string("parties_client.db") + suffix), now - 1h);
+    }
+    const fs::path dirs[] = {layout.cwd, layout.exe};
+    const auto imported = import_legacy_data(layout.location, dirs);
+    bool ok = Check(imported.status == Status::Imported && imported.preserved.size() == 1, "import failed");
+    const auto kept = preserve_legacy_data(layout.location, dirs);
+    ok &= Check(kept.preserved.size() == 1, "expected only the imported source to be copied");
+    ok &= Check(kept.preserved.size() == 1 && identity_in(kept.preserved[0]) == key(0xB2),
+                "the new backup is not the imported source");
+    ok &= Check(files_in(layout.location.backups_dir).size() == 2, "expected one backup per source");
+    return ok;
+}
+
 } // namespace
 
 int main() {
@@ -221,6 +274,8 @@ int main() {
     success &= same_folder_twice_is_one_candidate();
     success &= leftover_partial_copy_is_cleaned_up();
     success &= nothing_found_creates_nothing();
+    success &= preserving_with_a_live_database_copies_each_source_once();
+    success &= preserving_after_an_import_adds_only_the_imported_source();
     std::printf(success ? "legacy import tests passed\n" : "legacy import tests FAILED\n");
     return success ? 0 : 1;
 }
