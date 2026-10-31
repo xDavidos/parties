@@ -20,6 +20,7 @@ add_library(parties_launcher_shell STATIC
     src/link_server.cpp
     src/local_dir_source.cpp
     src/log.cpp
+    src/paths.cpp
     src/recovery_ui.cpp
     src/state_store.cpp
     src/supervisor.cpp

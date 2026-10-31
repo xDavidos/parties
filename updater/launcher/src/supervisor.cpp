@@ -22,7 +22,6 @@
 
 #include <windows.h>
 #include <bcrypt.h>
-#include <shlobj.h>
 
 namespace parties::update::launcher {
 
@@ -41,14 +40,6 @@ std::wstring widen(std::string_view s) {
     std::wstring w(static_cast<size_t>(n), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
     return w;
-}
-
-fs::path known_folder(REFKNOWNFOLDERID id) {
-    PWSTR path = nullptr;
-    fs::path out;
-    if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_CREATE, nullptr, &path))) out = path;
-    CoTaskMemFree(path);
-    return out;
 }
 
 fs::path self_exe() {
@@ -185,8 +176,7 @@ bool Supervisor::adopt_own_build() {
         tell_user("Parties is not installed correctly: " + record.error());
         return false;
     }
-    SupervisorState initial = initial_state(*record, Channel::Stable);
-    initial.generation = 1;
+    SupervisorState initial = adopted_state(*record);
     std::string error;
     if (!store_.commit(initial, error)) {
         tell_user("Parties cannot save its update state: " + error);
@@ -740,8 +730,8 @@ std::optional<LauncherOptions> parse_options(const std::vector<std::wstring>& ar
             log("ignoring unknown argument {}", utf8(fs::path(a)));
         }
     }
-    o.install.root = install_root ? *install_root : known_folder(FOLDERID_UserProgramFiles) / "Parties";
-    o.data.root = data_root ? *data_root : known_folder(FOLDERID_LocalAppData) / "Parties";
+    o.install.root = install_root ? *install_root : default_install_root();
+    o.data.root = data_root ? *data_root : default_data_root();
     if (o.install.root.empty() || o.data.root.empty()) {
         error = "the per-user application folders are unknown";
         return std::nullopt;

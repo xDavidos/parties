@@ -18,6 +18,10 @@ struct NewerLauncherState {}; // written by a newer launcher: leave it alone
 struct UnreadableState {};    // neither the file nor .prev can be used
 using LoadResult = std::variant<SupervisorState, NoState, NewerLauncherState, UnreadableState>;
 
+// First-run adoption (contracts.md, "Launcher first run"): `installed` becomes
+// good on the Stable channel. Shared by the launcher and setup.
+SupervisorState adopted_state(const BuildRecord& installed);
+
 class StateStore {
 public:
     StateStore(InstallPaths install, std::string data_dir);

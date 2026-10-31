@@ -30,4 +30,8 @@ struct DataPaths {
     fs::path logs() const { return root / "logs"; }
 };
 
+// Empty when Windows cannot name the per-user folders.
+fs::path default_install_root();
+fs::path default_data_root();
+
 } // namespace parties::update::launcher
