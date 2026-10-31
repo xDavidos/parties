@@ -226,6 +226,7 @@ public:
         data = root_ / "Parties";
         start_menu = root_ / "Start Menu";
         desktop = root_ / "Desktop";
+        taskbar = root_ / "TaskBar";
         recycle_log = root_ / "recycled.txt";
         key_parent = L"Software\\PartiesTest\\Setup-" + widen(unique);
         key = key_parent + L"\\Uninstall\\Parties";
@@ -238,7 +239,7 @@ public:
         fs::remove_all(root_, ec);
     }
 
-    fs::path root_, install, data, start_menu, desktop, recycle_log;
+    fs::path root_, install, data, start_menu, desktop, taskbar, recycle_log;
     std::wstring key_parent, key, ns;
     std::map<std::string, std::string> extra_env{{"PARTIES_FAKE_RUN_MS", "700"}};
 
@@ -295,6 +296,7 @@ public:
         out[L"PARTIES_TEST_UNINSTALL_KEY"] = key;
         out[L"PARTIES_TEST_START_MENU"] = start_menu.wstring();
         out[L"PARTIES_TEST_DESKTOP"] = desktop.wstring();
+        out[L"PARTIES_TEST_TASKBAR"] = taskbar.wstring();
         out[L"PARTIES_TEST_RECYCLE_LOG"] = recycle_log.wstring();
         out[L"PARTIES_TEST_TIMING"] = widen(kTiming);
         for (const auto& [k, v] : extra_env) out[widen(k)] = widen(v);
@@ -1009,6 +1011,176 @@ void bridge_old_app_hangs() {
           "setup told the user to close the old window");
 }
 
+
+// ADV: a portable copy started from a shortcut Windows named itself
+// ("parties_client.exe - Shortcut.lnk"), user runs PartiesSetup.exe from Downloads.
+void adv_manual_setup_default_shortcut_name() {
+    World w("adv-shortcut");
+    Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+    const fs::path setup = w.setup_for(a);
+    const fs::path portable = w.root_ / "Games" / "Parties";
+    fs::create_directories(portable);
+    fs::create_directories(w.start_menu);
+    fs::create_directories(w.desktop);
+    fs::copy_file(g_fake_app, portable / "parties_client.exe");
+    Portable::write_legacy_db(portable / "parties_client.db", kLegacyKey);
+    check(make_pin(w.desktop / "parties_client.exe - Shortcut.lnk",
+                   L"\"" + (portable / "parties_client.exe").wstring() + L"\"", L"x"),
+          "made the Desktop shortcut Windows names by default");
+    const fs::path downloads = w.root_ / "Downloads";
+    fs::create_directories(downloads);
+    fs::copy_file(setup, downloads / "PartiesSetup.exe");
+    auto args = std::vector<std::wstring>{L"--silent"};
+    for (const auto& r : w.roots()) args.push_back(r);
+    check(Run(downloads / "PartiesSetup.exe", args, w.env(), downloads).finish() == 0u, "setup exited 0");
+    std::printf("  [adv] after manual setup: live db exists=%d, live has portable identity=%d, legacy backups=%zu\n",
+                (int)fs::exists(w.db()), (int)has_identity(w.db(), kLegacyKey), legacy_backups(w).size());
+    check(has_identity(w.db(), kLegacyKey), "ADV: the portable identity was imported by a manual setup");
+    // Later the user opens the portable copy; its legacy updater swaps in the carrier.
+    fs::rename(portable / "parties_client.exe", portable / "parties_client.old.exe");
+    fs::copy_file(setup, portable / "parties_client.exe");
+    std::vector<std::wstring> h{L"--update-cleanup", (portable / "parties_client.old.exe").wstring(), L"--silent"};
+    for (const auto& r : w.roots()) h.push_back(r);
+    check(Run(portable / "parties_client.exe", h, w.env(), portable).finish() == 0u, "the carrier exited 0");
+    std::printf("  [adv] after the legacy handoff: live has portable identity=%d, live has fake fresh identity=%lld, legacy backups=%zu, portable exe left=%d\n",
+                (int)has_identity(w.db(), kLegacyKey),
+                count_rows(w.db(), "SELECT count(*) FROM identity WHERE public_key = 'fake-identity-key'"),
+                legacy_backups(w).size(), (int)fs::exists(portable / "parties_client.old.exe"));
+    check(has_identity(w.db(), kLegacyKey), "ADV: the installed app uses the portable identity after the handoff");
+}
+
+
+// ADV: a restore was committed (Recovery -> Restore, then the launcher was
+// killed) and the chosen backup is now unreadable. What does the next start do?
+void adv_restore_from_damaged_backup() {
+    World w("adv-restore");
+    Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+    const fs::path setup = w.setup_for(a);
+    install_and_run(w, a);
+    for (int i = 0; i < 3; ++i) w.start_via(w.install / kStubFile);  // the launcher gets confirmed
+    std::printf("  [adv] boot-record before: %s\n", read_file(w.install / "state" / "boot-record.json").value_or("").c_str());
+    auto s = w.state();
+    if (!check(s.has_value(), "state readable")) return;
+    // The user picked a backup in Recovery; the launcher committed Restoring and
+    // was cut off; the backup is then gone (deleted / quarantined).
+    s->operation = Restoring{Snapshot{SnapshotId{"chosen"}, DataInfo{2, 2}}, SnapshotId{"pre-restore-adv-g99"}};
+    s->generation += 1;
+    write_bytes(w.install / "state" / "supervisor.json", write_state(*s));
+    auto healthy = [&] {
+        size_t n = 0, pos = 0;
+        const std::string log = w.log();
+        while ((pos = log.find("app reported healthy", pos)) != std::string::npos) ++n, ++pos;
+        return n;
+    };
+    const size_t healthy_before = healthy();
+    const long long runs = markers(w, "1.0.0.0");
+    auto start = [&](const char* what) {
+        Run run(w.install / kStubFile, {L"--data-root=" + w.data.wstring(), L"--test-namespace=" + w.ns,
+                L"--test-recovery=safe-mode"}, w.env());
+        auto code = run.finish();
+        std::printf("  [adv] %s: stub exit=%lu, app runs=%lld (was %lld), launcher-supervised healthy runs=%zu (was %zu)\n",
+                    what, code ? (unsigned long)*code : 0xFFFFFFFFul, markers(w, "1.0.0.0"), runs, healthy(), healthy_before);
+    };
+    start("start 1");
+    start("start 2");
+    check(w.setup(setup, {L"--no-launch"}) == 0u, "repair setup exited 0");
+    start("start after running the installer again (repair)");
+    auto after = w.state();
+    std::printf("  [adv] state still Restoring after repair: %d\n", (int)(after && std::holds_alternative<Restoring>(after->operation)));
+    std::printf("  [adv] boot-record after: %s\n", read_file(w.install / "state" / "boot-record.json").value_or("").c_str());
+    std::istringstream lines(w.log());
+    int shown = 0;
+    for (std::string line; std::getline(lines, line);)
+        if (line.find("effect failed") != std::string::npos && shown++ < 2) std::cout << "    log: " << line << "\n";
+    check(healthy() > healthy_before, "ADV: the launcher starts Parties again after a restore it cannot finish");
+}
+
+// A link the way Explorer makes one by hand: target, and a "Start in" folder.
+bool make_link(const fs::path& file, const fs::path& target, const fs::path& start_in) {
+    IShellLinkW* link = nullptr;
+    IPersistFile* persist = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link));
+    if (SUCCEEDED(hr)) hr = link->SetPath(target.c_str());
+    if (SUCCEEDED(hr)) hr = link->SetWorkingDirectory(start_in.c_str());
+    if (SUCCEEDED(hr)) hr = link->QueryInterface(IID_PPV_ARGS(&persist));
+    if (SUCCEEDED(hr)) hr = persist->Save(file.c_str(), TRUE);
+    if (persist) persist->Release();
+    if (link) link->Release();
+    return SUCCEEDED(hr);
+}
+
+// The portable app kept its database in its working folder. Its only pointers
+// are a taskbar pin whose "Start in" is that folder and a Start menu link in a
+// subfolder, neither named Parties.lnk.
+void adv_manual_setup_taskbar_pin() {
+    World w("adv-pin");
+    Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+    const fs::path setup = w.setup_for(a);
+    const fs::path bin = w.root_ / "Tools" / "Parties";
+    const fs::path work = w.root_ / "Documents" / "Parties data";
+    fs::create_directories(bin);
+    fs::create_directories(work);
+    fs::create_directories(w.taskbar);
+    fs::create_directories(w.start_menu / "Games");
+    fs::copy_file(g_fake_app, bin / "parties_client.exe");
+    Portable::write_legacy_db(work / "parties_client.db", kLegacyKey);
+    check(make_link(w.taskbar / "parties_client.lnk", bin / "parties_client.exe", work), "made the taskbar pin");
+    check(make_link(w.start_menu / "Games" / "Voice chat.lnk", bin / "parties_client.exe", bin),
+          "made a Start menu link in a subfolder");
+    const fs::path downloads = w.root_ / "Downloads";
+    fs::create_directories(downloads);
+    fs::copy_file(setup, downloads / "PartiesSetup.exe");
+    auto args = std::vector<std::wstring>{L"--silent", L"--no-launch"};
+    for (const auto& r : w.roots()) args.push_back(r);
+    check(Run(downloads / "PartiesSetup.exe", args, w.env(), downloads).finish() == 0u, "setup exited 0");
+    check(has_identity(w.db(), kLegacyKey), "the identity behind the taskbar pin's Start in folder was imported");
+}
+
+// The installed Parties already has its own identity when the portable copy
+// with another one hands over.
+void adv_identity_conflict() {
+    World w("adv-conflict");
+    Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+    const fs::path setup = w.setup_for(a);
+    constexpr unsigned char kLiveKey = 0x55;
+    fs::create_directories(w.db().parent_path());
+    Portable::write_legacy_db(w.db(), kLiveKey);
+    check(w.setup(setup, {L"--no-launch"}) == 0u, "setup exited 0");
+    Portable p(w, setup, "Portable Parties", kLegacyKey);
+    auto handoff = [&](const char* choice) {
+        if (choice) w.extra_env["PARTIES_TEST_IDENTITY_CHOICE"] = choice;
+        else w.extra_env.erase("PARTIES_TEST_IDENTITY_CHOICE");
+        if (!fs::exists(p.old_exe)) fs::copy_file(g_fake_app, p.old_exe);
+        std::vector<std::wstring> h{L"--update-cleanup", p.old_exe.wstring(), L"--silent", L"--no-launch"};
+        for (const auto& r : w.roots()) h.push_back(r);
+        return Run(p.carrier, h, w.env(), p.dir).finish();
+    };
+    const size_t log_mark = setup_log().size();
+    check(handoff(nullptr) == 0u, "the silent handoff exited 0");
+    check(has_identity(w.db(), kLiveKey), "a silent handoff keeps the installed identity");
+    check(std::ranges::any_of(legacy_backups(w), [](const fs::path& b) { return has_identity(b, kLegacyKey); }),
+          "the portable identity is kept as a backup");
+    const std::string note = setup_log().substr(log_mark);
+    auto fingerprint = [](unsigned char byte) {
+        parties::PublicKey k{};
+        k.fill(byte);
+        return parties::public_key_fingerprint(k);
+    };
+    check(note.find(fingerprint(kLiveKey)) != std::string::npos && note.find(fingerprint(kLegacyKey)) != std::string::npos,
+          "the silent handoff's note names both fingerprints");
+
+    check(handoff("legacy") == 0u, "the handoff that picks the portable identity exited 0");
+    check(has_identity(w.db(), kLegacyKey), "the chosen portable identity is now the live one");
+    std::error_code ec;
+    bool live_kept = false;
+    for (const auto& e : fs::directory_iterator(w.data / "backups", ec))
+        live_kept |= e.path().extension() == ".db" && has_identity(e.path(), kLiveKey);
+    check(live_kept, "the identity it replaced is kept as a backup");
+
+    check(handoff("live") == 0u, "a later handoff exited 0");
+    check(has_identity(w.db(), kLegacyKey), "a settled choice is not asked or applied again");
+}
+
 // The real client after a handoff: it opens the imported portable database,
 // migrates it to its own schema and reports healthy through stub and launcher.
 int bridge_real_client(const fs::path& client) {
@@ -1136,6 +1308,10 @@ int main(int argc, char** argv) {
         {"bridge-d existing-data-kept", bridge_existing_data_is_kept},
         {"bridge-e kill-at-every-step", bridge_kill_at_every_step},
         {"bridge-f old-app-hangs", bridge_old_app_hangs},
+        {"bridge-adv-a default-shortcut-name", adv_manual_setup_default_shortcut_name},
+        {"bridge-adv-b restore-damaged", adv_restore_from_damaged_backup},
+        {"bridge-adv-c taskbar-pin", adv_manual_setup_taskbar_pin},
+        {"bridge-adv-d identity-conflict", adv_identity_conflict},
     };
     std::printf("%-28s %s\n", "scenario", "result");
     for (const auto& [name, run] : scenarios) {

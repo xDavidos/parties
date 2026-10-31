@@ -131,6 +131,38 @@ bool legacy_v1_migrates_and_keeps_every_row(bool with_password) {
     return ok;
 }
 
+// Builds before the identity table existed wrote only these three tables, so
+// such a database also counts as legacy v1 and skips migration 1.
+bool pre_identity_database_gets_every_table() {
+    TempDir dir;
+    const SettingsPaths paths = paths_in(dir);
+    {
+        RawDb raw(paths.db);
+        raw.exec(R"SQL(
+            CREATE TABLE tofu_certs (host TEXT NOT NULL, port INTEGER NOT NULL, fingerprint TEXT NOT NULL,
+                first_seen TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (host, port));
+            CREATE TABLE saved_servers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                host TEXT NOT NULL, port INTEGER NOT NULL DEFAULT 7800, fingerprint TEXT NOT NULL DEFAULT '',
+                last_username TEXT NOT NULL DEFAULT '', last_password TEXT NOT NULL DEFAULT '', UNIQUE(host, port));
+            CREATE TABLE preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO saved_servers (name, host, port) VALUES ('Home', 'example.org', 7800);
+        )SQL");
+    }
+    bool ok = true;
+    {
+        Settings settings;
+        ok &= Check(ready(settings.open(paths)), "a pre-identity database did not open");
+        ok &= Check(settings.save_identity("seed words", key(0x22), key(0x11)), "a pre-identity database cannot save an identity");
+        const auto identity = settings.load_identity();
+        ok &= Check(identity && identity->public_key == key(0x11), "the saved identity does not load");
+        ok &= Check(settings.get_saved_servers().size() == 1, "the saved server was lost");
+    }
+    RawDb raw(paths.db);
+    ok &= Check(raw.scalar("SELECT count(*) FROM sqlite_master WHERE name = 'resumption_tickets'") == 1,
+                "the resumption_tickets table is missing");
+    return ok;
+}
+
 bool reopening_current_database_writes_nothing_new() {
     TempDir dir;
     const SettingsPaths paths = paths_in(dir);
@@ -321,6 +353,7 @@ int main() {
     success &= migration_table_is_contiguous_and_floor_monotonic();
     success &= legacy_v1_migrates_and_keeps_every_row(true);
     success &= legacy_v1_migrates_and_keeps_every_row(false);
+    success &= pre_identity_database_gets_every_table();
     success &= reopening_current_database_writes_nothing_new();
     success &= newer_compatible_database_opens_as_is();
     success &= too_new_database_is_refused_untouched();
