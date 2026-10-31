@@ -75,7 +75,7 @@ SigningKey test_key() {
 }
 
 // Serves a folder over HTTP/1.1 on 127.0.0.1, one thread per connection, and
-// can corrupt or stall chosen paths.
+// can corrupt chosen paths or stall one halfway until released.
 class FeedServer {
 public:
     explicit FeedServer(fs::path root) : root_(std::move(root)) {
@@ -168,15 +168,18 @@ private:
         lock.unlock();
         send_all(s, "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body->size()) +
                         "\r\nConnection: close\r\n\r\n");
+        size_t sent = 0;
         if (stall) {
-            send_all(s, std::string_view(*body).substr(0, body->size() / 2));
+            sent = body->size() / 2;
+            send_all(s, std::string_view(*body).substr(0, sent));
             lock.lock();
             stalled_ = true;
             released_.wait(lock, [&] { return stopping_ || stalled_path_.empty(); });
-        } else {
-            send_all(s, *body);
-            shutdown(s, SD_SEND);
+            if (stopping_) sent = body->size();
+            lock.unlock();
         }
+        send_all(s, std::string_view(*body).substr(sent));
+        shutdown(s, SD_SEND);
         closesocket(s);
     }
 
@@ -428,9 +431,63 @@ RunResult run_launcher(World& w, const std::map<std::string, std::string>& extra
     return result;
 }
 
+// What Windows sends at logoff or shutdown, delivered to the launcher running
+// from w's install root.
+bool end_session(const World& w) {
+    struct Search {
+        std::wstring root;
+        HWND found = nullptr;
+    } search{w.install_root.wstring()};
+    EnumWindows(
+        [](HWND hwnd, LPARAM lp) -> BOOL {
+            auto* s = reinterpret_cast<Search*>(lp);
+            wchar_t cls[64];
+            if (!GetClassNameW(hwnd, cls, 64) || std::wstring_view(cls) != L"PartiesLauncherSession") return TRUE;
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            wchar_t image[4096];
+            DWORD n = 4096;
+            bool ours = p && QueryFullProcessImageNameW(p, 0, image, &n) && n > s->root.size() &&
+                        _wcsnicmp(image, s->root.c_str(), s->root.size()) == 0;
+            if (p) CloseHandle(p);
+            if (ours) s->found = hwnd;
+            return !ours;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    DWORD_PTR ignored = 0;
+    return search.found &&
+           SendMessageTimeoutW(search.found, WM_ENDSESSION, TRUE, 0, SMTO_ABORTIFHUNG, 5000, &ignored) != 0;
+}
+
+std::string stalled_app_file(const World& w) { return "files/" + w.b.entry.file(kAppFile)->sha256.to_hex(); }
+
+// One launcher run whose app exits right after healthy while B's executable
+// stalls on the feed. `headless` is polled while the launcher lives, from the
+// moment the app has exited with the download still stalled.
+RunResult run_short_session(World& w, const std::function<void()>& headless) {
+    w.server->stall(stalled_app_file(w));
+    const size_t mark = w.full_log().size();
+    return run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "50"}}, {}, 60000, {}, [&] {
+        if (w.full_log().find("app exited", mark) != std::string::npos && w.server->stalled()) headless();
+        return false;
+    });
+}
+
 const BuildRecord* record(const SupervisorState& s, const Release& r) { return s.find(r.entry.id()); }
 
+bool staged(const SupervisorState& s, const Release& r) {
+    auto* st = std::get_if<Staged>(&s.activation);
+    return st && st->build == r.entry.id();
+}
+
+
 bool settled(const SupervisorState& s) { return std::holds_alternative<Idle>(s.operation); }
+
+bool good_is_b(const World& w) {
+    auto s = w.state();
+    return s && settled(*s) && s->good == w.b.entry.id();
+}
 
 bool rolled_back_to_a(const World& w, const SupervisorState& s, FailureReason reason) {
     const BuildRecord* b = record(s, w.b);
@@ -811,12 +868,15 @@ std::vector<Scenario> scenarios() {
 
     out.push_back({"kill-during-download", "", 1, 1, true,
                    [](World& w) {
-                       const std::string app = "files/" + w.b.entry.file(kAppFile)->sha256.to_hex();
+                       const std::string app = stalled_app_file(w);
                        w.server->stall(app);
                        auto started = std::chrono::steady_clock::now();
-                       RunResult quick = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
-                       if (quick.exit_code != 0 || std::chrono::steady_clock::now() - started > 10s)
-                           fail(w.name, "a stalled download held up the launcher's exit");
+                       RunResult capped = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming},
+                                                           {"PARTIES_FAKE_RUN_MS", "700"},
+                                                           {"PARTIES_TEST_JOB_CAP_MS", "1000"}});
+                       if (capped.exit_code != 0 || std::chrono::steady_clock::now() - started > 10s ||
+                           w.last_run_log().find("giving up on the update job") == std::string::npos)
+                           fail(w.name, "the cap did not end a stalled download after the app exited");
                        w.server->stall(app);
                        RunResult killed = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "20000"}},
                                                        {}, 60000, {}, [&] { return w.server->stalled(); });
@@ -828,10 +888,91 @@ std::vector<Scenario> scenarios() {
                            fail(w.name, "the app was not told which version is downloading");
                        w.server->release();
                    },
-                   [](const World& w) {
-                       auto s = w.state();
-                       return s && settled(*s) && s->good == w.b.entry.id();
+                   good_is_b,
+                   [](const World& w, const std::string& label) {
+                       if (w.leftovers()) fail(label, "the interrupted download was never cleaned up");
                    },
+                   true, false});
+
+    out.push_back({"download-after-exit", "", 1, 1, true,
+                   [](World& w) {
+                       std::optional<std::chrono::steady_clock::time_point> released;
+                       RunResult r = run_short_session(w, [&] {
+                           if (released) return;
+                           w.server->release();
+                           released = std::chrono::steady_clock::now();
+                       });
+                       if (!released) return fail(w.name, "the launcher exited with the app while B was downloading");
+                       if (r.timed_out || r.exit_code != 0 || std::chrono::steady_clock::now() - *released > 10s)
+                           fail(w.name, "the launcher did not exit on its own once the download finished");
+                       auto s = w.state();
+                       if (!s || !staged(*s, w.b)) fail(w.name, "B was not staged after the app exited");
+                       std::string log = w.last_run_log();
+                       size_t exited = log.find("app exited"), sealed = log.find("sealed " + w.b.entry.id().dir_name());
+                       if (sealed == std::string::npos || sealed < exited)
+                           fail(w.name, "B was not sealed after the app exited");
+                   },
+                   good_is_b,
+                   [](const World& w, const std::string& label) {
+                       if (markers(w.db(), "2.0.0.0") < 1) fail(label, "B never ran");
+                       if (w.leftovers()) fail(label, "a partial download or staging directory was left behind");
+                   },
+                   true, false});
+
+    out.push_back({"relaunch-during-download", "", 1, 1, true,
+                   [](World& w) {
+                       const size_t mark = w.full_log().size();
+                       auto since = [&](std::string_view what) {
+                           std::string log = w.full_log().substr(mark);
+                           size_t n = 0;
+                           for (size_t at = log.find(what); at != std::string::npos; at = log.find(what, at + 1)) ++n;
+                           return n;
+                       };
+                       std::optional<RunResult> relaunch;
+                       bool released = false;
+                       RunResult r = run_short_session(w, [&] {
+                           if (!relaunch) relaunch = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}});
+                           else if (!released && since("app exited") >= 2) {
+                               w.server->release();
+                               released = true;
+                           }
+                       });
+                       if (!relaunch) return fail(w.name, "the launcher exited with the app while B was downloading");
+                       if (relaunch->exit_code != 0 || !relaunch->boot_ok)
+                           fail(w.name, "the relaunch was not handed to the running launcher");
+                       if (!released) fail(w.name, "the relaunch did not start the app");
+                       if (since("another launcher is running") != 1)
+                           fail(w.name, "the relaunch did not find the running launcher");
+                       if (r.timed_out || r.exit_code != 0) fail(w.name, "the launcher did not exit on its own");
+                       if (markers(w.db(), "1.0.0.0") != 2) fail(w.name, "A did not run once per launch");
+                       auto s = w.state();
+                       if (!s || !staged(*s, w.b)) fail(w.name, "B was not staged after the relaunched app exited");
+                   },
+                   good_is_b,
+                   [](const World& w, const std::string& label) {
+                       if (markers(w.db(), "2.0.0.0") < 1) fail(label, "B never ran");
+                   },
+                   true, false});
+
+    out.push_back({"shutdown-during-download", "", 1, 1, true,
+                   [](World& w) {
+                       std::optional<std::chrono::steady_clock::time_point> ended;
+                       RunResult r = run_short_session(w, [&] {
+                           if (ended) return;
+                           if (!end_session(w)) fail(w.name, "cannot reach the launcher's session window");
+                           ended = std::chrono::steady_clock::now();
+                       });
+                       if (!ended) return fail(w.name, "the launcher exited with the app while B was downloading");
+                       if (r.timed_out || r.exit_code != 0 || std::chrono::steady_clock::now() - *ended > 10s)
+                           fail(w.name, "session end did not stop the download promptly");
+                       auto session = w.session();
+                       if (!session || !session->ended_clean) fail(w.name, "session end did not leave a clean report");
+                       auto s = w.state();
+                       if (!s || s->find(w.b.entry.id()) || fs::exists(w.build_dir(w.b)))
+                           fail(w.name, "a half-downloaded build reached the state");
+                       w.server->release();
+                   },
+                   good_is_b,
                    [](const World& w, const std::string& label) {
                        if (w.leftovers()) fail(label, "the interrupted download was never cleaned up");
                    },
