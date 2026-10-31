@@ -299,6 +299,7 @@ target_link_libraries(parties_client
     PRIVATE
         parties_encdec
         parties_common
+        parties_update_data
         rnnoise::rnnoise
         unofficial::sqlite3::sqlite3
         RmlUi::RmlUi

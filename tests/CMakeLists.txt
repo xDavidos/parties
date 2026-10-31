@@ -207,6 +207,7 @@ if(WIN32 AND BUILD_CLIENT)
         target_include_directories(parties_data_${data_test}_test PRIVATE ../client/include)
         target_link_libraries(parties_data_${data_test}_test PRIVATE
             parties_common
+            parties_update_data
             unofficial::sqlite3::sqlite3)
         add_test(NAME parties_data_${data_test} COMMAND parties_data_${data_test}_test)
     endforeach()
