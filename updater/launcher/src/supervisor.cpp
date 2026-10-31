@@ -70,8 +70,11 @@ void tell_user(const std::string& text) {
 
 link::StatusNotice wire_notice(const Notice& n) {
     link::StatusNotice out;
-    out.kind = n.kind == Notice::Kind::RolledBack ? link::StatusNotice::Kind::RolledBack
-                                                  : link::StatusNotice::Kind::DataRestored;
+    switch (n.kind) {
+    case Notice::Kind::RolledBack: out.kind = link::StatusNotice::Kind::RolledBack; break;
+    case Notice::Kind::DataRestored: out.kind = link::StatusNotice::Kind::DataRestored; break;
+    case Notice::Kind::Withdrawn: out.kind = link::StatusNotice::Kind::Withdrawn; break;
+    }
     out.from = n.from;
     out.to = n.to;
     if (n.preserved) out.preserved = "backups\\" + n.preserved->stem + ".db";

@@ -26,7 +26,7 @@ $lobbyScenarios = @(
     "settings-select-open", "settings-screen-share", "settings-hotkeys",
     "settings-account", "share", "audio-share", "chat", "chat-segment-churn",
     "update-downloading", "update-ready", "update-rolled-back",
-    "update-data-restored", "settings-updates", "settings-updates-pinned",
+    "update-data-restored", "update-withdrawn", "settings-updates", "settings-updates-pinned",
     "settings-updates-restore", "settings-updates-impossible", "settings-updates-feed-stale",
     "settings-updates-blocked", "settings-updates-downloading"
 )

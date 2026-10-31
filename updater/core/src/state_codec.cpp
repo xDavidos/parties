@@ -30,9 +30,10 @@ constexpr Names<FailureReason, 10> kReasons{{
     {FailureReason::UserRolledBack, "user_rolled_back"},
 }};
 
-constexpr Names<Notice::Kind, 2> kNoticeKinds{{
+constexpr Names<Notice::Kind, 3> kNoticeKinds{{
     {Notice::Kind::RolledBack, "rolled_back"},
     {Notice::Kind::DataRestored, "data_restored"},
+    {Notice::Kind::Withdrawn, "withdrawn"},
 }};
 
 template <class E, size_t N>

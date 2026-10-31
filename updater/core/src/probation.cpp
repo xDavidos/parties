@@ -132,6 +132,8 @@ void confirm(Tx& tx) {
     Probation p = std::get<Probation>(tx.s.activation);
     if (BuildRecord* c = record(tx.s, p.candidate)) c->verdict = Proven{};
     BuildId old_good = tx.s.good;
+    // Kept on disk for the boot stub's launcher fallback, but never run again.
+    if (revoked(tx.s, old_good)) record(tx.s, old_good)->verdict = Quarantined{FailureReason::Revoked};
     tx.s.previous_good = old_good;
     tx.s.good = p.candidate;
     tx.s.activation = Steady{};
@@ -428,9 +430,12 @@ void handle(Tx& tx, const BuildCorrupt& e) {
 
 // A candidate revoked while it runs is never confirmed; its exit rolls back.
 void handle(Tx& tx, const ManifestSeen& e) {
+    const bool good_was_revoked = revoked(tx.s, tx.s.good);
     std::vector<Version> list = e.revoked;
     std::ranges::sort(list);
     tx.s.revoked.of(e.channel) = std::move(list);
+    if (!good_was_revoked && revoked(tx.s, tx.s.good) && !tx.s.notice)
+        tx.s.notice = Notice{Notice::Kind::Withdrawn, tx.s.good.version, tx.s.good.version, std::nullopt};
     if (auto* staged = std::get_if<Staged>(&tx.s.activation); staged && revoked(tx.s, staged->build)) {
         std::optional<BuildId> dropped = unstage(tx);
         tx.commit();
@@ -439,6 +444,13 @@ void handle(Tx& tx, const ManifestSeen& e) {
     }
     if (Probation* p = probation(tx.s); p && idle(tx.s) && revoked(tx.s, p->candidate))
         rollback(tx, FailureReason::Revoked, false);
+}
+
+void handle(Tx& tx, const LeaveRevoked& e) {
+    if (probation(tx.s) || !revoked(tx.s, tx.s.good) || e.record.id == tx.s.good || revoked(tx.s, e.record.id)) return;
+    if (const BuildRecord* known = tx.s.find(e.record.id); known && known->quarantined()) return;
+    if (auto* staged = std::get_if<Staged>(&tx.s.activation); staged && staged->build == e.record.id) return;
+    stage(tx, e.record, std::nullopt);
 }
 
 void handle(Tx& tx, const ChannelIntentSet& e) {

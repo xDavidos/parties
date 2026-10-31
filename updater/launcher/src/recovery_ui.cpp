@@ -63,7 +63,7 @@ std::optional<BuildId> previous_build(const SupervisorState& s) {
     if (auto* p = std::get_if<Probation>(&s.activation)) return p->fallback;
     if (!s.previous_good) return std::nullopt;
     const BuildRecord* r = s.find(*s.previous_good);
-    if (!r || !std::holds_alternative<Proven>(r->verdict)) return std::nullopt;
+    if (!r || !std::holds_alternative<Proven>(r->verdict) || s.revoked.contains(r->id.version)) return std::nullopt;
     return r->id;
 }
 
@@ -71,7 +71,7 @@ std::vector<BuildId> retryable(const SupervisorState& s) {
     std::vector<BuildId> out;
     if (std::holds_alternative<Probation>(s.activation)) return out;
     for (const BuildRecord& r : s.builds)
-        if (r.quarantined() && r.id != s.good) out.push_back(r.id);
+        if (r.quarantined() && r.id != s.good && !s.revoked.contains(r.id.version)) out.push_back(r.id);
     return out;
 }
 

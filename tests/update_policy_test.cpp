@@ -173,10 +173,19 @@ bool test_revoked_good_moves() {
                  StageReason::LeaveRevoked, "revoked good moves to the newest compatible older build");
     ok &= stages(plan_update(s, manifest(Channel::Stable, {k152, k160, k161}, {k160.version}), kProtocol, kData3),
                  k161, StageReason::LeaveRevoked, "revoked good prefers a newer fix");
-    auto* none = as<Blocked>(plan_update(s, manifest(Channel::Stable, {k152, k160}, {k160.version}), kProtocol,
-                                         kData3Floor3));
+    auto* restore = as<OfferDowngrade>(plan_update(s, manifest(Channel::Stable, {k152, k160}, {k160.version}),
+                                                   kProtocol, kData3Floor3));
+    if (!restore || restore->offer.entry.version != k152.version || restore->offer.data_effect != DataEffect::NeedsRestore)
+        ok &= fail("leaving a revoked good by restoring a backup is only offered");
+    auto* none = as<Blocked>(plan_update(s, manifest(Channel::Stable, {k160}, {k160.version}), kProtocol, kData3));
     if (!none || none->reason != BlockReason::NoCompatibleBuild)
-        ok &= fail("no compatible build must block instead of breaking the data");
+        ok &= fail("a revoked good with nothing else to run must block");
+    SupervisorState on_disk = s;
+    on_disk.builds.push_back(BuildRecord::from_entry(k152));
+    on_disk.builds.back().verdict = Proven{};
+    on_disk.previous_good = k152.id();
+    ok &= stages(plan_update(on_disk, manifest(Channel::Stable, {k152}, {k160.version}), kProtocol, kData3), k152,
+                 StageReason::LeaveRevoked, "revoked good moves to previous_good, which is already on disk");
     SupervisorState pinned = s;
     pinned.intent = PinnedUntilAtLeast{v("1.9.0.0")};
     ok &= stages(plan_update(pinned, manifest(Channel::Stable, {k152, k160}, {k160.version}), kProtocol, kData3), k152,

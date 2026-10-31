@@ -67,8 +67,9 @@ struct DowngradeOffer {
     friend bool operator==(const DowngradeOffer&, const DowngradeOffer&) = default;
 };
 
+// Withdrawn: the version the app runs was revoked (from == to == current).
 struct StatusNotice {
-    enum class Kind : uint8_t { RolledBack, DataRestored } kind = Kind::RolledBack;
+    enum class Kind : uint8_t { RolledBack, DataRestored, Withdrawn } kind = Kind::RolledBack;
     Version from;
     Version to;
     std::optional<std::string> preserved;  // backup file name

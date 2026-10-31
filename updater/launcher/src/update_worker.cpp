@@ -231,7 +231,8 @@ JobOutcome UpdateWorker::run(const JobRequest& request) {
             out.view.phase = link::Phase::Error;
             return out;
         }
-        out.events.push_back(BuildSealed{*sealed, std::nullopt});
+        if (stage->reason == StageReason::LeaveRevoked) out.events.push_back(LeaveRevoked{*sealed});
+        else out.events.push_back(BuildSealed{*sealed, std::nullopt});
     } else if (auto* report = std::get_if<ReportPinned>(&decision.plan)) {
         out.view.phase = link::Phase::Pinned;
         out.view.pinned_until = report->until;

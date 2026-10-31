@@ -66,12 +66,15 @@ UpdateDecision plan_update(const SupervisorState& state, const VerifiedManifest&
     const BuildEntry* newest_runnable = f.newest([&](const BuildEntry& e) { return f.runnable(e); });
 
     // Moving off a revoked build overrides a pin: the pin only guards against
-    // downgrading a working build.
+    // downgrading a working build. A move that would restore a backup is only
+    // offered, because it sets aside the user's newest data.
     if (manifest.is_revoked(installed)) {
-        const BuildEntry* target =
-            f.newest([&](const BuildEntry& e) { return f.runnable(e) && e.id() != state.good; });
-        if (!target) return {Blocked{BlockReason::NoCompatibleBuild, std::nullopt}};
-        return {f.stage(*target, StageReason::LeaveRevoked)};
+        auto other = [&](const BuildEntry& e) { return f.offerable(e) && e.id() != state.good; };
+        if (const BuildEntry* target = f.newest([&](const BuildEntry& e) { return other(e) && f.reads_data(e); }))
+            return {f.stage(*target, StageReason::LeaveRevoked)};
+        if (const BuildEntry* restoring = f.newest(other); restoring && !f.already_staged(*restoring))
+            return {OfferDowngrade{{*restoring, f.data_effect(*restoring)}}};
+        return {Blocked{BlockReason::NoCompatibleBuild, std::nullopt}};
     }
 
     std::optional<ChannelIntent> new_intent;

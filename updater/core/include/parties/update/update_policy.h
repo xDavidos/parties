@@ -45,7 +45,7 @@ struct ReportPinned {
 enum class BlockReason : uint8_t {
     Busy,               // a candidate is on probation or data is being restored
     LauncherTooOld,     // the newer build cannot talk to the running launcher
-    NoCompatibleBuild,  // good is revoked and nothing else can run on this data
+    NoCompatibleBuild,  // good is revoked and no other build can run here
 };
 struct Blocked {
     BlockReason reason;

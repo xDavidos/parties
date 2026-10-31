@@ -835,7 +835,8 @@ std::vector<Scenario> scenarios() {
                        return s && settled(*s) && s->good == w.a.entry.id();
                    },
                    [](const World& w, const std::string& label) {
-                       const BuildRecord* b = record(*w.state(), w.b);
+                       auto s = w.state();
+                       const BuildRecord* b = record(*s, w.b);
                        if (b && !b->quarantined()) fail(label, "the revoked B can still be rolled back to");
                    },
                    false, false});

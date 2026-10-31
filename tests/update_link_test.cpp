@@ -57,6 +57,11 @@ int main() {
     full.notice = StatusNotice{StatusNotice::Kind::RolledBack, v("1.6.0.0"), v("1.5.2.0"), "rolled-back-x"};
     check(round_trips(LauncherMessage{full}, launcher), "full status round-trips");
     check(round_trips(LauncherMessage{Status{}}, launcher), "minimal status round-trips");
+    Status withdrawn;
+    withdrawn.notice = StatusNotice{StatusNotice::Kind::Withdrawn, v("1.5.2.0"), v("1.5.2.0"), std::nullopt};
+    check(round_trips(LauncherMessage{withdrawn}, launcher), "a withdrawn notice round-trips");
+    check(write(LauncherMessage{withdrawn}).find("\"notice\":{\"kind\":\"withdrawn\"") != std::string::npos,
+          "the withdrawn notice's wire form");
     check(write(LauncherMessage{full}).find("\"backup_taken_at\":\"2026-10-30T09:00:00Z\"") != std::string::npos,
           "backup_taken_at is ISO-8601 UTC");
     auto odd = parse_launcher_message(R"({"type":"status","phase":"idle","channel":"stable","current":"1.0.0.0",)"

@@ -110,12 +110,24 @@ std::string switch_note(const Status& s, std::chrono::system_clock::time_point n
 
 std::string notice_text(const Status& s) {
     if (!s.notice) return {};
+    if (s.notice->kind == StatusNotice::Kind::Withdrawn)
+        return "Parties " + s.notice->from.to_string() + " was withdrawn because of a problem.";
     return "Parties " + s.notice->from.to_string() + " didn't start correctly, so you're back on " +
            s.notice->to.to_string() + ". Your data is safe.";
 }
 
+std::string withdrawn_detail(const Status& s) {
+    if (pill_for(s) == Pill::Ready && s.available) return "Restart Parties to move to " + s.available->to_string() + ".";
+    if (switch_offered(s) && s.downgrade->data_effect == DowngradeEffect::RestoresBackup)
+        return "Going back to " + s.downgrade->version.to_string() +
+               " restores a backup of your data, so Parties waits for you to choose it in Settings, under Updates.";
+    return "Parties moves to a fixed version as soon as one is out.";
+}
+
 std::string notice_detail(const Status& s) {
-    if (!s.notice || s.notice->kind != StatusNotice::Kind::DataRestored || !s.notice->preserved) return {};
+    if (!s.notice) return {};
+    if (s.notice->kind == StatusNotice::Kind::Withdrawn) return withdrawn_detail(s);
+    if (s.notice->kind != StatusNotice::Kind::DataRestored || !s.notice->preserved) return {};
     return "Changes made while " + s.notice->from.to_string() + " ran are saved in your Parties data folder as " +
            *s.notice->preserved + ".";
 }

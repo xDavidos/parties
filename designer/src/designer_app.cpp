@@ -264,6 +264,10 @@ struct DesignerApp::PartiesFixture {
 				notice.preserved = "backups\\rolled-back-1.3.0.0-9f3c2a1b-g12.db";
 			}
 			status.notice = notice;
+		} else if (scenario == "update-withdrawn") {
+			status.notice = StatusNotice{StatusNotice::Kind::Withdrawn, status.current, status.current, std::nullopt};
+			status.downgrade = DowngradeOffer{version("1.1.0.0"), DowngradeEffect::RestoresBackup,
+				std::chrono::sys_days{std::chrono::year{2026} / 10 / 30} + std::chrono::hours{12}};
 		} else if (scenario == "settings-updates-feed-stale") {
 			status.phase = Phase::FeedStale;
 		} else if (scenario == "settings-updates-pinned" || scenario == "settings-updates-restore" ||
@@ -291,7 +295,8 @@ struct DesignerApp::PartiesFixture {
 		using namespace parties::update;
 		using namespace parties::update::link;
 		if (scenario == "update-ready") return {RestartToUpdate{}};
-		if (scenario == "update-rolled-back" || scenario == "update-data-restored") return {AcknowledgeNotice{}};
+		if (scenario == "update-rolled-back" || scenario == "update-data-restored" || scenario == "update-withdrawn")
+			return {AcknowledgeNotice{}};
 		if (scenario == "settings-updates" || scenario == "settings-updates-feed-stale" ||
 			scenario == "settings-updates-blocked" || scenario == "settings-updates-downloading")
 			return {SetChannel{Channel::Beta, ChannelChoice::Wait}};
@@ -852,14 +857,18 @@ struct DesignerApp::PartiesFixture {
 		const char* pill_text =
 			scenario == "update-downloading" || scenario == "settings-updates-downloading" ? "Downloading 42%"
 			: scenario == "update-ready" ? "Restart to update" : nullptr;
-		const bool notice = scenario == "update-rolled-back" || scenario == "update-data-restored";
+		const bool withdrawn = scenario == "update-withdrawn";
+		const bool notice = scenario == "update-rolled-back" || scenario == "update-data-restored" || withdrawn;
 		const bool offers_switch = scenario == "settings-updates-pinned" || scenario == "settings-updates-restore";
 		const bool held = offers_switch || scenario == "settings-updates-impossible";
 
 		bool valid = visible("titlebar-update") == (pill_text != nullptr) &&
 			(!pill_text || shown_text("titlebar-update") == pill_text) &&
 			visible("update-notice") == notice &&
-			(!notice || contains(shown_text("update-notice"), "didn't start correctly, so you're back on 1.2.0.0")) &&
+			(!notice || withdrawn ||
+				contains(shown_text("update-notice"), "didn't start correctly, so you're back on 1.2.0.0")) &&
+			(!withdrawn || (contains(shown_text("update-notice"), "Parties 1.2.0.0 was withdrawn because of a problem.") &&
+				contains(shown_text("update-notice"), "Going back to 1.1.0.0 restores a backup of your data"))) &&
 			(scenario != "update-data-restored" ||
 				contains(shown_text("update-notice"), "data folder as backups\\rolled-back-1.3.0.0-9f3c2a1b-g12.db."));
 		if (IsUpdateSettings(scenario)) {

@@ -49,7 +49,7 @@
         </div>
     </div>
 
-    <!-- The launcher rolled back a build that did not start -->
+    <!-- A launcher notice: a rollback, a data restore, or a withdrawn version -->
     <div class="update-notice" id="update-notice" data-model="lobby" data-if="update_notice != ''">
         <div class="update-notice-copy">
             <span class="update-notice-text ui-body">{{ update_notice }}</span>

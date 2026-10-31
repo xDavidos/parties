@@ -83,6 +83,14 @@ struct ManifestSeen {
     std::vector<Version> revoked;
     friend bool operator==(const ManifestSeen&, const ManifestSeen&) = default;
 };
+// good is revoked and `record` is the newest build that can run on the live
+// data as it is: a newer fix, or an older build such as previous_good that
+// may already be on disk. Never carries a restore; leaving a revoked build by
+// restoring a backup is the user's choice (UserDowngrade).
+struct LeaveRevoked {
+    BuildRecord record;
+    friend bool operator==(const LeaveRevoked&, const LeaveRevoked&) = default;
+};
 struct ChannelIntentSet {
     Channel channel;
     ChannelIntent intent;
@@ -92,7 +100,8 @@ struct NoticeAcknowledged { friend bool operator==(const NoticeAcknowledged&, co
 
 using Event = std::variant<StartRequested, Resumed, AppHealthy, AppExited, HealthDeadlinePassed,
                            ConfirmTimerElapsed, BuildSealed, UserDowngrade, UserRollback, UserRetry,
-                           UserRestore, BuildCorrupt, ManifestSeen, ChannelIntentSet, NoticeAcknowledged>;
+                           UserRestore, BuildCorrupt, ManifestSeen, LeaveRevoked, ChannelIntentSet,
+                           NoticeAcknowledged>;
 
 struct Policy {
     uint32_t health_deadline_s = 120;

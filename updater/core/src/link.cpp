@@ -34,9 +34,10 @@ constexpr Names<DowngradeEffect, 3> kEffects{{
     {DowngradeEffect::RestoresBackup, "restores_backup"},
     {DowngradeEffect::Impossible, "impossible"},
 }};
-constexpr Names<StatusNotice::Kind, 2> kNoticeKinds{{
+constexpr Names<StatusNotice::Kind, 3> kNoticeKinds{{
     {StatusNotice::Kind::RolledBack, "rolled_back"},
     {StatusNotice::Kind::DataRestored, "data_restored"},
+    {StatusNotice::Kind::Withdrawn, "withdrawn"},
 }};
 
 template <class E, size_t N>

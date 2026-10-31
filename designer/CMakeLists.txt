@@ -256,7 +256,7 @@ if(BUILD_TESTING)
     # Launcher-managed update UI: each fixture also clicks its controls and
     # checks the request that would reach the launcher.
     foreach(scenario update-downloading update-ready update-rolled-back
-            update-data-restored settings-updates settings-updates-pinned settings-updates-restore
+            update-data-restored update-withdrawn settings-updates settings-updates-pinned settings-updates-restore
             settings-updates-impossible settings-updates-feed-stale settings-updates-blocked
             settings-updates-downloading)
         add_test(

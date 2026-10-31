@@ -369,6 +369,39 @@ std::vector<Row> table() {
          UserRollback{D.id, std::nullopt}, kV1, {}});
     row({"no downgrade to a revoked build", revoked(with_previous(steady(), D), D), UserDowngrade{D, std::nullopt},
          kV1, {}});
+
+    row({"a revoked good gets a withdrawn notice", with_previous(steady(B), A), ManifestSeen{Channel::Stable, {B.id.version}},
+         kV2, {"Commit"}, [](auto& s) {
+             return steady_on(s, B) && s.notice && s.notice->kind == Notice::Kind::Withdrawn &&
+                    s.notice->from == B.id.version;
+         }});
+    {
+        SupervisorState s = with_previous(steady(B), A);
+        s.notice = Notice{Notice::Kind::RolledBack, C.id.version, B.id.version, SnapshotId{"rolled-back-c"}};
+        row({"a withdrawn notice never replaces a pending one", s, ManifestSeen{Channel::Stable, {B.id.version}}, kV2,
+             {"Commit"}, [](auto& n) { return n.notice && n.notice->kind == Notice::Kind::RolledBack; }});
+    }
+    {
+        SupervisorState s = revoked(with_previous(steady(B), A), B);
+        row({"a revocation already known gives no second notice", s, ManifestSeen{Channel::Beta, {B.id.version}}, kV2,
+             {"Commit"}, [](auto& n) { return !n.notice; }});
+    }
+    row({"leave a revoked good for previous good", revoked(with_previous(steady(B), A), B), LeaveRevoked{A}, kV2,
+         {"Commit"}, [](auto& s) {
+             auto* st = std::get_if<Staged>(&s.activation);
+             return st && st->build == A.id && !st->restore_first && s.previous_good == A.id;
+         }});
+    row({"leave a revoked good for a newer fix", revoked(steady(), A), LeaveRevoked{B}, kV1, {"Commit"},
+         [](auto& s) { return std::get_if<Staged>(&s.activation) && s.find(B.id); }});
+    row({"no leaving a good that is not revoked", with_previous(steady(B), A), LeaveRevoked{A}, kV2, {}});
+    row({"no leaving for a revoked build", revoked(revoked(with_previous(steady(B), A), B), A), LeaveRevoked{A}, kV2, {}});
+    row({"no leaving for a quarantined build", revoked(add(steady(), B, Quarantined{FailureReason::InitFailed}), A),
+         LeaveRevoked{B}, kV1, {}});
+    row({"no leaving during probation", revoked(probation(B), A), LeaveRevoked{D}, kV1, {}});
+    row({"confirming off a revoked good quarantines it", revoked(with_op(probation(B), run(B, true, 60)), A),
+         ConfirmTimerElapsed{600}, kV2, {"Commit"}, [](auto& s) {
+             return s.good == B.id && s.previous_good == A.id && quarantined_for(s, A, FailureReason::Revoked);
+         }});
     row({"channel switch drops the staged build", staged(B), ChannelIntentSet{Channel::Beta, Follow{}}, kV1,
          {"Commit", "DeleteBuild 1.1.0.0"}, [](auto& s) { return s.channel == Channel::Beta && !s.find(B.id); }});
     row({"pin lift keeps the staged build", staged(B), ChannelIntentSet{Channel::Stable, PinnedUntilAtLeast{B.id.version}},
@@ -492,6 +525,7 @@ std::string event_name(const Event& e) {
             else if constexpr (std::is_same_v<T, UserRestore>) return "UserRestore " + x.from.id.stem;
             else if constexpr (std::is_same_v<T, BuildCorrupt>) return "BuildCorrupt " + x.build.version.to_string();
             else if constexpr (std::is_same_v<T, ManifestSeen>) return "ManifestSeen";
+            else if constexpr (std::is_same_v<T, LeaveRevoked>) return "LeaveRevoked " + x.record.id.version.to_string();
             else if constexpr (std::is_same_v<T, ChannelIntentSet>) return "ChannelIntentSet";
             else return "NoticeAcknowledged";
         },
@@ -590,6 +624,15 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
 
     if (out.next.good != before.good)
         w.check(!out.next.revoked.contains(out.next.good.version), "a revoked build never becomes good");
+    const bool restores = std::ranges::any_of(fx, [](const Effect& e) { return std::holds_alternative<RestoreSnapshot>(e); });
+    if (std::holds_alternative<LeaveRevoked>(event)) {
+        auto* st = std::get_if<Staged>(&out.next.activation);
+        w.check(!restores && (!st || !st->restore_first || out.next.activation == before.activation),
+                "leaving a revoked good never restores data");
+    }
+    if (std::holds_alternative<ManifestSeen>(event))
+        w.check(!restores || std::holds_alternative<Probation>(before.activation),
+                "a revocation restores data only to roll a candidate back");
 
     Step r1 = step(out.next, Resumed{}, ctx);
     Step r2 = step(r1.next, Resumed{}, ctx);
@@ -730,6 +773,10 @@ Event other_event(Walk& w, const World& world, const SupervisorState& s) {
         if (w.chance(0.3)) {
             if (s.previous_good && w.chance(0.5)) return UserDowngrade{*s.find(*s.previous_good), restore};
             return UserDowngrade{r, restore};
+        }
+        if (w.chance(0.3)) {
+            if (s.previous_good && w.chance(0.5)) return LeaveRevoked{*s.find(*s.previous_good)};
+            return LeaveRevoked{r};
         }
         return BuildSealed{r, restore};
     }
