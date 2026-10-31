@@ -54,7 +54,6 @@ BuildRecord with_verdict(BuildRecord r, Verdict v) {
     return r;
 }
 
-// --- State builders ---
 
 SupervisorState steady(const BuildRecord& good = A) {
     SupervisorState s = initial_state(good, Channel::Stable);
@@ -94,7 +93,6 @@ SupervisorState with_op(SupervisorState s, Operation op) {
 
 Running run(const BuildRecord& b, bool healthy = false, uint32_t uptime = 0) { return {b.id, healthy, uptime}; }
 
-// --- Effects as readable strings ---
 
 std::string describe(const Effect& e) {
     return std::visit(
@@ -154,7 +152,6 @@ std::vector<Row> table() {
     std::vector<Row> rows;
     auto row = [&](Row r) { rows.push_back(std::move(r)); };
 
-    // Steady: starting good.
     row({"steady start", steady(), StartRequested{}, kV1, {"Commit", "Spawn 1.0.0.0"},
          [](auto& s) { return running(s) && running(s)->build == A.id && !running(s)->healthy; }});
     row({"steady start on data good cannot open", steady(), StartRequested{}, kV3,
@@ -164,7 +161,6 @@ std::vector<Row> table() {
     row({"steady start while running", with_op(steady(), run(A)), StartRequested{}, kV1, {}});
     row({"steady start with no database", steady(), StartRequested{}, std::nullopt, {"Commit", "Spawn 1.0.0.0"}});
 
-    // Staged: the first candidate launch.
     row({"staged start", staged(B), StartRequested{}, kV1,
          {"TakeSnapshot " + snap("pre", B, 11), "Commit", "Spawn 1.1.0.0"}, [](auto& s) {
              auto* p = prob(s);
@@ -185,7 +181,6 @@ std::vector<Row> table() {
                     running(s) && running(s)->build == D.id;
          }});
 
-    // Probation: health and confirmation.
     row({"first health", with_op(probation(B), run(B)), AppHealthy{}, kV2, {"Commit", "SignalBootOk"},
          [](auto& s) { return running(s)->healthy; }});
     row({"repeated health", with_op(probation(B), run(B, true)), AppHealthy{}, kV2, {"SignalBootOk"}});
@@ -207,7 +202,6 @@ std::vector<Row> table() {
     row({"clean exit before health is neutral", with_op(probation(B), run(B)), AppExited{ExitKind::Clean}, kV2,
          {"Commit"}, [](auto& s) { return prob(s) && prob(s)->failed_runs == 0; }});
 
-    // Probation: failures before health roll back at once and start good.
     row({"crash before health, data still readable", with_op(probation(B, pre_b), run(B)),
          AppExited{ExitKind::Abnormal}, kV2, {"Commit", "Spawn 1.0.0.0"}, [](auto& s) {
              return steady_on(s, A) && quarantined_for(s, B, FailureReason::CrashedBeforeHealthy) && s.notice &&
@@ -236,7 +230,6 @@ std::vector<Row> table() {
          AppExited{ExitKind::DataUnavailable}, kV1, {"Commit", "ShowRecovery DataUnavailable", "SignalBootOk"},
          [](auto& s) { return prob(s) && prob(s)->failed_runs == 0 && !s.find(B.id)->quarantined(); }});
 
-    // Probation: failures after health count; the second rolls back without relaunching.
     row({"killed from outside after health is neutral", with_op(probation(B), run(B, true)),
          AppExited{ExitKind::Terminated}, kV2, {"Commit"}, [](auto& s) { return prob(s) && prob(s)->failed_runs == 0; }});
     row({"first crash after health", with_op(probation(B), run(B, true)), AppExited{ExitKind::Abnormal}, kV2,
@@ -253,7 +246,6 @@ std::vector<Row> table() {
     row({"next start of the candidate before it migrated", probation(B, pre_b), StartRequested{}, kV1,
          {"Commit", "Spawn 1.1.0.0"}});
 
-    // Resumed: reconcile after the launcher died.
     row({"resumed with an unobserved candidate run", with_op(probation(B), run(B, true)), Resumed{}, kV2, {"Commit"},
          [](auto& s) { return prob(s) && prob(s)->failed_runs == 1 && std::holds_alternative<Idle>(s.operation); }});
     row({"second unobserved candidate run rolls back", with_op(probation(B, pre_b, 1), run(B)), Resumed{}, kV2,
@@ -266,7 +258,6 @@ std::vector<Row> table() {
     row({"start mid-restore finishes it first", with_op(steady(), Restoring{backup_v1, {"keep"}}), StartRequested{}, kV3,
          {"RestoreSnapshot backup-v1 keep keep", "Commit", "Commit", "Spawn 1.0.0.0"}});
 
-    // Good itself failing.
     row({"good crashes before health", with_op(steady(), run(A)), AppExited{ExitKind::Abnormal}, kV1,
          {"Commit", "ShowRecovery GoodFailedToStart", "SignalBootOk"}, [](auto& s) {
              return steady_on(s, A) && std::holds_alternative<Proven>(s.find(A.id)->verdict);
@@ -278,7 +269,6 @@ std::vector<Row> table() {
          {"Commit", "ShowRecovery DataIncompatible", "SignalBootOk"}});
     row({"exit with nothing running", steady(), AppExited{ExitKind::Abnormal}, kV1, {}});
 
-    // Staging.
     row({"seal in steady stages", steady(), BuildSealed{B, std::nullopt}, kV1, {"Commit"}, [](auto& s) {
             auto* st = std::get_if<Staged>(&s.activation);
             return st && st->build == B.id && s.find(B.id);
@@ -290,7 +280,6 @@ std::vector<Row> table() {
     row({"no staging during probation", probation(B), BuildSealed{C, std::nullopt}, kV1, {}});
     row({"sealing good again (repair) changes nothing", steady(), BuildSealed{A, std::nullopt}, kV1, {}});
 
-    // Recovery actions.
     row({"user rollback during probation", probation(B, pre_b), UserRollback{A.id, std::nullopt}, kV2,
          {"Commit", "Spawn 1.0.0.0"}, [](auto& s) { return quarantined_for(s, B, FailureReason::UserRolledBack); }});
     row({"user rollback to previous good", with_previous(steady(), D), UserRollback{D.id, std::nullopt}, kV1,
@@ -318,7 +307,6 @@ std::vector<Row> table() {
          {"ShowRecovery DataIncompatible", "SignalBootOk"}});
     row({"no restore during probation", probation(B), UserRestore{backup_v1}, kV1, {}});
 
-    // Corruption, revocation, channel, notices.
     row({"candidate corrupt at spawn", with_op(probation(B, pre_b), run(B)), BuildCorrupt{B.id}, kV1,
          {"Commit", "Spawn 1.0.0.0"}, [](auto& s) { return quarantined_for(s, B, FailureReason::Corrupt); }});
     row({"good corrupt at spawn", with_op(steady(), run(A)), BuildCorrupt{A.id}, kV1,
@@ -365,8 +353,6 @@ bool test_table() {
     return ok;
 }
 
-// --- Random walk ---------------------------------------------------------------
-//
 // The world is what the shell would observe: the database (schema info plus a
 // content id, so two copies with equal schema are still told apart), the
 // backups directory, the app process, and the committed state on disk.
@@ -466,7 +452,6 @@ bool retriable(const Event& e) {
            !std::holds_alternative<ConfirmTimerElapsed>(e);
 }
 
-// --- State invariants ---
 
 void check_state(Walk& w, const SupervisorState& s) {
     const BuildRecord* good = s.find(s.good);
@@ -488,7 +473,6 @@ void check_state(Walk& w, const SupervisorState& s) {
     if (auto* r = std::get_if<Running>(&s.operation)) w.check(s.find(r->build) != nullptr, "running build has a record");
 }
 
-// --- Step invariants ---
 
 void check_step(Walk& w, const SupervisorState& before, const Event& event, const Context& ctx, const Step& out) {
     const auto& fx = out.effects;
@@ -545,7 +529,6 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
         }
     }
 
-    // Resumed is idempotent.
     Step r1 = step(out.next, Resumed{}, ctx);
     Step r2 = step(r1.next, Resumed{}, ctx);
     w.check(r2.effects.empty(), "a second Resumed does nothing");
@@ -580,7 +563,6 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
     }
 }
 
-// --- Executing effects against the world ---
 
 void open_db(World& world, const BuildRecord& build) {
     world.app_opened_db = true;
@@ -642,7 +624,6 @@ void apply(Walk& w, World& world, const Effect& e) {
     }
 }
 
-// --- Generating plausible events ---
 
 std::optional<Snapshot> random_snapshot(Walk& w, const World& world) {
     if (world.snapshots.empty() || w.chance(0.3)) return std::nullopt;

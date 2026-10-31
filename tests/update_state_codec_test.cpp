@@ -1,5 +1,6 @@
 // Offline tests for the persisted launcher state codecs.
 
+#include <parties/update/boot.h>
 #include <parties/update/state_codec.h>
 
 #include <chrono>
@@ -177,6 +178,24 @@ bool test_trust_file() {
     return true;
 }
 
+// The launcher derives the contract on every commit; the stub must read it back.
+bool test_boot_contract_projection() {
+    SupervisorState s = base();
+    auto contract = boot::parse_boot_contract(write_boot_contract(derive_boot_contract(s, R"(C:\Users\u\Data)")));
+    if (!contract) return fail("derived boot contract does not parse in the stub");
+    if (contract->good.dir != R"(builds\1.5.2.0-aaaaaaaa)" || contract->good.sha256 != kGood.launcher_sha256)
+        return fail("contract good is not good's launcher");
+    if (!contract->previous_good || contract->previous_good->sha256 != kPrev.launcher_sha256)
+        return fail("contract previous_good is not previous_good's launcher");
+    if (contract->last_good_app.sha256 != kGood.app_sha256 || contract->data_dir != R"(C:\Users\u\Data)")
+        return fail("safe mode would not run good's app on the same data");
+    // A candidate never appears in the contract: the stub only runs proven launchers.
+    s.activation = Probation{kCand.id, kGood.id, std::nullopt, 0, false};
+    auto during = derive_boot_contract(s, R"(C:\d)");
+    if (during.good.sha256 != kGood.launcher_sha256) return fail("probation changed the stub's launcher");
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -186,6 +205,7 @@ int main() {
     ok &= test_schema_versions();
     ok &= test_malformed_and_inconsistent();
     ok &= test_trust_file();
+    ok &= test_boot_contract_projection();
     if (ok) std::cout << "update_state_codec_test: all passed\n";
     return ok ? 0 : 1;
 }
