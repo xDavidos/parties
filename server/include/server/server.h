@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <set>
@@ -83,6 +84,8 @@ private:
             uint32_t kbps = 0;
             double   delivered_bps = 0.0;
             bool     measured = false;
+            Coalescer log{1'000'000};
+            std::deque<std::pair<uint64_t, int64_t>> marks;
         };
         Coalescer report{50'000};
         std::unordered_map<uint32_t, ReportSnap> report_snaps;

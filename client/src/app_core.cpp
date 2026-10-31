@@ -360,6 +360,21 @@ void AppCore::tick()
 
     feed_video_sender_stats();
     video_sender_.tick(steady_now_us());
+    if (proto_gate_reports() && model_.is_sharing.get()) {
+        static int64_t last_log_us = 0;
+        const int64_t now_us = steady_now_us();
+        if (now_us - last_log_us >= 1'000'000) {
+            last_log_us = now_us;
+            const auto st = video_sender_.stats();
+            const int64_t steady = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            LOG_INFO("Proto sharer: bitrate {} kbps, outstanding {} B, allowance {} B, rtt {} us, "
+                     "refused own {} viewer {}, report queue {} ms age {} ms",
+                     st.bitrate_bps / 1000, st.outstanding_bytes, st.allowance_bytes, st.rtt_us,
+                     st.refuse_own, st.refuse_viewer, st.report_queue_ms,
+                     st.report_at_us ? (steady - st.report_at_us) / 1000 : -1);
+        }
+    }
     if (proto_gate_cap()) {
         static uint32_t logged_caps = 0;
         const auto st = video_sender_.stats();

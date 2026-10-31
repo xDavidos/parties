@@ -52,6 +52,8 @@ struct SharedCounters {
     std::atomic<uint32_t> report_peak_queue_ms{0};
     std::atomic<uint32_t> report_delivery_kbps{0};
     std::atomic<int64_t>  report_at_us{0};
+    std::atomic<uint32_t> refuse_own{0};
+    std::atomic<uint32_t> refuse_viewer{0};
 };
 
 }
@@ -111,6 +113,11 @@ public:
         uint32_t proto_last_cap_bps = 0;
         uint32_t proto_cap_delivery_kbps = 0;
         uint32_t proto_cap_queue_ms = 0;
+        uint32_t refuse_own = 0;
+        uint32_t refuse_viewer = 0;
+        int64_t  allowance_bytes = 0;
+        uint32_t report_queue_ms = 0;
+        int64_t  report_at_us = 0;
     };
     Stats stats() const;
 

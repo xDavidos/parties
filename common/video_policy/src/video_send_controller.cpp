@@ -23,7 +23,11 @@ bool proto_report_fresh(const video_send_detail::SharedCounters& c) {
 
 bool proto_viewer_refuses(const video_send_detail::SharedCounters& c) {
     if (!proto_gate_admission()) return false;
-    return proto_report_fresh(c) && c.report_queue_ms.load() > c.queue_budget_ms.load();
+    if (!proto_report_fresh(c)) return false;
+    int64_t queue_ms = c.report_queue_ms.load();
+    if (proto_gate_draining_report())
+        queue_ms -= (proto_steady_us() - c.report_at_us.load(std::memory_order_acquire)) / 1000;
+    return queue_ms > static_cast<int64_t>(c.queue_budget_ms.load());
 }
 
 uint32_t scale_bitrate(uint32_t bps, double factor) {
@@ -81,7 +85,11 @@ void VideoSendAccounting::on_receiver_report(uint32_t max_backlog_bytes, uint16_
 }
 
 bool VideoSendAccounting::admit_frame() {
-    if (c_.outstanding.load() <= c_.allowance_bytes.load() && !proto_viewer_refuses(c_)) return true;
+    const bool own_ok = c_.outstanding.load() <= c_.allowance_bytes.load();
+    const bool viewer_refuses = proto_viewer_refuses(c_);
+    if (own_ok && !viewer_refuses) return true;
+    if (!own_ok) c_.refuse_own.fetch_add(1);
+    if (viewer_refuses) c_.refuse_viewer.fetch_add(1);
     c_.admission_drops.fetch_add(1);
     c_.admission_drops_window.fetch_add(1);
     return false;
@@ -272,6 +280,11 @@ VideoSendController::Stats VideoSendController::stats() const {
     s.proto_last_cap_bps = proto_last_cap_bps_;
     s.proto_cap_delivery_kbps = proto_cap_delivery_kbps_;
     s.proto_cap_queue_ms = proto_cap_queue_ms_;
+    s.refuse_own = counters_.refuse_own.load();
+    s.refuse_viewer = counters_.refuse_viewer.load();
+    s.allowance_bytes = counters_.allowance_bytes.load();
+    s.report_queue_ms = counters_.report_queue_ms.load();
+    s.report_at_us = counters_.report_at_us.load();
     return s;
 }
 
