@@ -1,6 +1,6 @@
 // Parties.exe, the boot stub. Setup installs it and automatic updates never
 // replace it, so it stays small and links only what
-// tools/update/check_boot_stub.ps1 allows. Contract: .scratch/installer-updater/contracts.md.
+// tools/update/check_boot_stub.ps1 allows.
 
 #include <parties/update/boot.h>
 
@@ -138,8 +138,8 @@ auto load(const std::wstring& path, Parse parse) -> decltype(parse(std::string_v
     return parse(*text);
 }
 
-// The only file the stub writes. A failed write is not fatal: booting matters
-// more than bookkeeping, and the next start folds the same outcome again.
+// The only file the stub writes. A failed write is not fatal: starting Parties
+// matters more than the bookkeeping.
 void persist(const std::wstring& state, const boot::BootRecord& record) {
     std::string text = boot::write_boot_record(record);
     std::wstring path = state + L"\\boot-record.json", tmp = path + L".tmp";
@@ -272,7 +272,7 @@ int recover(const Options& o, const std::optional<boot::BootContract>& c) {
     if (o.forced_button) return o.forced_button == kSafeMode && c && start_safe_mode(o, *c) ? 0 : 1;
 #endif
     std::wstring data_dir = c ? widen(c->data_dir) : default_data_dir();
-    const wchar_t* content = L"Parties tried the installed versions and none of them started. "
+    const wchar_t* content = L"Parties could not find an installed version that starts. "
                              L"Your data is safe and has not been changed.";
     for (;;) {
         if (ask(c.has_value(), data_dir, content) != kSafeMode) return 1;
