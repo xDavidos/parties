@@ -346,16 +346,18 @@ if(WIN32 AND BUILD_CLIENT)
 endif()
 
 # ── Update manager pure core (offline, deterministic) ────────────────────────
-foreach(update_test version data_compat manifest probation state_codec policy)
-    add_executable(update_${update_test}_test update_${update_test}_test.cpp)
-    target_link_libraries(update_${update_test}_test PRIVATE parties_update_core parties_common)
-    add_test(NAME update_${update_test} COMMAND update_${update_test}_test)
-endforeach()
+if(TARGET parties_update_core)
+    foreach(update_test version data_compat manifest probation state_codec policy)
+        add_executable(update_${update_test}_test update_${update_test}_test.cpp)
+        target_link_libraries(update_${update_test}_test PRIVATE parties_update_core parties_common)
+        add_test(NAME update_${update_test} COMMAND update_${update_test}_test)
+    endforeach()
 
-# Links only the boot library, which proves the boot stub's decisions build
-# without parties_common and OpenSSL.
-add_executable(update_boot_test update_boot_test.cpp)
-target_link_libraries(update_boot_test PRIVATE parties_update_boot)
-add_test(NAME update_boot COMMAND update_boot_test)
-# 100000 seeded random-walk sequences; about two minutes in a Debug build.
-set_tests_properties(update_probation PROPERTIES TIMEOUT 900)
+    # Links only the boot library, which proves the boot stub's decisions build
+    # without parties_common and OpenSSL.
+    add_executable(update_boot_test update_boot_test.cpp)
+    target_link_libraries(update_boot_test PRIVATE parties_update_boot)
+    add_test(NAME update_boot COMMAND update_boot_test)
+    # 100000 seeded random-walk sequences; about two minutes in a Debug build.
+    set_tests_properties(update_probation PROPERTIES TIMEOUT 900)
+endif()

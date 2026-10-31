@@ -110,7 +110,10 @@ if(APPLE)
 endif()
 
 add_subdirectory(common)
-add_subdirectory(updater/core)
+# The update manager is Windows-only for now; its core is portable C++.
+if(WIN32)
+    add_subdirectory(updater/core)
+endif()
 if(BUILD_CLIENT)
     add_subdirectory(encdec)
     add_subdirectory(client)
