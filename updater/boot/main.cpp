@@ -36,6 +36,7 @@ struct Options {
     std::wstring objects = L"Local\\Parties.";
     DWORD boot_wait_ms = kBootWaitMs;
     int forced_button = 0;  // testing builds: the recovery button, chosen without the dialog
+    std::vector<std::wstring> launcher_tests;  // testing builds: --test-namespace and --data-root, passed on
 };
 
 struct Handle {
@@ -85,7 +86,10 @@ Options parse_options() {
         else if (a == L"--recover") o.recover = true;
         else if (auto root = value(L"--install-root=")) o.root = *root;
 #ifdef PARTIES_UPDATE_TESTING
-        else if (auto ns = value(L"--test-namespace=")) o.objects = L"Local\\" + *ns + L".";
+        else if (auto ns = value(L"--test-namespace=")) {
+            o.objects = L"Local\\" + *ns + L".";
+            o.launcher_tests.emplace_back(a);
+        } else if (a.starts_with(L"--data-root=")) o.launcher_tests.emplace_back(a);
         else if (auto ms = value(L"--test-boot-wait-ms=")) o.boot_wait_ms = wcstoul(ms->c_str(), nullptr, 10);
         else if (auto b = value(L"--test-recovery="))
             o.forced_button = *b == L"safe-mode" ? kSafeMode : IDCLOSE;
@@ -205,6 +209,7 @@ bool boot_launcher(const Options& o, const std::wstring& exe, const boot::RunLau
     append_arg(cmd, L"--boot-session=" + std::to_wstring(run.session));
     append_arg(cmd, L"--boot-ok-event=" + std::to_wstring(reinterpret_cast<uintptr_t>(boot_ok.h)));
     if (o.recover) append_arg(cmd, L"--recover");
+    for (const auto& a : o.launcher_tests) append_arg(cmd, a);
     append_arg(cmd, L"--");
     for (const auto& a : o.forward) append_arg(cmd, a);
     Handle process = spawn(exe, std::move(cmd), o.root, boot_ok.h);
