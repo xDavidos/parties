@@ -4,6 +4,7 @@
 #include "log.h"
 
 #include <client/sqlite_file.h>
+#include <parties/update/retention.h>
 
 #include <sqlite3.h>
 
@@ -252,6 +253,20 @@ std::vector<Backup> DataGuard::list() const {
     }
     std::ranges::sort(out, [](const Backup& a, const Backup& b) { return a.written > b.written; });
     return out;
+}
+
+void DataGuard::prune(const SupervisorState& committed) const {
+    std::vector<BackupFile> files;
+    std::error_code ec;
+    for (const auto& item : fs::directory_iterator(paths_.backups(), ec)) {
+        if (!item.is_regular_file(ec) || item.path().extension() != ".db") continue;
+        files.push_back({item.path().stem().string(), item.last_write_time(ec)});
+    }
+    for (const std::string& stem : backups_to_prune(files, committed)) {
+        fs::path file = backup_path(SnapshotId{stem});
+        if (DeleteFileW(file.c_str())) log("retention deleted {}", stem);
+        else log("retention cannot delete {}: {}", stem, last_error_text());
+    }
 }
 
 } // namespace parties::update::launcher

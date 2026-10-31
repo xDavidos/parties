@@ -6,6 +6,7 @@
 #include <parties/update/state_codec.h>
 #include <parties/update/update_policy.h>
 
+#include <algorithm>
 #include <chrono>
 
 #include <windows.h>
@@ -23,6 +24,27 @@ link::DowngradeEffect wire_effect(DataEffect effect) {
     return link::DowngradeEffect::Impossible;
 }
 
+std::vector<Snapshot> snapshots(const std::vector<Backup>& backups) {
+    std::vector<Snapshot> out;
+    for (const Backup& b : backups) out.push_back({b.id, b.data});
+    return out;
+}
+
+// A downgrade that needs a backup nobody has taken is impossible.
+link::DowngradeOffer wire_offer(const DowngradeOffer& offer, const std::vector<Backup>& backups) {
+    link::DowngradeOffer out{offer.entry.version, wire_effect(offer.data_effect), std::nullopt};
+    if (offer.data_effect != DataEffect::NeedsRestore) return out;
+    auto point = restore_point(offer.entry, snapshots(backups));
+    auto it = point ? std::ranges::find(backups, point->id, &Backup::id) : backups.end();
+    if (it == backups.end()) {
+        out.data_effect = link::DowngradeEffect::Impossible;
+        return out;
+    }
+    out.backup_taken_at =
+        std::chrono::floor<std::chrono::seconds>(std::chrono::clock_cast<std::chrono::system_clock>(it->written));
+    return out;
+}
+
 } // namespace
 
 UpdateWorker::UpdateWorker(std::unique_ptr<UpdateSource> source, Keyring keys, fs::path trust_file,
@@ -35,10 +57,14 @@ UpdateWorker::~UpdateWorker() {
     CloseHandle(event_);
 }
 
-void UpdateWorker::stop() {
+void UpdateWorker::cancel() {
     cancel_ = true;
+    if (source_) source_->abort();
+}
+
+void UpdateWorker::stop() {
+    cancel();
     if (thread_.joinable()) thread_.join();
-    cancel_ = false;
 }
 
 bool UpdateWorker::busy() const {
@@ -46,20 +72,22 @@ bool UpdateWorker::busy() const {
     return running_;
 }
 
-bool UpdateWorker::start(CheckRequest request) {
+bool UpdateWorker::start(JobRequest request) {
     if (!source_) return false;
     {
         std::lock_guard lock(mutex_);
         if (running_) return false;
         running_ = true;
-        percent_.reset();
+        download_.reset();
     }
     if (thread_.joinable()) thread_.join();
+    cancel_ = false;
     thread_ = std::thread([this, request = std::move(request)] {
-        CheckOutcome outcome = run(request);
+        JobOutcome outcome = run(request);
         {
             std::lock_guard lock(mutex_);
             result_ = std::move(outcome);
+            download_.reset();
             running_ = false;
         }
         SetEvent(event_);
@@ -67,25 +95,21 @@ bool UpdateWorker::start(CheckRequest request) {
     return true;
 }
 
-std::optional<CheckOutcome> UpdateWorker::take() {
+std::optional<JobOutcome> UpdateWorker::take() {
     std::lock_guard lock(mutex_);
     return std::exchange(result_, std::nullopt);
 }
 
-std::optional<uint8_t> UpdateWorker::percent() const {
+std::optional<Download> UpdateWorker::download() const {
     std::lock_guard lock(mutex_);
-    return percent_;
+    return download_;
 }
 
-CheckOutcome UpdateWorker::run(const CheckRequest& request) {
-    CheckOutcome out;
-    const Channel channel = request.state.channel;
-    auto error = [&](std::string why) {
+std::expected<VerifiedManifest, link::Phase> UpdateWorker::accepted(Channel channel) {
+    auto error = [](std::string why) {
         log("update check failed: {}", why);
-        out.view.phase = link::Phase::Error;
-        return out;
+        return std::unexpected(link::Phase::Error);
     };
-
     auto bytes = source_->fetch_manifest(channel, cancel_);
     if (!bytes) return error(bytes.error().detail);
     auto manifest = verify_manifest(*bytes, keys_, channel);
@@ -108,8 +132,7 @@ CheckOutcome UpdateWorker::run(const CheckRequest& request) {
     if (auto* rejected = std::get_if<Rejected>(&decision)) {
         if (rejected->reason == TrustRejection::Stale) {
             log("update feed is stale");
-            out.view.phase = link::Phase::FeedStale;
-            return out;
+            return std::unexpected(link::Phase::FeedStale);
         }
         return error("manifest replayed or equivocating (" + std::to_string(static_cast<int>(rejected->reason)) + ")");
     }
@@ -118,31 +141,105 @@ CheckOutcome UpdateWorker::run(const CheckRequest& request) {
     fs::create_directories(trust_file_.parent_path(), ec);
     std::string write_error;
     if (!durable_replace(trust_file_, write_trust(trust), write_error)) return error(write_error);
+    return std::move(*manifest);
+}
+
+std::expected<BuildRecord, std::string> UpdateWorker::seal(const BuildEntry& entry) {
+    log("fetching {}", entry.version.to_string());
+    uint64_t total = 0;
+    for (const FileEntry& f : entry.files) total += f.size;
+    {
+        std::lock_guard lock(mutex_);
+        download_ = Download{entry.version, 0};
+    }
+    SetEvent(event_);
+    auto progress = [&](uint64_t done) {
+        uint8_t pct = total ? static_cast<uint8_t>(std::min<uint64_t>(100, done * 100 / total)) : 100;
+        std::lock_guard lock(mutex_);
+        if (download_ && download_->percent != pct) {
+            download_->percent = pct;
+            SetEvent(event_);
+        }
+    };
+    auto sealed = builds_.seal(entry, *source_, progress, cancel_);
+    if (!sealed) log("fetching {} failed: {}", entry.version.to_string(), sealed.error());
+    return sealed;
+}
+
+JobOutcome UpdateWorker::run(const JobRequest& request) {
+    const SupervisorState& state = request.state;
+    const Channel channel = std::holds_alternative<DowngradeJob>(request.job) ? std::get<DowngradeJob>(request.job).channel
+                                                                              : state.channel;
+    JobOutcome out{request.job, channel};
+    auto manifest = accepted(channel);
+    if (!manifest) {
+        out.view.phase = manifest.error();
+        return out;
+    }
+
+    if (auto* repair = std::get_if<RepairJob>(&request.job)) {
+        auto builds = manifest->builds();
+        auto it = std::ranges::find(builds, repair->build, &BuildEntry::id);
+        if (it == builds.end()) {
+            log("{} is not in the {} manifest, so it cannot be downloaded again", repair->build.dir_name(),
+                channel_name(channel));
+            return out;
+        }
+        auto sealed = seal(*it);
+        if (!sealed) return out;
+        out.events.push_back(BuildSealed{*sealed, std::nullopt});
+        out.ok = true;
+        return out;
+    }
+
+    if (std::holds_alternative<DowngradeJob>(request.job)) {
+        ChannelSwitchPlan plan = plan_channel_switch(state, *manifest, kLinkProtocol, request.live_db);
+        auto* pinned = std::get_if<StayPinned>(&plan);
+        if (pinned && pinned->downgrade) {
+            const DowngradeOffer& offer = *pinned->downgrade;
+            std::optional<Snapshot> restore;
+            if (offer.data_effect == DataEffect::NeedsRestore) restore = restore_point(offer.entry, snapshots(request.backups));
+            if (offer.data_effect != DataEffect::NeedsRestore || restore) {
+                if (auto sealed = seal(offer.entry)) {
+                    log("downgrading to {}{}", offer.entry.version.to_string(),
+                        restore ? " on backup " + restore->id.stem : "");
+                    out.events.push_back(ChannelIntentSet{channel, Follow{}});
+                    out.events.push_back(UserDowngrade{*sealed, restore});
+                    out.ok = true;
+                    return out;
+                }
+                out.view.phase = link::Phase::Error;
+            } else {
+                log("no backup can be restored for {}, so the switch waits instead", offer.entry.version.to_string());
+            }
+            out.view.downgrade = wire_offer(offer, request.backups);
+        }
+        out.events.push_back(ChannelIntentSet{channel, intent_for(plan)});
+        if (pinned) out.view.pinned_until = pinned->until;
+        out.ok = true;
+        return out;
+    }
 
     out.events.push_back(ManifestSeen{manifest->payload().revoked});
-    UpdateDecision plan = plan_update(request.state, *manifest, kLinkProtocol, request.live_db);
-    if (plan.new_intent) out.events.push_back(ChannelIntentSet{channel, *plan.new_intent});
-
-    if (auto* stage = std::get_if<StageBuild>(&plan.plan)) {
-        log("staging {}", stage->entry.version.to_string());
-        uint64_t total = 0;
-        for (const FileEntry& f : stage->entry.files) total += f.size;
-        auto progress = [&](uint64_t done) {
-            uint8_t pct = total ? static_cast<uint8_t>(std::min<uint64_t>(100, done * 100 / total)) : 100;
-            std::lock_guard lock(mutex_);
-            if (percent_ != pct) {
-                percent_ = pct;
-                SetEvent(event_);
-            }
-        };
-        auto sealed = builds_.seal(stage->entry, *source_, progress, cancel_);
-        if (!sealed) return error("staging " + stage->entry.version.to_string() + " failed: " + sealed.error());
+    UpdateDecision decision = plan_update(state, *manifest, kLinkProtocol, request.live_db);
+    if (decision.new_intent) out.events.push_back(ChannelIntentSet{channel, *decision.new_intent});
+    out.ok = true;
+    if (auto* stage = std::get_if<StageBuild>(&decision.plan)) {
+        auto sealed = seal(stage->entry);
+        if (!sealed) {
+            out.ok = false;
+            out.view.phase = link::Phase::Error;
+            return out;
+        }
         out.events.push_back(BuildSealed{*sealed, std::nullopt});
-    } else if (auto* pinned = std::get_if<ReportPinned>(&plan.plan)) {
+    } else if (auto* report = std::get_if<ReportPinned>(&decision.plan)) {
         out.view.phase = link::Phase::Pinned;
-        out.view.pinned_until = pinned->until;
-    } else if (auto* offer = std::get_if<OfferDowngrade>(&plan.plan)) {
-        out.view.downgrade = link::DowngradeOffer{offer->offer.entry.version, wire_effect(offer->offer.data_effect)};
+        out.view.pinned_until = report->until;
+        if (report->downgrade) out.view.downgrade = wire_offer(*report->downgrade, request.backups);
+    } else if (auto* offer = std::get_if<OfferDowngrade>(&decision.plan)) {
+        out.view.downgrade = wire_offer(offer->offer, request.backups);
+    } else if (auto* blocked = std::get_if<Blocked>(&decision.plan)) {
+        out.view.available = blocked->waiting_for;
     }
     return out;
 }
