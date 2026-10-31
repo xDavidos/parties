@@ -98,7 +98,9 @@ public:
     AppCore();
     ~AppCore();
 
-    bool init(const std::string& settings_path, PlatformBridge bridge, Rml::Context* rml_context);
+    // settings_ must already be open: the platform shell opens it so it can
+    // refuse to start, with a native message, when the data is unusable.
+    bool init(PlatformBridge bridge, Rml::Context* rml_context);
     void shutdown();
     void tick();
     void load_saved_prefs();

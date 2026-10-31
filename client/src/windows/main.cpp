@@ -1,5 +1,7 @@
 #include <client/app.h>
 #include <client/auto_updater.h>
+#include <client/exit_codes.h>
+#include <client/sqlite_file.h>
 #include <client/win32_single_instance.h>
 #include <parties/version.h>
 #include <parties/crypto.h>
@@ -22,6 +24,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <string>
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -275,6 +278,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+static std::wstring widen(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    const int length = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    std::wstring wide(static_cast<size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), wide.data(), length);
+    return wide;
+}
+
+// Running without persistence would silently lose everything the user does,
+// so a data failure stops startup with an exit code the launcher understands.
+static int refuse_to_start(ExitCode code, const std::filesystem::path& where, const std::string& reason) {
+    LOG_ERROR("Refusing to start (exit code {}): {} ({})", static_cast<int>(code),
+              reason, utf8_path(where));
+    std::wstring text = code == ExitCode::DataTooNew
+        ? L"Your Parties data was saved by a newer version of Parties. Install the latest version to open it."
+        : L"Parties cannot start because it cannot open its data.";
+    if (!where.empty()) text += L"\n\nLocation: " + where.wstring();
+    text += L"\n\nReason: " + widen(reason);
+    MessageBoxW(nullptr, text.c_str(), L"Parties", MB_OK | MB_ICONERROR);
+    return static_cast<int>(code);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Entry point
 // ═══════════════════════════════════════════════════════════════════════
@@ -329,6 +354,14 @@ int main(int argc, char* argv[]) {
 #endif
     LOG_INFO("{} Client v{}", parties::APP_NAME, parties::APP_VERSION);
     parties::alloctrack::start_reporting(10);
+
+    App app;
+    const SettingsPaths data{"parties_client.db", "backups"};
+    const Settings::OpenResult opened = app.open_data(data);
+    if (opened.status != Settings::OpenStatus::Ready)
+        return refuse_to_start(opened.status == Settings::OpenStatus::TooNew
+                                   ? ExitCode::DataTooNew : ExitCode::DataUnavailable,
+                               data.db, opened.reason);
 
     // Per-monitor DPI awareness (must be set before creating any windows)
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -394,7 +427,6 @@ int main(int argc, char* argv[]) {
     DwmExtendFrameIntoClientArea(hwnd, &margins);
 
     // Initialize application
-    App app;
     SetPropW(hwnd, L"App", &app);
 
     if (!app.init(hwnd)) {

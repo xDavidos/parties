@@ -425,7 +425,7 @@ bool App::init(HWND hwnd) {
     }
 
     // Init AppCore (wires audio, net callbacks, model callbacks)
-    if (!core_.init("parties_client.db", std::move(bridge), ui_.context()))
+    if (!core_.init(std::move(bridge), ui_.context()))
         return false;
 
     // Feed the chat text selection the ordered message list (id + raw text) so

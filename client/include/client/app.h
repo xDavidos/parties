@@ -54,6 +54,8 @@ public:
     App();
     ~App();
 
+    // Must report Ready before init() runs.
+    Settings::OpenResult open_data(const SettingsPaths& paths) { return core_.settings_.open(paths); }
     bool init(HWND hwnd);
     void shutdown();
 

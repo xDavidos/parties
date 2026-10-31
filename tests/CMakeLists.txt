@@ -194,6 +194,22 @@ if(BUILD_CLIENT)
         ${SPEEXDSP_LIBRARY})
 endif()
 
+# ── User data safety: schema migrations, data location, legacy import ────────
+if(WIN32 AND BUILD_CLIENT)
+    foreach(data_test settings)
+        add_executable(parties_data_${data_test}_test
+            data_${data_test}_test.cpp
+            ../client/src/settings.cpp
+            ../client/src/sqlite_file.cpp
+        )
+        target_include_directories(parties_data_${data_test}_test PRIVATE ../client/include)
+        target_link_libraries(parties_data_${data_test}_test PRIVATE
+            parties_common
+            unofficial::sqlite3::sqlite3)
+        add_test(NAME parties_data_${data_test} COMMAND parties_data_${data_test}_test)
+    endforeach()
+endif()
+
 if(WIN32 AND BUILD_CLIENT)
     find_path(AMD_AMF_INCLUDE_DIRS "AMF/core/Result.h" REQUIRED)
     add_executable(parties_amf_decode_state_test amf_decode_state_test.cpp)

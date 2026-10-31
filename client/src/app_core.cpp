@@ -63,12 +63,13 @@ AppCore::~AppCore() { stop_query_thread(); }
 // init / shutdown
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool AppCore::init(const std::string& settings_path, PlatformBridge bridge, Rml::Context* rml_context)
+bool AppCore::init(PlatformBridge bridge, Rml::Context* rml_context)
 {
     bridge_ = std::move(bridge);
 
-    if (!settings_.open(settings_path)) {
-        LOG_ERROR("Failed to open settings: {}", settings_path);
+    if (!settings_.is_open()) {
+        LOG_ERROR("AppCore::init requires an open settings database");
+        return false;
     }
 
     // Wire audio subsystems
