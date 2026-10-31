@@ -52,10 +52,17 @@ int main() {
     full.available = v("1.6.0.0");
     full.percent = 100;
     full.pinned_until = v("1.6.0.0");
-    full.downgrade = DowngradeOffer{v("1.5.0.0"), DowngradeEffect::RestoresBackup};
+    full.downgrade = DowngradeOffer{v("1.5.0.0"), DowngradeEffect::RestoresBackup,
+                                    std::chrono::sys_days{std::chrono::year{2026} / 10 / 30} + std::chrono::hours{9}};
     full.notice = StatusNotice{StatusNotice::Kind::RolledBack, v("1.6.0.0"), v("1.5.2.0"), "rolled-back-x"};
     check(round_trips(LauncherMessage{full}, launcher), "full status round-trips");
     check(round_trips(LauncherMessage{Status{}}, launcher), "minimal status round-trips");
+    check(write(LauncherMessage{full}).find("\"backup_taken_at\":\"2026-10-30T09:00:00Z\"") != std::string::npos,
+          "backup_taken_at is ISO-8601 UTC");
+    auto odd = parse_launcher_message(R"({"type":"status","phase":"idle","channel":"stable","current":"1.0.0.0",)"
+                                      R"("downgrade":{"version":"0.9.0.0","data_effect":"restores_backup","backup_taken_at":"yesterday"}})");
+    check(odd && std::get<Status>(*odd).downgrade && !std::get<Status>(*odd).downgrade->backup_taken_at,
+          "an unreadable backup_taken_at drops only that field");
     check(round_trips(LauncherMessage{Welcome{1}}, launcher), "welcome round-trips");
     check(round_trips(LauncherMessage{ExitRequested{}}, launcher), "exit_requested round-trips");
 

@@ -22,6 +22,7 @@ target_link_libraries(parties_update_boot PRIVATE rapidjson)
 # The launcher <-> app link codec. The client links it, so it stays free of
 # OpenSSL like the boot library.
 add_library(parties_update_link STATIC
+    src/encoding.cpp
     src/version.cpp
     src/channel.cpp
     src/link.cpp
@@ -32,7 +33,6 @@ target_link_libraries(parties_update_link
     PRIVATE rapidjson)
 
 add_library(parties_update_core STATIC
-    src/encoding.cpp
     src/manifest.cpp
     src/supervisor_state.cpp
     src/probation.cpp

@@ -40,6 +40,7 @@ struct OfferDowngrade {
 struct ReportPinned {
     Version until;
     std::optional<Version> channel_newest;
+    std::optional<DowngradeOffer> downgrade;  // what "switch now" would install
 };
 enum class BlockReason : uint8_t {
     Busy,               // a candidate is on probation or data is being restored

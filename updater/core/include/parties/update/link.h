@@ -10,6 +10,7 @@
 #include <parties/update/manifest.h>
 #include <parties/update/version.h>
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -61,6 +62,8 @@ enum class DowngradeEffect : uint8_t { None, RestoresBackup, Impossible };
 struct DowngradeOffer {
     Version version;
     DowngradeEffect data_effect = DowngradeEffect::None;
+    // RestoresBackup: when the snapshot it would restore was taken.
+    std::optional<std::chrono::sys_seconds> backup_taken_at;
     friend bool operator==(const DowngradeOffer&, const DowngradeOffer&) = default;
 };
 
