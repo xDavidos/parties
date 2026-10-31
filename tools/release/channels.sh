@@ -5,7 +5,7 @@
 #   channels.sh publish-beta <A.B.C.D> <entry.json>
 #   channels.sh promote <A.B.C.D>
 #   channels.sh resign
-#   channels.sh revoke <A.B.C.D> <beta|stable|both>
+#   channels.sh revoke <A.B.C.D>
 #
 # Environment:
 #   TOOL                     parties_manifest_tool.exe (required)
@@ -187,33 +187,27 @@ cmd_resign() {
     done
 }
 
+# Always both channels: a setup install follows Stable even when its build is
+# only on Beta, so a Stable manifest that does not exist yet is created.
 cmd_revoke() {
-    local version=$1 which=$2 channels state=0
+    local version=$1 state=0
     check_version "$version"
-    case "$which" in
-        both) channels="beta stable" ;;
-        beta | stable) channels=$which ;;
-        *) die "channels must be beta, stable or both" ;;
-    esac
     signing_state || state=$?
     if [ "$state" = 2 ]; then die "set PARTIES_UPDATE_KEY before revoking; production keys are pinned"; fi
     if [ "$state" = 0 ]; then
-        local channel base
-        for channel in $channels; do
-            base=$(fetch "$channel")
-            if [ "$base" = none ]; then
-                notice "There is no $channel manifest; nothing to revoke there."
-                continue
-            fi
-            tool revoke --base "$base" --channel "$channel" --version "$version" --serial now \
-                --expires-days "$EXPIRES_DAYS" --out "$WORK/$channel.payload.json"
+        local channel beta stable
+        beta=$(fetch beta)
+        stable=$(fetch stable)
+        tool revoke --beta "$beta" --stable "$stable" --version "$version" --serial now \
+            --expires-days "$EXPIRES_DAYS" --out-dir "$WORK"
+        for channel in beta stable; do
             sign_and_check "$WORK/$channel.payload.json" "$WORK/$channel.manifest.json" "$channel"
-            publish "$WORK/$channel.manifest.json"
         done
+        for channel in beta stable; do publish "$WORK/$channel.manifest.json"; done
     fi
     # A prerelease is never /releases/latest, so the legacy updater and
     # Sparkle stop offering the version too.
-    if [[ " $channels " == *" stable "* ]] && gh release view "v$version" -R "$REPO" --json tagName >/dev/null 2>&1; then
+    if gh release view "v$version" -R "$REPO" --json tagName >/dev/null 2>&1; then
         gh_write release edit "v$version" -R "$REPO" --prerelease
     fi
 }
@@ -224,6 +218,6 @@ case "$command" in
     publish-beta) [ $# = 2 ] || die "usage: channels.sh publish-beta <A.B.C.D> <entry.json>"; cmd_publish_beta "$@" ;;
     promote) [ $# = 1 ] || die "usage: channels.sh promote <A.B.C.D>"; cmd_promote "$@" ;;
     resign) [ $# = 0 ] || die "usage: channels.sh resign"; cmd_resign ;;
-    revoke) [ $# = 2 ] || die "usage: channels.sh revoke <A.B.C.D> <beta|stable|both>"; cmd_revoke "$@" ;;
+    revoke) [ $# = 1 ] || die "usage: channels.sh revoke <A.B.C.D>"; cmd_revoke "$@" ;;
     *) die "usage: channels.sh publish-beta|promote|resign|revoke ..." ;;
 esac

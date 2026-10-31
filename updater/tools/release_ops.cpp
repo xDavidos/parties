@@ -123,8 +123,13 @@ Result<ManifestPayload> promote(const ManifestPayload& beta, const ManifestPaylo
     return add_build(stable, Channel::Stable, *entry, issue, keep);
 }
 
-Result<ManifestPayload> revoke(const ManifestPayload& base, const Version& version, const Issue& issue) {
-    auto next = reissue(base, issue);
+Result<ManifestPayload> revoke(const ManifestPayload* base, Channel channel, const Version& version,
+                               const Issue& issue) {
+    ManifestPayload empty;
+    empty.channel = channel;
+    const ManifestPayload& from = base ? *base : empty;
+    if (from.channel != channel) return fail("the base manifest is not for channel " + std::string(channel_name(channel)));
+    auto next = reissue(from, issue);
     if (!next) return next;
     std::erase_if(next->builds, [&](const BuildEntry& b) { return b.version == version; });
     if (std::ranges::find(next->revoked, version) == next->revoked.end()) next->revoked.push_back(version);

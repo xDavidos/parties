@@ -56,9 +56,9 @@ If the old key leaked, do the same steps without waiting in step 4 for longer th
 Revoke a build that passed its health check but is still bad, for example one that damages data or breaks calls. The launcher already rolls back a build that crashes or hangs before it reports healthy, so a crash on startup needs no revocation.
 
 1. Open **Actions**, select **Revoke a build**, and select **Run workflow**.
-2. Enter the version and pick `both`, `beta`, or `stable`. Approve the `revoke` job.
+2. Enter the version. Approve the `revoke` job.
 
-The workflow removes the build from each channel and lists its version under `revoked`. A launcher that runs a revoked build stages the newest build it can run, even if that build is older. A revoked version can never return to that channel, so ship the fix under a new version. Revoking from Stable also turns the version's GitHub release back into a prerelease, so the legacy updater and Sparkle stop offering it. After that, check which release GitHub shows as **Latest**, and mark the right one if needed.
+The workflow always revokes from both channels. It removes the build from Beta and Stable and lists its version under `revoked` in each, creating the Stable manifest if none exists yet. A revocation from one channel only would miss installs that follow the other one, and every `PartiesSetup-A.B.C.D.exe` installs a Beta build on the Stable channel. A launcher that runs a revoked build moves to the newest build it can run, even if that build is older. A revoked version can never return to either channel, so ship the fix under a new version. The workflow also turns the version's GitHub release back into a prerelease, so the legacy updater and Sparkle stop offering it. After that, check which release GitHub shows as **Latest**, and mark the right one if needed.
 
 ## When the weekly re-sign fails
 
@@ -93,7 +93,7 @@ export TOOL=$tool REPO=emcifuntik/parties CHANNELS_DIR=$PWD/rehearsal/channels D
 bash tools/release/channels.sh publish-beta 1.6.0.0 rehearsal/dist/entry.json
 bash tools/release/channels.sh promote 1.6.0.0
 bash tools/release/channels.sh resign
-bash tools/release/channels.sh revoke 1.6.0.0 both
+bash tools/release/channels.sh revoke 1.6.0.0
 ```
 
 The tag must match the version the build reports, which comes from `git describe`. `promote` reads the real release named by `REPO`, so that release must exist. `SKIP_ASSET_CHECK=1` skips the downloads, because the rehearsal's URLs point at assets that were never uploaded.
@@ -138,7 +138,7 @@ The `channels` release is a prerelease that holds `beta.manifest.json` and `stab
 | **Publish to Beta** (`publish-beta.yml`) | Called by Release, or by hand with a run ID | Beta | None |
 | **Promote to Stable** (`promote.yml`) | By hand | Stable | Marks the release as a full, latest release |
 | **Re-sign channels** (`resign.yml`) | Mondays 06:17 UTC, or by hand | Beta and Stable | None |
-| **Revoke a build** (`revoke.yml`) | By hand | The chosen channels | Revoking from Stable makes the release a prerelease again |
+| **Revoke a build** (`revoke.yml`) | By hand | Beta and Stable | Makes the release a prerelease again |
 
 Every job that signs runs in the `update-signing` environment, one at a time across all workflows (concurrency group `update-channels`). Promote, re-sign, and revoke build the tool in a separate job without secrets. Publish to Beta uses the tool that the Release run built, which pins the same keys as the launcher it publishes.
 
@@ -152,7 +152,7 @@ Every job that signs runs in the `update-signing` environment, one at a time acr
 | `entry` | Writes one build entry from `build-info.json` and the files of the build. |
 | `merge` | Adds or replaces an entry in a channel payload. |
 | `promote` | Copies the Beta entry for a version into the Stable payload. |
-| `revoke` | Removes a version from a payload and lists it as revoked. |
+| `revoke` | Removes a version from the Beta and Stable payloads and lists it as revoked in both. `none` stands for a channel with no manifest yet. |
 | `resign` | Writes the same payload with a new serial and expiry. |
 | `sign` | Signs a payload with the keys in the named environment variables. |
 | `verify` | Verifies an envelope and its expiry. `--check-assets` also downloads every URL and compares size and SHA-256. |

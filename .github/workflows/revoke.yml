@@ -1,9 +1,9 @@
 name: Revoke a build
 
-# Removes a version from the chosen channels and lists it as revoked, so
-# launchers running it move to the newest build they can run. Revoking from
-# Stable also turns the version's GitHub release back into a prerelease, so
-# the legacy updater and Sparkle stop offering it.
+# Removes a version from both channels and lists it as revoked in each, so
+# launchers running it move to the newest build they can run, whichever
+# channel they follow. It also turns the version's GitHub release back into a
+# prerelease, so the legacy updater and Sparkle stop offering it.
 
 on:
   workflow_dispatch:
@@ -12,12 +12,6 @@ on:
         description: "Version to revoke, A.B.C.D"
         required: true
         type: string
-      channels:
-        description: "Channels to revoke it from"
-        required: true
-        type: choice
-        options: [both, beta, stable]
-        default: both
 
 permissions:
   contents: read
@@ -52,7 +46,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TOOL: tool/parties_manifest_tool.exe
           VERSION: ${{ inputs.version }}
-          CHANNELS: ${{ inputs.channels }}
           PARTIES_UPDATE_KEY: ${{ secrets.PARTIES_UPDATE_KEY }}
           PARTIES_UPDATE_KEY_NEXT: ${{ secrets.PARTIES_UPDATE_KEY_NEXT }}
-        run: bash tools/release/channels.sh revoke "$VERSION" "$CHANNELS"
+        run: bash tools/release/channels.sh revoke "$VERSION"
