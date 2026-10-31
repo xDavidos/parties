@@ -240,6 +240,20 @@ bool test_build_identity() {
     return true;
 }
 
+bool test_build_entry_codec() {
+    ManifestPayload p = payload();
+    std::string text = write_build_entry(p.builds[1]);
+    if (write_payload(p).find(text) == std::string::npos)
+        return fail("an entry must serialize to the same bytes it has inside a payload");
+    auto parsed = parse_build_entry(text);
+    if (!parsed || *parsed != p.builds[1]) return fail("entry round trip");
+    BuildEntry no_app = p.builds[1];
+    no_app.files.pop_back();
+    auto refused = parse_build_entry(write_build_entry(no_app));
+    if (refused || refused.error().kind != Kind::InvalidField) return fail("an entry without the app must be refused");
+    return true;
+}
+
 VerifiedManifest verified(const ManifestPayload& p) {
     auto r = verify(sign(write_payload(p), {kA}), {pin(kA)});
     if (!r) std::abort();
@@ -305,6 +319,7 @@ int main() {
     ok &= test_keys_and_rotation();
     ok &= test_payload_validation();
     ok &= test_build_identity();
+    ok &= test_build_entry_codec();
     ok &= test_trust_ratchet();
     if (ok) std::cout << "update_manifest_test: all passed\n";
     return ok ? 0 : 1;

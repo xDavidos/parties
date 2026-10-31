@@ -109,6 +109,12 @@ struct ManifestError {
     std::string detail;
 };
 
+// One build entry as canonical JSON: the exact bytes write_payload emits for
+// it, so an entry copied between channels stays byte for byte the same.
+std::string write_build_entry(const BuildEntry& entry);
+// Parses one entry with the rules verify_manifest applies to each build.
+std::expected<BuildEntry, ManifestError> parse_build_entry(std::string_view json);
+
 // Holding one proves: a pinned key signed these payload bytes, the product and
 // channel match, and every field passed validation. Freshness is separate:
 // see accept().

@@ -125,6 +125,30 @@ std::expected<BuildEntry, ManifestError> parse_build(const json::Value& v) {
     return b;
 }
 
+void write_build(json::Writer& w, const BuildEntry& b) {
+    w.StartObject();
+    json::key(w, "version"); json::str(w, b.version.to_string());
+    json::key(w, "data_schema"); w.Uint(b.data_schema);
+    json::key(w, "data_compat_floor"); w.Uint(b.data_compat_floor);
+    json::key(w, "link_protocol"); w.Uint(b.link_protocol);
+    json::key(w, "min_supported_launcher_link"); w.Uint(b.min_supported_launcher_link);
+    json::key(w, "files");
+    w.StartArray();
+    for (const auto& f : b.files) {
+        w.StartObject();
+        json::key(w, "name"); json::str(w, f.name);
+        json::key(w, "size"); w.Uint64(f.size);
+        json::key(w, "sha256"); json::str(w, f.sha256.to_hex());
+        json::key(w, "urls");
+        w.StartArray();
+        for (const auto& u : f.urls) json::str(w, u);
+        w.EndArray();
+        w.EndObject();
+    }
+    w.EndArray();
+    w.EndObject();
+}
+
 std::expected<ManifestPayload, ManifestError> parse_payload(std::string_view text, Channel expected) {
     using K = ManifestError::Kind;
     rapidjson::Document doc;
@@ -199,6 +223,19 @@ BuildId BuildEntry::id() const {
     return {version, build_digest(files)};
 }
 
+std::string write_build_entry(const BuildEntry& entry) {
+    rapidjson::StringBuffer buf;
+    json::Writer w(buf);
+    write_build(w, entry);
+    return {buf.GetString(), buf.GetSize()};
+}
+
+std::expected<BuildEntry, ManifestError> parse_build_entry(std::string_view text) {
+    rapidjson::Document doc;
+    if (!json::parse(doc, text)) return error(ManifestError::Kind::Malformed, "entry is not a JSON object");
+    return parse_build(doc);
+}
+
 std::string write_payload(const ManifestPayload& p) {
     rapidjson::StringBuffer buf;
     json::Writer w(buf);
@@ -211,29 +248,7 @@ std::string write_payload(const ManifestPayload& p) {
     json::key(w, "expires_at"); json::str(w, format_utc(p.expires_at));
     json::key(w, "builds");
     w.StartArray();
-    for (const auto& b : p.builds) {
-        w.StartObject();
-        json::key(w, "version"); json::str(w, b.version.to_string());
-        json::key(w, "data_schema"); w.Uint(b.data_schema);
-        json::key(w, "data_compat_floor"); w.Uint(b.data_compat_floor);
-        json::key(w, "link_protocol"); w.Uint(b.link_protocol);
-        json::key(w, "min_supported_launcher_link"); w.Uint(b.min_supported_launcher_link);
-        json::key(w, "files");
-        w.StartArray();
-        for (const auto& f : b.files) {
-            w.StartObject();
-            json::key(w, "name"); json::str(w, f.name);
-            json::key(w, "size"); w.Uint64(f.size);
-            json::key(w, "sha256"); json::str(w, f.sha256.to_hex());
-            json::key(w, "urls");
-            w.StartArray();
-            for (const auto& u : f.urls) json::str(w, u);
-            w.EndArray();
-            w.EndObject();
-        }
-        w.EndArray();
-        w.EndObject();
-    }
+    for (const auto& b : p.builds) write_build(w, b);
     w.EndArray();
     json::key(w, "revoked");
     w.StartArray();
