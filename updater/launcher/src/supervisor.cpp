@@ -31,6 +31,9 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr auto kCheckInterval = std::chrono::hours(6);
+// How long a check or download may keep the launcher running after the app
+// exits: a full build over a slow link, but not a hidden process all day.
+constexpr auto kJobCapAfterExit = std::chrono::minutes(15);
 
 std::wstring widen(std::string_view s) {
     if (s.empty()) return {};
@@ -135,6 +138,7 @@ private:
     void start_check();
     void submit(Job job);
     void pump();
+    void cancel_jobs();
     bool repairing() const;
     void show_pending_recovery();
     void publish_status();
@@ -167,6 +171,7 @@ private:
     bool quit_ = false;
     bool session_ended_ = false;
     Clock::time_point next_check_ = Clock::time_point::max();
+    std::optional<Clock::time_point> jobs_cut_off_;  // set while no app runs
     std::deque<Job> jobs_;
     std::optional<Job> running_job_;
 
@@ -311,6 +316,7 @@ bool Supervisor::spawn(const BuildId& build) {
     }
     (*link)->expect_client(process->pid());
     app_.emplace(AppRun{build, std::move(*process), std::move(*link), Clock::now()});
+    jobs_cut_off_.reset();
     return true;
 }
 
@@ -325,10 +331,11 @@ void Supervisor::on_app_exit() {
         dispatch(StartRequested{});
     }
     if (app_) return;
-    // Nobody is left to see a check or a downgrade; a repair is what lets the
-    // next start succeed, so it goes on.
+    // The job in flight finishes, or a user whose sessions are shorter than a
+    // download would never get an update. Nobody is left to see the queued
+    // checks and downgrades; a queued repair is what lets the next start succeed.
     std::erase_if(jobs_, [](const Job& j) { return !std::holds_alternative<RepairJob>(j); });
-    if (running_job_ && !std::holds_alternative<RepairJob>(*running_job_)) worker_.cancel();
+    jobs_cut_off_ = Clock::now() + testing::job_cap().value_or(kJobCapAfterExit);
 }
 
 void Supervisor::on_link() {
@@ -438,6 +445,12 @@ void Supervisor::submit(Job job) {
     pump();
 }
 
+// Setup and uninstall end the launcher through here as well.
+void Supervisor::cancel_jobs() {
+    jobs_.clear();
+    worker_.cancel();
+}
+
 void Supervisor::pump() {
     if (running_job_ || jobs_.empty() || worker_.busy()) return;
     Job job = jobs_.front();
@@ -458,8 +471,11 @@ std::optional<Clock::time_point> Supervisor::next_deadline() const {
     auto consider = [&](Clock::time_point t) {
         if (!next || t < *next) next = t;
     };
+    if (!app_) {
+        if (jobs_cut_off_) consider(*jobs_cut_off_);
+        return next;
+    }
     if (worker_.available()) consider(next_check_);
-    if (!app_) return next;
     if (!app_->healthy_at) {
         if (!app_->deadline_fired) consider(app_->started + units(timing_.policy.health_deadline_s));
         return next;
@@ -473,8 +489,15 @@ std::optional<Clock::time_point> Supervisor::next_deadline() const {
 
 void Supervisor::on_timers() {
     const auto now = Clock::now();
+    if (!app_) {
+        if (jobs_cut_off_ && now >= *jobs_cut_off_) {
+            jobs_cut_off_.reset();
+            if (running_job_) log("giving up on the update job: the app exited too long ago");
+            cancel_jobs();
+        }
+        return;
+    }
     if (worker_.available() && now >= next_check_) start_check();
-    if (!app_) return;
     if (!app_->healthy_at) {
         if (!app_->deadline_fired && now >= app_->started + units(timing_.policy.health_deadline_s)) {
             app_->deadline_fired = true;
@@ -560,6 +583,7 @@ void Supervisor::end_session() {
     if (session_ended_) return;
     log("session is ending");
     if (app_ && WaitForSingleObject(app_->process.handle(), 5000) == WAIT_OBJECT_0) on_app_exit();
+    cancel_jobs();
     write_session(true);
     session_ended_ = true;
     quit_ = true;
@@ -620,7 +644,9 @@ int Supervisor::run() {
             show_pending_recovery();
             continue;
         }
-        if (!app_ && !repairing() && !worker_.busy()) break;
+        // running_job_, not worker_.busy(): a job that just ended still has an
+        // outcome to commit.
+        if (!app_ && !running_job_ && jobs_.empty()) break;
 
         const bool with_app = app_.has_value();
         std::vector<HANDLE> handles{activate, worker_.event()};
