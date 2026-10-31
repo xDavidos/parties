@@ -55,7 +55,8 @@ jobs:
           cmake --preset retail `
             -DENABLE_SENTRY=ON `
             -DSENTRY_DSN_CLIENT="${{ secrets.SENTRY_DSN_WINDOWS }}" `
-            -DSENTRY_DSN_SERVER="${{ secrets.SENTRY_DSN_SERVER }}"
+            -DSENTRY_DSN_SERVER="${{ secrets.SENTRY_DSN_SERVER }}" `
+            -DPARTIES_AUTHENTICODE_PUBLISHER="${{ vars.PARTIES_AUTHENTICODE_PUBLISHER }}"
 
       - name: Build
         run: cmake --build --preset retail
