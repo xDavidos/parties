@@ -380,6 +380,11 @@ if(TARGET parties_update_core)
         target_link_libraries(update_manifest_tool_test PRIVATE parties_update_release_keys parties_common)
         add_dependencies(update_manifest_tool_test parties_manifest_tool)
         add_test(NAME update_manifest_tool COMMAND update_manifest_tool_test $<TARGET_FILE:parties_manifest_tool>)
+    else()
+        add_test(NAME update_manifest_tool_retail_keyring
+            COMMAND parties_manifest_tool verify --envelope none --channel beta --keyring .)
+        set_tests_properties(update_manifest_tool_retail_keyring PROPERTIES
+            PASS_REGULAR_EXPRESSION "unknown option --keyring")
     endif()
     # 100000 seeded random-walk sequences; about two minutes in a Debug build.
     set_tests_properties(update_probation PROPERTIES TIMEOUT 900)
