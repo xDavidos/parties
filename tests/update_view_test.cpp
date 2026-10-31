@@ -230,6 +230,13 @@ void notice() {
     check(model.update_notice_detail.get() == "Parties moves to a fixed version as soon as one is out.",
           "with nothing to move to, Parties says it will move later");
 
+    Status failed = base();
+    failed.notice = StatusNotice{StatusNotice::Kind::RestoreFailed, v("1.2.0.0"), v("1.2.0.0"), std::nullopt};
+    show_update_status(model, failed);
+    check(model.update_notice.get() == "Parties could not restore the backup, so your data was not changed.",
+          "a restore that could not start says the data is unchanged");
+    check(model.update_notice_detail.get().empty(), "a failed restore has nothing more to point at");
+
     show_update_status(model, base());
     check(model.update_notice.get().empty(), "the notice disappears once the launcher clears it");
     check(!update_request(base(), UpdateAction::DismissNotice), "nothing to acknowledge without a notice");

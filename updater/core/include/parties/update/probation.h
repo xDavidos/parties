@@ -96,12 +96,16 @@ struct ChannelIntentSet {
     ChannelIntent intent;
     friend bool operator==(const ChannelIntentSet&, const ChannelIntentSet&) = default;
 };
+// The RestoreSnapshot of the committed Restoring failed and left the live
+// database as it was: the backup is unreadable, or the live data could not be
+// preserved first. The shell starts good afterwards unless recovery is open.
+struct RestoreFailed { friend bool operator==(const RestoreFailed&, const RestoreFailed&) = default; };
 struct NoticeAcknowledged { friend bool operator==(const NoticeAcknowledged&, const NoticeAcknowledged&) = default; };
 
 using Event = std::variant<StartRequested, Resumed, AppHealthy, AppExited, HealthDeadlinePassed,
                            ConfirmTimerElapsed, BuildSealed, UserDowngrade, UserRollback, UserRetry,
                            UserRestore, BuildCorrupt, ManifestSeen, LeaveRevoked, ChannelIntentSet,
-                           NoticeAcknowledged>;
+                           RestoreFailed, NoticeAcknowledged>;
 
 struct Policy {
     uint32_t health_deadline_s = 120;

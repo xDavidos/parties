@@ -1095,6 +1095,24 @@ void adv_restore_from_damaged_backup() {
     check(healthy() > healthy_before, "ADV: the launcher starts Parties again after a restore it cannot finish");
 }
 
+// Repair alone, with no start in between, gives up a restore whose backup is gone.
+void repair_drops_unfinishable_restore() {
+    World w("repair-restore");
+    Build a = w.build("1.0.0.0", g_fake_app, true, 2);
+    const fs::path setup = w.setup_for(a);
+    check(w.setup(setup, {L"--no-launch"}) == 0u, "setup exited 0");
+    auto s = w.state();
+    if (!check(s.has_value(), "state readable")) return;
+    s->operation = Restoring{Snapshot{SnapshotId{"gone"}, DataInfo{2, 2}}, SnapshotId{"pre-restore-x-g9"}};
+    s->generation += 1;
+    write_bytes(w.install / "state" / "supervisor.json", write_state(*s));
+    check(w.setup(setup, {L"--no-launch"}) == 0u, "repair exited 0");
+    auto after = w.state();
+    check(after && std::holds_alternative<Idle>(after->operation), "repair cleared the restore it cannot finish");
+    check(after && after->notice && after->notice->kind == Notice::Kind::RestoreFailed,
+          "the app will say the restore did not happen");
+}
+
 // A link the way Explorer makes one by hand: target, and a "Start in" folder.
 bool make_link(const fs::path& file, const fs::path& target, const fs::path& start_in) {
     IShellLinkW* link = nullptr;
@@ -1310,6 +1328,7 @@ int main(int argc, char** argv) {
         {"bridge-f old-app-hangs", bridge_old_app_hangs},
         {"bridge-adv-a default-shortcut-name", adv_manual_setup_default_shortcut_name},
         {"bridge-adv-b restore-damaged", adv_restore_from_damaged_backup},
+        {"bridge-adv-b repair-drops-restore", repair_drops_unfinishable_restore},
         {"bridge-adv-c taskbar-pin", adv_manual_setup_taskbar_pin},
         {"bridge-adv-d identity-conflict", adv_identity_conflict},
     };

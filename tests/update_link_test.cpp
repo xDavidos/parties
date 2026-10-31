@@ -62,6 +62,8 @@ int main() {
     check(round_trips(LauncherMessage{withdrawn}, launcher), "a withdrawn notice round-trips");
     check(write(LauncherMessage{withdrawn}).find("\"notice\":{\"kind\":\"withdrawn\"") != std::string::npos,
           "the withdrawn notice's wire form");
+    withdrawn.notice->kind = StatusNotice::Kind::RestoreFailed;
+    check(round_trips(LauncherMessage{withdrawn}, launcher), "a restore_failed notice round-trips");
     check(write(LauncherMessage{full}).find("\"backup_taken_at\":\"2026-10-30T09:00:00Z\"") != std::string::npos,
           "backup_taken_at is ISO-8601 UTC");
     auto odd = parse_launcher_message(R"({"type":"status","phase":"idle","channel":"stable","current":"1.0.0.0",)"

@@ -23,6 +23,11 @@ struct Backup {
     fs::file_time_type written;
 };
 
+struct RestoreError {
+    std::string why;
+    bool live_changed = false;  // false: the live database is exactly as it was
+};
+
 class DataGuard {
 public:
     explicit DataGuard(DataPaths paths) : paths_(std::move(paths)) {}
@@ -40,7 +45,10 @@ public:
     // Keeps the live database (with its WAL) as backups\<preserve_live_as>.db,
     // then puts backups\<from>.db in its place. Done when the live database
     // already has from's content.
-    bool restore(const SnapshotId& from, const SnapshotId& preserve_live_as, std::string& error) const;
+    std::expected<void, RestoreError> restore(const SnapshotId& from, const SnapshotId& preserve_live_as) const;
+
+    // The backup exists and passes an integrity check.
+    bool intact(const SnapshotId& id) const;
 
     // Intact backups, newest first.
     std::vector<Backup> list() const;

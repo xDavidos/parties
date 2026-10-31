@@ -125,10 +125,11 @@ struct PinnedUntilAtLeast {
 };
 using ChannelIntent = std::variant<Follow, PinnedUntilAtLeast>;
 
-// Shown once by the app, then acknowledged. Withdrawn: good was revoked
-// (from == to == good).
+// Shown once by the app, then acknowledged. Withdrawn: good was revoked.
+// RestoreFailed: a restore could not start and the data was left as it was.
+// For both, from == to == good.
 struct Notice {
-    enum class Kind : uint8_t { RolledBack, DataRestored, Withdrawn } kind;
+    enum class Kind : uint8_t { RolledBack, DataRestored, Withdrawn, RestoreFailed } kind;
     Version from;
     Version to;
     std::optional<SnapshotId> preserved;  // where the replaced live data was kept

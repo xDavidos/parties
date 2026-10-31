@@ -74,6 +74,7 @@ link::StatusNotice wire_notice(const Notice& n) {
     case Notice::Kind::RolledBack: out.kind = link::StatusNotice::Kind::RolledBack; break;
     case Notice::Kind::DataRestored: out.kind = link::StatusNotice::Kind::DataRestored; break;
     case Notice::Kind::Withdrawn: out.kind = link::StatusNotice::Kind::Withdrawn; break;
+    case Notice::Kind::RestoreFailed: out.kind = link::StatusNotice::Kind::RestoreFailed; break;
     }
     out.from = n.from;
     out.to = n.to;
@@ -264,7 +265,16 @@ bool Supervisor::execute(const Effect& effect) {
                 return true;
             } else if constexpr (std::is_same_v<T, RestoreSnapshot>) {
                 if (app_) return (error = "the app is running", false);
-                return data_.restore(e.from, e.preserve_live_as, error);
+                auto restored = data_.restore(e.from, e.preserve_live_as);
+                if (restored) return true;
+                error = restored.error().why;
+                // A restore that cannot even start would otherwise stop every
+                // launch here; one that changed the live data is resumed instead.
+                if (!restored.error().live_changed) {
+                    queue_.push_back(RestoreFailed{});
+                    if (!recovery_) queue_.push_back(StartRequested{});
+                }
+                return false;
             } else if constexpr (std::is_same_v<T, DeleteBuild>) {
                 // A leftover directory is untracked, so the next start collects it.
                 if (!builds_.remove(e.build, state_, error)) log("cannot delete {}: {}", e.build.dir_name(), error);
@@ -653,9 +663,9 @@ int Supervisor::run() {
     data_.prune(state_);
     refresh_uninstall_entry(options_.install, state_.good);
 
-    dispatch(Resumed{});
     if (options_.recover) recovery_ = PendingRecovery{std::nullopt};
-    else dispatch(StartRequested{});
+    dispatch(Resumed{});
+    if (!options_.recover) dispatch(StartRequested{});
 
     while (!quit_) {
         // A repair in flight may make the recovery dialog unnecessary.

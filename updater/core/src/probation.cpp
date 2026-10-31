@@ -463,6 +463,25 @@ void handle(Tx& tx, const ChannelIntentSet& e) {
     if (unstaged) tx.emit(DeleteBuild{*unstaged});
 }
 
+// A Restoring under Probation is the candidate's restore_first: without it
+// the candidate cannot run, so it goes back to being only a record.
+void handle(Tx& tx, const RestoreFailed&) {
+    if (!std::holds_alternative<Restoring>(tx.s.operation)) return;
+    tx.s.operation = Idle{};
+    std::optional<BuildId> dropped;
+    if (Probation* p = probation(tx.s)) {
+        BuildId candidate = p->candidate;
+        tx.s.activation = Steady{};
+        if (tx.s.previous_good != candidate) {
+            std::erase_if(tx.s.builds, [&](const BuildRecord& r) { return r.id == candidate; });
+            dropped = candidate;
+        }
+    }
+    tx.s.notice = Notice{Notice::Kind::RestoreFailed, tx.s.good.version, tx.s.good.version, std::nullopt};
+    tx.commit();
+    if (dropped) tx.emit(DeleteBuild{*dropped});
+}
+
 void handle(Tx& tx, const NoticeAcknowledged&) {
     if (!tx.s.notice) return;
     tx.s.notice.reset();

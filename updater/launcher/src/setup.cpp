@@ -248,6 +248,30 @@ bool ensure_stub(const InstallPaths& install, std::span<const uint8_t> stub, boo
     return durable_replace(file, {reinterpret_cast<const char*>(stub.data()), stub.size()}, error);
 }
 
+// A restore whose backup is gone can never finish, and the launcher would
+// stop at it on every start. Repair gives up on it the way the launcher does
+// when the restore fails without changing the data.
+LoadResult drop_unfinishable_restore(LoadResult loaded, const DataGuard& data, const BuildStore& builds,
+                                     StateStore& store) {
+    auto* state = std::get_if<SupervisorState>(&loaded);
+    auto* restoring = state ? std::get_if<Restoring>(&state->operation) : nullptr;
+    if (!restoring || data.intact(restoring->from.id)) return loaded;
+    log("the backup {} that a restore needs is missing or damaged; leaving the data as it is", restoring->from.id.stem);
+    Step step_out = step(*state, RestoreFailed{}, {});
+    std::string error;
+    for (const Effect& effect : step_out.effects) {
+        if (const auto* commit = std::get_if<Commit>(&effect)) {
+            if (!store.commit(commit->state, error)) {
+                log("cannot save the install state: {}", error);
+                return loaded;
+            }
+        } else if (const auto* doomed = std::get_if<DeleteBuild>(&effect)) {
+            if (!builds.remove(doomed->build, step_out.next, error)) log("cannot delete: {}", error);
+        }
+    }
+    return step_out.next;
+}
+
 // The plan's state change, executed the way the launcher executes effects.
 std::expected<std::optional<BuildId>, std::string> apply_state(const InstallPlan& plan, const LoadResult& loaded,
                                                                const BuildStore& builds, StateStore& store,
@@ -291,7 +315,7 @@ Outcome install(const SetupOptions& o, const Payload& payload) {
 
     StateStore store(o.install, utf8(o.data.data()));
     BuildStore builds(o.install);
-    const LoadResult loaded = store.load();
+    const LoadResult loaded = drop_unfinishable_restore(store.load(), DataGuard(o.data), builds, store);
     const BuildRecord bundled = BuildRecord::from_entry(payload.entry);
     const InstallPlan plan = plan_install(loaded, bundled);
     std::string error;

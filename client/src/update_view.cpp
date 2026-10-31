@@ -112,6 +112,8 @@ std::string notice_text(const Status& s) {
     if (!s.notice) return {};
     if (s.notice->kind == StatusNotice::Kind::Withdrawn)
         return "Parties " + s.notice->from.to_string() + " was withdrawn because of a problem.";
+    if (s.notice->kind == StatusNotice::Kind::RestoreFailed)
+        return "Parties could not restore the backup, so your data was not changed.";
     return "Parties " + s.notice->from.to_string() + " didn't start correctly, so you're back on " +
            s.notice->to.to_string() + ". Your data is safe.";
 }

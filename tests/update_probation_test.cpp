@@ -413,6 +413,19 @@ std::vector<Row> table() {
         row({"acknowledge notice", s, NoticeAcknowledged{}, kV1, {"Commit"}, [](auto& n) { return !n.notice; }});
     }
     row({"acknowledge with no notice", steady(), NoticeAcknowledged{}, kV1, {}});
+    row({"a restore that cannot start is given up", with_op(steady(), Restoring{backup_v1, SnapshotId{"pre-restore-x"}}),
+         RestoreFailed{}, kV1, {"Commit"}, [](auto& s) {
+             return steady_on(s, A) && std::holds_alternative<Idle>(s.operation) && s.notice &&
+                    s.notice->kind == Notice::Kind::RestoreFailed;
+         }});
+    {
+        SupervisorState s = with_op(probation(D, Snapshot{{"pre-downgrade-d"}, kV1}), Restoring{backup_v1, SnapshotId{"pre-downgrade-d"}});
+        std::get<Probation>(s.activation).restore_on_rollback = true;
+        row({"a downgrade whose restore cannot start drops the candidate", s, RestoreFailed{}, kV1,
+             {"Commit", "DeleteBuild 0.9.0.0"},
+             [](auto& n) { return steady_on(n, A) && !n.find(D.id) && std::holds_alternative<Idle>(n.operation); }});
+    }
+    row({"no restore to give up", steady(), RestoreFailed{}, kV1, {}});
     return rows;
 }
 
@@ -457,6 +470,7 @@ struct World {
     bool app_healthy = false;
     bool app_killed = false;
     std::optional<BuildId> lease_failed;
+    bool restore_failed = false;  // the backup could not be read; nothing changed
     uint64_t next_content = 1;
 };
 
@@ -527,6 +541,7 @@ std::string event_name(const Event& e) {
             else if constexpr (std::is_same_v<T, ManifestSeen>) return "ManifestSeen";
             else if constexpr (std::is_same_v<T, LeaveRevoked>) return "LeaveRevoked " + x.record.id.version.to_string();
             else if constexpr (std::is_same_v<T, ChannelIntentSet>) return "ChannelIntentSet";
+            else if constexpr (std::is_same_v<T, RestoreFailed>) return "RestoreFailed";
             else return "NoticeAcknowledged";
         },
         e);
@@ -604,7 +619,11 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
         if (std::ranges::any_of(fx, [](const Effect& e) { return std::holds_alternative<RestoreSnapshot>(e); }))
             ++w.stats.rollbacks_with_restore;
         bool confirmed = out.next.good == p->candidate;
-        if (confirmed) {
+        if (std::holds_alternative<RestoreFailed>(event)) {
+            const BuildRecord* c = out.next.find(p->candidate);
+            w.check(out.next.good == p->fallback && (!c || out.next.previous_good == p->candidate),
+                    "a candidate whose restore could not start is dropped");
+        } else if (confirmed) {
             w.check(out.next.previous_good == p->fallback, "confirm keeps the old good as previous_good");
         } else {
             const BuildRecord* c = out.next.find(p->candidate);
@@ -633,6 +652,9 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
     if (std::holds_alternative<ManifestSeen>(event))
         w.check(!restores || std::holds_alternative<Probation>(before.activation),
                 "a revocation restores data only to roll a candidate back");
+    if (std::holds_alternative<RestoreFailed>(event))
+        w.check(!restores && !std::holds_alternative<Restoring>(out.next.operation),
+                "a restore that could not start is given up, not retried");
 
     Step r1 = step(out.next, Resumed{}, ctx);
     Step r2 = step(r1.next, Resumed{}, ctx);
@@ -682,9 +704,10 @@ void open_db(World& world, const BuildRecord& build) {
     world.live = Data{info, world.next_content++};
 }
 
-void apply(Walk& w, World& world, const Effect& e) {
+// False: the effect failed, so the shell runs none after it.
+bool apply(Walk& w, World& world, const Effect& e) {
     if (auto* t = std::get_if<TakeSnapshot>(&e)) {
-        if (!w.check(world.live.has_value(), "snapshot only when there is data")) return;
+        if (!w.check(world.live.has_value(), "snapshot only when there is data")) return true;
         auto it = world.snapshots.find(t->id.stem);
         w.check(it == world.snapshots.end() || it->second.content == world.live->content,
                 "a snapshot name is never reused for different data");
@@ -695,7 +718,7 @@ void apply(Walk& w, World& world, const Effect& e) {
     } else if (auto* sp = std::get_if<Spawn>(&e)) {
         w.check(!world.app, "never two app processes");
         const BuildRecord* r = world.disk.find(sp->build);
-        if (!w.check(r != nullptr, "spawned build has a record")) return;
+        if (!w.check(r != nullptr, "spawned build has a record")) return true;
         if (world.live) {
             Compatibility c = compatibility(r->data_schema, world.live->info);
             w.check(c != Compatibility::Incompatible, "never spawn a build onto data it cannot open");
@@ -708,7 +731,7 @@ void apply(Walk& w, World& world, const Effect& e) {
         }
         if (w.chance(0.03)) {
             world.lease_failed = sp->build;
-            return;
+            return true;
         }
         world.app = sp->build;
         world.app_opened_db = world.app_refused_db = world.app_healthy = world.app_killed = false;
@@ -719,14 +742,19 @@ void apply(Walk& w, World& world, const Effect& e) {
     } else if (auto* rs = std::get_if<RestoreSnapshot>(&e)) {
         w.check(!world.app, "restore only while the app is not running");
         auto from = world.snapshots.find(rs->from.stem);
-        if (!w.check(from != world.snapshots.end(), "restore from a snapshot that exists")) return;
+        if (!w.check(from != world.snapshots.end(), "restore from a snapshot that exists")) return true;
         bool replay = world.live && world.live->content == from->second.content &&
                       world.snapshots.contains(rs->preserve_live_as.stem);
-        if (replay) return;
+        if (replay) return true;
+        if (w.chance(0.05)) {
+            world.restore_failed = true;
+            return false;
+        }
         w.check(!world.snapshots.contains(rs->preserve_live_as.stem), "a restore never overwrites a preserved copy");
         if (world.live) world.snapshots[rs->preserve_live_as.stem] = *world.live;
         world.live = from->second;
     }
+    return true;
 }
 
 
@@ -815,6 +843,7 @@ Event other_event(Walk& w, const World& world, const SupervisorState& s) {
 
 Event next_event(Walk& w, const World& world, const SupervisorState& s) {
     if (world.lease_failed) return BuildCorrupt{*world.lease_failed};
+    if (world.restore_failed) return RestoreFailed{};
     if (world.app && w.chance(0.75)) return app_event(w, world);
     return other_event(w, world, s);
 }
@@ -830,6 +859,7 @@ void feed(Walk& w, World& world, SupervisorState& state, const Event& event, boo
     // kill-on-close job, so an app never outlives the launcher that spawned it.
     if (std::holds_alternative<Resumed>(event)) world.app.reset();
     if (std::holds_alternative<BuildCorrupt>(event)) world.lease_failed.reset();
+    if (std::holds_alternative<RestoreFailed>(event)) world.restore_failed = false;
     if (std::holds_alternative<AppExited>(event) && world.app) {
         if (!world.app_opened_db && w.chance(0.5)) {
             if (const BuildRecord* r = world.disk.find(*world.app)) open_db(world, *r);
@@ -849,7 +879,12 @@ void feed(Walk& w, World& world, SupervisorState& state, const Event& event, boo
     size_t limit = out.effects.size();
     bool kill = allow_kill && limit > 0 && w.chance(0.08);
     if (kill) limit = w.pick(out.effects.size());
-    for (size_t i = 0; i < limit && w.violation.empty(); ++i) apply(w, world, out.effects[i]);
+    bool failed = false;
+    for (size_t i = 0; i < limit && w.violation.empty() && !failed; ++i) failed = !apply(w, world, out.effects[i]);
+    if (failed) {
+        state = world.disk;
+        return;
+    }
     if (!kill) {
         state = out.next;
         w.check(normalized(state) == normalized(world.disk) || !last_commit(out.effects, out.effects.size()),
