@@ -51,6 +51,24 @@ int main() {
         const std::vector<std::wstring> args{L"--data-dir="};
         ok &= Check(!resolve_data_location(inputs(args, false)).location, "an empty --data-dir was accepted");
     }
+    {
+        const std::vector<std::wstring> args{L"--data-dir=E:\\Root\\data", L"--backups-dir=E:\\Root\\backups"};
+        const auto r = resolve_data_location(inputs(args, true));
+        ok &= Check(r.location && r.location->data_dir == fs::path(L"E:\\Root\\data") &&
+                    r.location->backups_dir == fs::path(L"E:\\Root\\backups"),
+                    "--backups-dir did not override the backups directory");
+    }
+    {
+        const std::vector<std::wstring> args{L"--backups-dir=E:\\Elsewhere"};
+        const auto r = resolve_data_location(inputs(args, true));
+        ok &= Check(r.location && r.location->data_dir == fs::path(L"C:\\Users\\u\\AppData\\Local\\Parties\\data") &&
+                    r.location->backups_dir == fs::path(L"E:\\Elsewhere"),
+                    "--backups-dir alone changed the data directory or was ignored");
+    }
+    {
+        const std::vector<std::wstring> args{L"--data-dir=E:\\Root\\data", L"--backups-dir=rel"};
+        ok &= Check(!resolve_data_location(inputs(args, false)).location, "a relative --backups-dir was accepted");
+    }
 
     {
         const auto r = resolve_data_location(inputs(none, true));

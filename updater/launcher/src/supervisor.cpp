@@ -283,7 +283,9 @@ bool Supervisor::spawn(const BuildId& build) {
         queue_.push_back(AppExited{ExitKind::Abnormal});
         return false;
     }
-    std::vector<std::wstring> args{L"--data-dir=" + options_.data.data().wstring(), L"--supervisor-pipe=" + pipe};
+    std::vector<std::wstring> args{L"--data-dir=" + options_.data.data().wstring(),
+                                   L"--backups-dir=" + options_.data.backups().wstring(),
+                                   L"--supervisor-pipe=" + pipe};
     args.insert(args.end(), options_.forwarded.begin(), options_.forwarded.end());
     auto process = AppProcess::spawn(job_, std::move(*lease), args, options_.data.data());
     if (!process) {
