@@ -1,5 +1,6 @@
 #include <client/app.h>
 #include <client/auto_updater.h>
+#include <client/data_location.h>
 #include <client/exit_codes.h>
 #include <client/sqlite_file.h>
 #include <client/win32_single_instance.h>
@@ -347,21 +348,25 @@ int main(int argc, char* argv[]) {
         LOG_WARN("Failed to request 1 ms Windows timer resolution");
     if (!main_priority_set)
         LOG_WARN("Failed to set the main thread to highest priority");
+    const DataLocationResult resolved = resolve_process_data_location();
+    if (!resolved.location)
+        return refuse_to_start(ExitCode::DataUnavailable, {}, resolved.error);
+    const DataLocation& data = *resolved.location;
 #ifdef SENTRY_DSN_VALUE
-    parties::crash_reporter_init(SENTRY_DSN_VALUE, argv[0]);
+    parties::crash_reporter_init(SENTRY_DSN_VALUE, argv[0], data.sentry_dir());
 #else
-    parties::crash_reporter_init(nullptr);
+    parties::crash_reporter_init(nullptr, nullptr, data.sentry_dir());
 #endif
     LOG_INFO("{} Client v{}", parties::APP_NAME, parties::APP_VERSION);
+    LOG_INFO("Data directory: {}", utf8_path(data.data_dir));
     parties::alloctrack::start_reporting(10);
 
     App app;
-    const SettingsPaths data{"parties_client.db", "backups"};
-    const Settings::OpenResult opened = app.open_data(data);
+    const Settings::OpenResult opened = app.open_data(data.settings_paths());
     if (opened.status != Settings::OpenStatus::Ready)
         return refuse_to_start(opened.status == Settings::OpenStatus::TooNew
                                    ? ExitCode::DataTooNew : ExitCode::DataUnavailable,
-                               data.db, opened.reason);
+                               data.db_path(), opened.reason);
 
     // Per-monitor DPI awareness (must be set before creating any windows)
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
