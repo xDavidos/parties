@@ -3,6 +3,9 @@
 // PartiesLauncher.exe's other modes. A copy that carries a payload
 // (setup_payload.h) is PartiesSetup.exe and installs or repairs:
 //   PartiesSetup.exe [--silent] [--no-launch] [--install-root=<abs>] [--data-root=<abs>]
+// Named parties_client.exe, or started with --update-cleanup <old exe> or
+// --update-replace <old exe> by the legacy in-app updater, it is the legacy
+// zip's carrier and installs without asking (legacy_bridge.h).
 // Every copy can uninstall and pack:
 //   PartiesLauncher.exe --uninstall [--silent] [--remove-data] [--install-root=<abs>] [--data-root=<abs>]
 //   PartiesLauncher.exe --pack=<payload dir> --out=<setup exe>
