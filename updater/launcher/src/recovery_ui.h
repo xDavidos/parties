@@ -15,7 +15,11 @@
 namespace parties::update::launcher {
 
 struct StartAgain {};
-struct StartBuild { BuildId build; };
+// restore: the backup the build starts on, when it cannot read the live data.
+struct StartBuild {
+    BuildId build;
+    std::optional<Snapshot> restore;
+};
 struct RetryBuild { BuildId build; };
 struct RestoreBackup { Snapshot snapshot; };
 struct Quit {};
@@ -24,7 +28,8 @@ using RecoveryChoice = std::variant<StartAgain, StartBuild, RetryBuild, RestoreB
 struct RecoveryRequest {
     std::optional<RecoveryReason> why;  // nullopt: opened with --recover
     const SupervisorState& state;
-    std::vector<Backup> backups;
+    std::optional<DataInfo> live_db;  // nullopt: no database
+    std::vector<Backup> backups;      // newest first
     fs::path data_dir;
     std::function<void()> on_shown;  // the dialog is on screen
 };

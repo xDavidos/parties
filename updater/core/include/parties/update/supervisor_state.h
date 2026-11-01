@@ -86,7 +86,7 @@ struct Staged {
 struct Probation {
     BuildId candidate;
     BuildId fallback;
-    std::optional<Snapshot> pre_snapshot;  // live data before the candidate first ran
+    std::optional<Snapshot> pre_snapshot;  // live data before the candidate first ran; nullopt: there was no database
     uint8_t failed_runs = 0;               // runs after health that ended badly or unobserved
     bool restore_on_rollback = false;      // the candidate started on restored data
     friend bool operator==(const Probation&, const Probation&) = default;
@@ -110,7 +110,7 @@ struct Running {
 // Committed before a data restore, so a crash mid-restore resumes the restore
 // and nothing runs on half-restored data.
 struct Restoring {
-    Snapshot from;
+    std::optional<Snapshot> from;  // nullopt: leave no database
     SnapshotId preserve_live_as;
     friend bool operator==(const Restoring&, const Restoring&) = default;
 };

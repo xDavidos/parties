@@ -34,7 +34,7 @@ std::vector<Snapshot> snapshots(const std::vector<Backup>& backups) {
 link::DowngradeOffer wire_offer(const DowngradeOffer& offer, const std::vector<Backup>& backups) {
     link::DowngradeOffer out{offer.entry.version, wire_effect(offer.data_effect), std::nullopt};
     if (offer.data_effect != DataEffect::NeedsRestore) return out;
-    auto point = restore_point(offer.entry, snapshots(backups));
+    auto point = restore_point(offer.entry.data_schema, snapshots(backups));
     auto it = point ? std::ranges::find(backups, point->id, &Backup::id) : backups.end();
     if (it == backups.end()) {
         out.data_effect = link::DowngradeEffect::Impossible;
@@ -198,7 +198,7 @@ JobOutcome UpdateWorker::run(const JobRequest& request) {
         if (pinned && pinned->downgrade) {
             const DowngradeOffer& offer = *pinned->downgrade;
             std::optional<Snapshot> restore;
-            if (offer.data_effect == DataEffect::NeedsRestore) restore = restore_point(offer.entry, snapshots(request.backups));
+            if (offer.data_effect == DataEffect::NeedsRestore) restore = restore_point(offer.entry.data_schema, snapshots(request.backups));
             if (offer.data_effect != DataEffect::NeedsRestore || restore) {
                 if (auto sealed = seal(offer.entry)) {
                     log("downgrading to {}{}", offer.entry.version.to_string(),

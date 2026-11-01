@@ -156,7 +156,7 @@ void write_operation(Writer& w, const Operation& o) {
                 json::key(w, "healthy_uptime_s"); w.Uint(v.healthy_uptime_s);
             } else {
                 write_kind(w, "restoring");
-                write_snapshot(w, "from", v.from);
+                if (v.from) write_snapshot(w, "from", *v.from);
                 json::key(w, "preserve_live_as"); json::str(w, v.preserve_live_as.stem);
             }
         },
@@ -273,7 +273,7 @@ std::optional<Operation> parse_operation(const Value* v) {
         return Running{*build, *healthy, *uptime};
     }
     if (kind == "restoring") {
-        auto from = parse_snapshot(json::object(*v, "from"));
+        auto from = optional_member<Snapshot>(*v, "from", parse_snapshot);
         auto keep = parse_stem(json::string(*v, "preserve_live_as"));
         if (!from || !keep) return std::nullopt;
         return Restoring{*from, *keep};

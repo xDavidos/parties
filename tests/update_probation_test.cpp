@@ -108,7 +108,7 @@ std::string describe(const Effect& e) {
             else if constexpr (std::is_same_v<T, Spawn>) return "Spawn " + x.build.version.to_string();
             else if constexpr (std::is_same_v<T, TerminateApp>) return "TerminateApp";
             else if constexpr (std::is_same_v<T, RestoreSnapshot>)
-                return "RestoreSnapshot " + x.from.stem + " keep " + x.preserve_live_as.stem;
+                return "RestoreSnapshot " + (x.from ? x.from->stem : "nothing") + " keep " + x.preserve_live_as.stem;
             else if constexpr (std::is_same_v<T, DeleteBuild>) return "DeleteBuild " + x.build.version.to_string();
             else if constexpr (std::is_same_v<T, Redownload>) return "Redownload " + x.build.version.to_string();
             else if constexpr (std::is_same_v<T, ShowRecovery>) {
@@ -219,9 +219,19 @@ std::vector<Row> table() {
              return steady_on(s, A) && s.notice && s.notice->preserved &&
                     s.notice->preserved->stem == snap("rolled-back", C, 11);
          }});
-    row({"crash before health, breaking migration, no snapshot", with_op(probation(C), run(C)),
-         AppExited{ExitKind::Abnormal}, kV3, {"Commit", "ShowRecovery DataIncompatible", "SignalBootOk"},
-         [](auto& s) { return steady_on(s, A) && quarantined_for(s, C, FailureReason::CrashedBeforeHealthy); }});
+    row({"crash before health on data the candidate created sets it aside", with_op(probation(C), run(C)),
+         AppExited{ExitKind::Abnormal}, kV3,
+         {"Commit", "RestoreSnapshot nothing keep " + snap("rolled-back", C, 11), "Commit", "Spawn 1.0.0.0"},
+         [](auto& s) {
+             return steady_on(s, A) && quarantined_for(s, C, FailureReason::CrashedBeforeHealthy) && s.notice &&
+                    s.notice->preserved && s.notice->preserved->stem == snap("rolled-back", C, 11);
+         }});
+    row({"second crash after health on data the candidate created sets it aside",
+         with_op(probation(C, std::nullopt, 1), run(C, true)), AppExited{ExitKind::Abnormal}, kV3,
+         {"Commit", "RestoreSnapshot nothing keep " + snap("rolled-back", C, 11), "Commit"},
+         [](auto& s) { return steady_on(s, A) && std::holds_alternative<Idle>(s.operation); }});
+    row({"start after setting the candidate's data aside", with_op(steady(), Restoring{std::nullopt, {"keep"}}),
+         StartRequested{}, kV3, {"RestoreSnapshot nothing keep keep", "Commit", "Commit", "Spawn 1.0.0.0"}});
     row({"init failure", with_op(probation(B, pre_b), run(B)), AppExited{ExitKind::InitFailed}, kV1,
          {"Commit", "Spawn 1.0.0.0"}, [](auto& s) { return quarantined_for(s, B, FailureReason::InitFailed); }});
     row({"hang killed by the deadline", with_op(probation(B, pre_b), run(B)), AppExited{ExitKind::KilledHung}, kV1,
@@ -515,12 +525,13 @@ const Commit* last_commit(const std::vector<Effect>& effects, size_t end) {
     return last;
 }
 
-// A rollback owns the data it hands back, so the fallback can always open it.
-bool starts_fallback(const std::vector<Effect>& effects, const BuildId& build) {
+// When the fallback could open the data from before the candidate, a rollback
+// hands that data back, so the fallback never meets data it cannot open.
+bool starts_fallback(const std::vector<Effect>& effects, const BuildId& build, bool fallback_read_pre_data) {
     return std::ranges::any_of(effects, [&](const Effect& e) {
         auto* s = std::get_if<Spawn>(&e);
         auto* r = std::get_if<ShowRecovery>(&e);
-        return (s && s->build == build) || (r && r->why != RecoveryReason::DataIncompatible);
+        return (s && s->build == build) || (r && (r->why != RecoveryReason::DataIncompatible || !fallback_read_pre_data));
     });
 }
 
@@ -588,6 +599,7 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
     w.check(last ? last->state == out.next : out.next == before, "next is the last committed state");
     uint64_t gen = before.generation;
     const SupervisorState* committed = &before;
+    std::optional<DataInfo> data_after = ctx.live_db;
     for (const Effect& e : fx) {
         if (auto* c = std::get_if<Commit>(&e)) {
             w.check(c->state.generation == ++gen, "each commit advances the generation by one");
@@ -602,8 +614,10 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
             w.check(!rs->preserve_live_as.stem.empty() && rs->preserve_live_as != rs->from,
                     "every restore preserves the live data under its own name");
             auto* r = std::get_if<Restoring>(&committed->operation);
-            w.check(r && r->from.id == rs->from && r->preserve_live_as == rs->preserve_live_as,
+            auto committed_from = r && r->from ? std::optional(r->from->id) : std::nullopt;
+            w.check(r && committed_from == rs->from && r->preserve_live_as == rs->preserve_live_as,
                     "every restore is committed as Restoring first");
+            if (r) data_after = r->from ? std::optional(r->from->data) : std::nullopt;
         } else if (auto* d = std::get_if<DeleteBuild>(&e)) {
             const SupervisorState& s = *committed;
             bool protected_build = d->build == s.good || (s.previous_good && d->build == *s.previous_good);
@@ -634,12 +648,16 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
             auto* exit = std::get_if<AppExited>(&event);
             bool startup_failure = exit && run && !run->healthy && exit->kind != ExitKind::Clean &&
                                    exit->kind != ExitKind::DataUnavailable;
+            const BuildRecord* fb = out.next.find(p->fallback);
+            const bool read_pre = !p->pre_snapshot || (fb && compatibility(fb->data_schema, p->pre_snapshot->data) !=
+                                                                 Compatibility::Incompatible);
             if (startup_failure || std::holds_alternative<UserRollback>(event))
-                w.check(starts_fallback(fx, p->fallback), "a startup failure starts the fallback at once");
-            Step resumed = step(out.next, Resumed{}, ctx);
-            Step start = step(resumed.next, StartRequested{}, ctx);
+                w.check(starts_fallback(fx, p->fallback, read_pre), "a startup failure starts the fallback at once");
+            const Context after{data_after, ctx.policy};
+            Step resumed = step(out.next, Resumed{}, after);
+            Step start = step(resumed.next, StartRequested{}, after);
             if (!std::holds_alternative<Running>(resumed.next.operation))
-                w.check(starts_fallback(start.effects, p->fallback), "after a rollback the next start runs the fallback");
+                w.check(starts_fallback(start.effects, p->fallback, read_pre), "after a rollback the next start runs the fallback");
         }
     }
 
@@ -743,10 +761,15 @@ bool apply(Walk& w, World& world, const Effect& e) {
         world.app_killed = true;
     } else if (auto* rs = std::get_if<RestoreSnapshot>(&e)) {
         w.check(!world.app, "restore only while the app is not running");
-        auto from = world.snapshots.find(rs->from.stem);
-        if (!w.check(from != world.snapshots.end(), "restore from a snapshot that exists")) return true;
-        bool replay = world.live && world.live->content == from->second.content &&
-                      world.snapshots.contains(rs->preserve_live_as.stem);
+        std::optional<Data> target;
+        if (rs->from) {
+            auto from = world.snapshots.find(rs->from->stem);
+            if (!w.check(from != world.snapshots.end(), "restore from a snapshot that exists")) return true;
+            target = from->second;
+        }
+        bool replay = target ? world.live && world.live->content == target->content &&
+                                   world.snapshots.contains(rs->preserve_live_as.stem)
+                             : !world.live;
         if (replay) return true;
         if (w.chance(0.05)) {
             world.restore_failed = true;
@@ -754,7 +777,7 @@ bool apply(Walk& w, World& world, const Effect& e) {
         }
         w.check(!world.snapshots.contains(rs->preserve_live_as.stem), "a restore never overwrites a preserved copy");
         if (world.live) world.snapshots[rs->preserve_live_as.stem] = *world.live;
-        world.live = from->second;
+        world.live = target;
     }
     return true;
 }

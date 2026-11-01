@@ -237,9 +237,9 @@ bool test_restore_point() {
     std::vector<Snapshot> newest_first{{{"rolled-back-x"}, DataInfo{3, 3}},
                                        {{"pre-b"}, DataInfo{2, 1}},
                                        {{"pre-a"}, DataInfo{1, 1}}};
-    auto chosen = restore_point(old, newest_first);
+    auto chosen = restore_point(old.data_schema, newest_first);
     if (!chosen || chosen->id.stem != "pre-b") return fail("the newest backup the build can open is restored");
-    if (restore_point(old, std::span(newest_first).first(1))) return fail("no backup the build can open means none");
+    if (restore_point(old.data_schema, std::span(newest_first).first(1))) return fail("no backup the build can open means none");
     return true;
 }
 

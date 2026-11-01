@@ -256,8 +256,8 @@ LoadResult drop_unfinishable_restore(LoadResult loaded, const DataGuard& data, c
                                      StateStore& store) {
     auto* state = std::get_if<SupervisorState>(&loaded);
     auto* restoring = state ? std::get_if<Restoring>(&state->operation) : nullptr;
-    if (!restoring || data.intact(restoring->from.id)) return loaded;
-    log("the backup {} that a restore needs is missing or damaged; leaving the data as it is", restoring->from.id.stem);
+    if (!restoring || !restoring->from || data.intact(restoring->from->id)) return loaded;
+    log("the backup {} that a restore needs is missing or damaged; leaving the data as it is", restoring->from->id.stem);
     Step step_out = step(*state, RestoreFailed{}, {});
     std::string error;
     for (const Effect& effect : step_out.effects) {

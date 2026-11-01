@@ -43,9 +43,11 @@ public:
     bool snapshot(const SnapshotId& id, std::string& error) const;
 
     // Keeps the live database (with its WAL) as backups\<preserve_live_as>.db,
-    // then puts backups\<from>.db in its place. Done when the live database
-    // already has from's content.
-    std::expected<void, RestoreError> restore(const SnapshotId& from, const SnapshotId& preserve_live_as) const;
+    // then puts backups\<from>.db in its place, or leaves no database when
+    // `from` is nullopt. Done when the live database already has from's
+    // content, or is gone.
+    std::expected<void, RestoreError> restore(const std::optional<SnapshotId>& from,
+                                              const SnapshotId& preserve_live_as) const;
 
     // The backup exists and passes an integrity check.
     bool intact(const SnapshotId& id) const;

@@ -586,7 +586,7 @@ void Supervisor::show_pending_recovery() {
     PendingRecovery pending = *recovery_;
     recovery_.reset();
     RecoveryChoice choice = show_recovery(
-        {pending.why, state_, data_.list(), options_.data.data(), [this] { signal_boot_ok(); }});
+        {pending.why, state_, live_db(), data_.list(), options_.data.data(), [this] { signal_boot_ok(); }});
     if (std::holds_alternative<Quit>(choice)) {
         quit_ = true;
         return;
