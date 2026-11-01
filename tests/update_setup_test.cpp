@@ -343,6 +343,11 @@ public:
 
 struct Link {
     std::wstring target, arguments, aumid;
+    // A link reads back the long spelling of a target saved under its 8.3 name.
+    bool targets(const fs::path& file) const {
+        std::error_code ec;
+        return fs::equivalent(target, file, ec);
+    }
 };
 
 std::optional<Link> read_link(const fs::path& file, bool resolve = false) {
@@ -519,10 +524,10 @@ void fresh_install() {
     check(w.reg_string(L"UninstallString") == expected_uninstall(w, a), "UninstallString runs good's launcher");
     auto main = read_link(w.start_menu / "Parties.lnk");
     auto recovery = read_link(w.start_menu / "Parties Recovery.lnk");
-    check(main && fs::path(main->target) == w.install / kStubFile && main->arguments.empty() &&
+    check(main && main->targets(w.install / kStubFile) && main->arguments.empty() &&
               main->aumid == kAppUserModelId,
           "the Parties shortcut starts the stub with the app's AppUserModelID");
-    check(recovery && fs::path(recovery->target) == w.install / kStubFile && recovery->arguments == L"--recover" &&
+    check(recovery && recovery->targets(w.install / kStubFile) && recovery->arguments == L"--recover" &&
               recovery->aumid == kAppUserModelId,
           "the Parties Recovery shortcut starts the stub with --recover");
     check(fs::exists(w.install / "state" / "boot-record.json"), "the app was started through the stub");
@@ -704,7 +709,7 @@ void pin_survives_gc() {
     check(w.start_via(w.install / kStubFile) == 0u, "one more start collects garbage");
     check(!fs::exists(w.install / "builds" / a.id().dir_name()), "the build the pin was made from is deleted");
     auto resolved = read_link(pin, true);
-    check(resolved && fs::path(resolved->target) == w.install / kStubFile, "the pin still resolves to the stub");
+    check(resolved && resolved->targets(w.install / kStubFile), "the pin still resolves to the stub");
     const long long runs_before = markers(w, "3.0.0.0");
     if (resolved) check(w.start_via(resolved->target) == 0u, "starting the pin exits 0");
     check(markers(w, "3.0.0.0") == runs_before + 1, "the pin started the current good build");
