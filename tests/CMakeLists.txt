@@ -418,7 +418,7 @@ if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
     if(TARGET parties_client)
         add_test(NAME update_e2e_smoke COMMAND update_e2e_test ${update_e2e_args}
             --real-client $<TARGET_FILE:parties_client>)
-        set_tests_properties(update_e2e_smoke PROPERTIES TIMEOUT 300)
+        set_tests_properties(update_e2e_smoke PROPERTIES TIMEOUT 300 LABELS gpu)
     endif()
 
     add_executable(update_setup_test update_setup_test.cpp)
@@ -436,11 +436,11 @@ if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
         add_test(NAME update_bridge_no_updater COMMAND update_setup_test --no-updater-in $<TARGET_FILE:parties_client>)
         add_test(NAME update_bridge_smoke COMMAND update_setup_test ${update_setup_args}
             --real-client $<TARGET_FILE:parties_client> --only bridge-)
-        set_tests_properties(update_bridge_smoke PROPERTIES TIMEOUT 300)
+        set_tests_properties(update_bridge_smoke PROPERTIES TIMEOUT 300 LABELS gpu)
     endif()
     if(TARGET parties_client)
         add_test(NAME update_e2e_setup_smoke COMMAND update_setup_test ${update_setup_args}
             --real-client $<TARGET_FILE:parties_client>)
-        set_tests_properties(update_e2e_setup_smoke PROPERTIES TIMEOUT 300)
+        set_tests_properties(update_e2e_setup_smoke PROPERTIES TIMEOUT 300 LABELS gpu)
     endif()
 endif()

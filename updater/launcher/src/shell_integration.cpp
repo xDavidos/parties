@@ -78,8 +78,10 @@ fs::path expand(const std::wstring& text) {
 
 std::wstring widen(std::string_view s) { return fs::path(std::u8string(s.begin(), s.end())).wstring(); }
 
+// A shortcut reads back the long spelling of a target saved under its 8.3 name.
 bool same_path(const fs::path& a, const fs::path& b) {
-    return _wcsicmp(a.lexically_normal().c_str(), b.lexically_normal().c_str()) == 0;
+    std::error_code ec;
+    return fs::equivalent(a, b, ec) || _wcsicmp(a.lexically_normal().c_str(), b.lexically_normal().c_str()) == 0;
 }
 
 struct RegValue {
