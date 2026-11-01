@@ -414,7 +414,8 @@ struct RunResult {
 
 RunResult run_launcher(World& w, const std::map<std::string, std::string>& extra_env,
                        const std::vector<std::wstring>& forwarded = {}, DWORD timeout_ms = 60000,
-                       const fs::path& launcher = {}, const std::function<bool()>& kill_when = {}) {
+                       const fs::path& launcher = {}, const std::function<bool()>& kill_when = {},
+                       const std::wstring& launcher_flags = {}) {
     w.log_mark = read_file(w.log_file()).value_or("").size();
     std::map<std::wstring, std::wstring> env;
     for (wchar_t* block = GetEnvironmentStringsW(), *p = block; *p; p += wcslen(p) + 1) {
@@ -436,7 +437,7 @@ RunResult run_launcher(World& w, const std::map<std::string, std::string>& extra
                        (w.server ? L"\" \"--feed-base=" + w.server->base() : L"\" \"--feed-dir=" + w.source.wstring()) +
                        L"\" --boot-session=42 --boot-ok-event=" +
                        std::to_wstring(reinterpret_cast<uintptr_t>(boot_ok)) +
-                       L" --test-namespace=PartiesE2E" + std::to_wstring(GetCurrentProcessId()) + L" --";
+                       L" --test-namespace=PartiesE2E" + std::to_wstring(GetCurrentProcessId()) + launcher_flags + L" --";
     for (const std::wstring& f : forwarded) cmd += L" " + f;
     STARTUPINFOW si{sizeof si};
     PROCESS_INFORMATION pi{};
@@ -570,6 +571,7 @@ struct Scenario {
     bool http = false;                             // the feed comes from FeedServer
     bool kill_points = true;
     std::map<std::string, std::string> env{};      // overrides the launcher's environment
+    std::wstring launcher_flags{};                 // before "--", e.g. " --recover"
 };
 
 enum class Outcome { Converged, KillNotReached, Failed };
@@ -594,7 +596,7 @@ Outcome run_scenario(const Scenario& sc, std::optional<int> kill_at) {
             run_env["PARTIES_KILL_AT"] = std::to_string(*kill_at);
             run_env["PARTIES_KILL_COUNTER"] = w.counter.string();
         }
-        RunResult r = run_launcher(w, run_env);
+        RunResult r = run_launcher(w, run_env, {}, 60000, {}, {}, sc.launcher_flags);
         if (g_verbose) std::cout << "--- " << label << " run " << run << " exit " << r.exit_code << "\n" << w.last_run_log();
         if (r.timed_out) {
             fail(label, "the launcher did not exit within 60 s");
@@ -707,6 +709,71 @@ std::vector<Scenario> scenarios() {
                            fail(label, "the notice does not give the preserved copy relative to the data root");
                        if (!find_backup(w, "pre-")) fail(label, "no pre-candidate snapshot");
                    }});
+
+    // Setup staged B before A ever opened the data, so B starts with no database and no
+    // pre-candidate snapshot. B creates its own database, whose floor A cannot read, and
+    // crashes. The rollback sets B's database aside so A starts on fresh data.
+    out.push_back({"fresh-data-then-crash", "migrate-then-crash", 3, 3, true,
+                   [](World& w) {
+                       // Stopped right after B is staged, as the setup of a newer version leaves it.
+                       run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"},
+                                        {"PARTIES_KILL_AT", "6"}});
+                       if (!w.state() || !staged(*w.state(), w.b)) fail(w.name, "B was not staged");
+                       std::error_code ec;
+                       for (const char* suffix : {"", "-wal", "-shm"})
+                           fs::remove(fs::path(w.db().wstring() + widen(suffix)), ec);
+                       fs::remove_all(w.backups(), ec);
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && rolled_back_to_a(w, *s, FailureReason::CrashedBeforeHealthy) &&
+                              markers(w.db(), "1.0.0.0") >= 1;
+                   },
+                   [](const World& w, const std::string& label) {
+                       auto s = w.state();
+                       Db live(w.db());
+                       if (live.scalar("SELECT version FROM parties_schema") != 1)
+                           fail(label, "A does not run on a database of its own schema");
+                       if (markers(w.db(), "2.0.0.0") != 0) fail(label, "B's rows are in the live database");
+                       auto preserved = find_backup(w, "rolled-back-");
+                       if (!preserved) return fail(label, "B's database was not kept");
+                       if (!s->notice || !s->notice->preserved || preserved->stem().string() != s->notice->preserved->stem)
+                           fail(label, "the notice does not name the kept copy");
+                       Db kept(*preserved);
+                       if (kept.scalar("SELECT compat_floor FROM parties_schema") != 3 ||
+                           kept.scalar("SELECT count(*) FROM markers WHERE build = '2.0.0.0'") < 1)
+                           fail(label, "the kept copy is not B's database");
+                       if (w.full_log().find("recovery shown") != std::string::npos)
+                           fail(label, "recovery was shown after an automatic rollback");
+                   }});
+
+    // B (schema 3, floor 3) is proven, so A cannot read the live data. Recovery's "Start the
+    // previous version" starts A on the newest backup A can open, keeping B's database.
+    out.push_back({"recovery-start-previous", "", 3, 3, true,
+                   [](World& w) {
+                       for (int i = 0; i < 6 && !good_is_b(w); ++i)
+                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
+                       if (!good_is_b(w)) fail(w.name, "B did not become good");
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && settled(*s) && std::holds_alternative<Steady>(s->activation) &&
+                              s->good == w.a.entry.id() && Db(w.db()).scalar("SELECT version FROM parties_schema") == 1;
+                   },
+                   [](const World& w, const std::string& label) {
+                       if (markers(w.db(), "2.0.0.0") != 0) fail(label, "B's rows are in the restored database");
+                       if (label.find("kill@") == std::string::npos && markers(w.db(), "1.0.0.0") < 2)
+                           fail(label, "A did not start on the restored data");
+                       auto kept = find_backup(w, "pre-rollback-");
+                       if (!kept) return fail(label, "B's database was not kept");
+                       Db copy(*kept);
+                       if (copy.scalar("SELECT compat_floor FROM parties_schema") != 3 ||
+                           copy.scalar("SELECT count(*) FROM markers WHERE build = '2.0.0.0'") < 1)
+                           fail(label, "the kept copy is not B's database");
+                       if (w.full_log().find("recovery shown: data_incompatible") != std::string::npos)
+                           fail(label, "Start the previous version ended in Recovery");
+                   },
+                   false, true, {{"PARTIES_TEST_RECOVERY", "previous"}}, L" --recover"});
 
     out.push_back({"exit-data-unavailable", "exit-data-unavailable", 1, 1, true, nullptr,
                    [](const World& w) {

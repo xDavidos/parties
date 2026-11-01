@@ -515,10 +515,12 @@ const Commit* last_commit(const std::vector<Effect>& effects, size_t end) {
     return last;
 }
 
-bool has_spawn_or_recovery(const std::vector<Effect>& effects, const BuildId& build) {
+// A rollback owns the data it hands back, so the fallback can always open it.
+bool starts_fallback(const std::vector<Effect>& effects, const BuildId& build) {
     return std::ranges::any_of(effects, [&](const Effect& e) {
         auto* s = std::get_if<Spawn>(&e);
-        return (s && s->build == build) || std::holds_alternative<ShowRecovery>(e);
+        auto* r = std::get_if<ShowRecovery>(&e);
+        return (s && s->build == build) || (r && r->why != RecoveryReason::DataIncompatible);
     });
 }
 
@@ -633,11 +635,11 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
             bool startup_failure = exit && run && !run->healthy && exit->kind != ExitKind::Clean &&
                                    exit->kind != ExitKind::DataUnavailable;
             if (startup_failure || std::holds_alternative<UserRollback>(event))
-                w.check(has_spawn_or_recovery(fx, p->fallback), "a startup failure starts the fallback at once");
+                w.check(starts_fallback(fx, p->fallback), "a startup failure starts the fallback at once");
             Step resumed = step(out.next, Resumed{}, ctx);
             Step start = step(resumed.next, StartRequested{}, ctx);
             if (!std::holds_alternative<Running>(resumed.next.operation))
-                w.check(has_spawn_or_recovery(start.effects, p->fallback), "after a rollback the next start runs the fallback");
+                w.check(starts_fallback(start.effects, p->fallback), "after a rollback the next start runs the fallback");
         }
     }
 
