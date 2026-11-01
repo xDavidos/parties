@@ -21,14 +21,6 @@ namespace {
 constexpr int kTimeoutMs = 30000;
 constexpr DWORD kChunk = 64 * 1024;
 
-std::wstring widen(std::string_view s) {
-    if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
-
 std::string error_text(const char* what) { return std::string(what) + ": " + last_error_text(); }
 
 struct Url {

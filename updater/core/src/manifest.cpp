@@ -15,12 +15,6 @@ namespace {
 constexpr std::string_view kSigningDomain{"parties-update-manifest-v1\0", 27};
 constexpr uint32_t kPayloadSchema = 1;
 
-Sha256 sha256_of(std::span<const uint8_t> bytes) {
-    std::string hex = parties::sha256_hex(bytes.data(), bytes.size());
-    std::erase(hex, ':');
-    return *Sha256::from_hex(hex);
-}
-
 std::string lower(std::string_view s) {
     std::string out(s);
     for (char& c : out) c = char(std::tolower(static_cast<unsigned char>(c)));
@@ -201,6 +195,12 @@ std::expected<ManifestPayload, ManifestError> parse_payload(std::string_view tex
 const FileEntry* BuildEntry::file(std::string_view name) const {
     auto it = std::ranges::find(files, name, &FileEntry::name);
     return it == files.end() ? nullptr : &*it;
+}
+
+Sha256 sha256_of(std::span<const uint8_t> bytes) {
+    std::string hex = parties::sha256_hex(bytes.data(), bytes.size());
+    std::erase(hex, ':');
+    return *Sha256::from_hex(hex);
 }
 
 Sha256 build_digest(std::span<const FileEntry> files) {

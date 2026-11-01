@@ -74,8 +74,6 @@ fs::path expand(const std::wstring& text) {
     return n > 0 && n <= 32768 ? fs::path(std::wstring(expanded)) : fs::path(text);
 }
 
-std::wstring widen(std::string_view s) { return fs::path(std::u8string(s.begin(), s.end())).wstring(); }
-
 // A shortcut reads back the long spelling of a target saved under its 8.3 name.
 bool same_path(const fs::path& a, const fs::path& b) {
     std::error_code ec;

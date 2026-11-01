@@ -16,9 +16,23 @@ std::string utf8(const fs::path& path) {
     return {reinterpret_cast<const char*>(u8.data()), u8.size()};
 }
 
+std::wstring widen(std::string_view s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
 std::string last_error_text() {
     DWORD code = GetLastError();
     return std::system_category().message(static_cast<int>(code)) + " (" + std::to_string(code) + ")";
+}
+
+fs::path self_exe() {
+    std::wstring buffer(32768, L'\0');
+    buffer.resize(GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size())));
+    return buffer;
 }
 
 namespace {

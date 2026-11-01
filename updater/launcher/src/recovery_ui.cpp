@@ -1,5 +1,6 @@
 #include "recovery_ui.h"
 
+#include "file_io.h"
 #include "log.h"
 #include "testing.h"
 
@@ -26,14 +27,6 @@ constexpr int kStartPrevious = 101;
 constexpr int kRestore = 102;
 constexpr int kOpenFolder = 103;
 constexpr int kRetryBase = 200;
-
-std::wstring widen(std::string_view s) {
-    if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
 
 std::wstring version_text(const BuildId& id) { return widen(id.version.to_string()); }
 

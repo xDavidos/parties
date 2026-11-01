@@ -14,7 +14,11 @@ namespace parties::update::launcher {
 namespace fs = std::filesystem;
 
 std::string utf8(const fs::path& path);
+// Invalid UTF-8 becomes U+FFFD instead of throwing: last_error_text() is in the ANSI code page.
+std::wstring widen(std::string_view s);
 std::string last_error_text();
+
+fs::path self_exe();
 
 std::optional<std::string> read_file(const fs::path& path);
 

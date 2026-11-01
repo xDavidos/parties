@@ -11,11 +11,11 @@ namespace parties::update {
 
 namespace {
 
+using json::Names;
+using json::name_of;
+using json::value_of;
 using json::Value;
 using json::Writer;
-
-template <class E, size_t N>
-using Names = std::array<std::pair<E, std::string_view>, N>;
 
 constexpr Names<FailureReason, 10> kReasons{{
     {FailureReason::CrashedBeforeHealthy, "crashed_before_healthy"},
@@ -36,19 +36,6 @@ constexpr Names<Notice::Kind, 4> kNoticeKinds{{
     {Notice::Kind::Withdrawn, "withdrawn"},
     {Notice::Kind::RestoreFailed, "restore_failed"},
 }};
-
-template <class E, size_t N>
-std::string_view name_of(const Names<E, N>& names, E value) {
-    return std::ranges::find(names, value, &std::pair<E, std::string_view>::first)->second;
-}
-
-template <class E, size_t N>
-std::optional<E> value_of(const Names<E, N>& names, std::optional<std::string_view> text) {
-    if (!text) return std::nullopt;
-    auto it = std::ranges::find(names, *text, &std::pair<E, std::string_view>::second);
-    if (it == names.end()) return std::nullopt;
-    return it->first;
-}
 
 bool is_safe_stem(std::string_view stem) {
     if (stem.empty() || stem.size() > 200 || stem.front() == '.' || stem.find("..") != std::string_view::npos)
