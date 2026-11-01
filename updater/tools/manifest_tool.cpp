@@ -197,15 +197,15 @@ Keyring pinned_keyring(const Args& args) {
     return production_keyring();
 }
 
-Channel channel_arg(const Args& args, const std::string& flag = "--channel") {
-    auto c = parse_channel(args.one(flag));
-    if (!c) throw UsageError{flag + " must be stable or beta"};
+Channel channel_arg(const Args& args) {
+    auto c = parse_channel(args.one("--channel"));
+    if (!c) throw UsageError{"--channel must be stable or beta"};
     return *c;
 }
 
-Version version_arg(const Args& args, const std::string& flag = "--version") {
-    auto v = Version::parse(args.one(flag));
-    if (!v) throw UsageError{flag + " must be A.B.C.D"};
+Version version_arg(const Args& args) {
+    auto v = Version::parse(args.one("--version"));
+    if (!v) throw UsageError{"--version must be A.B.C.D"};
     return *v;
 }
 

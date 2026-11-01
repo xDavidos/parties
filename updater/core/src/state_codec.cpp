@@ -223,7 +223,6 @@ std::optional<Verdict> parse_verdict(const Value* v) {
 }
 
 std::optional<BuildRecord> parse_record(const Value& v) {
-    BuildRecord r;
     auto id = id_at(v, "id");
     auto schema = json::u32(v, "data_schema");
     auto floor = json::u32(v, "data_compat_floor");

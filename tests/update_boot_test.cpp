@@ -144,7 +144,6 @@ bool test_new_launcher_lifecycle() {
     ok &= expect_runs(d3, kOld, "second failure falls back in the same stub run");
     auto* h = find(d3.next_record, kNew);
     if (!h || h->failed_boots != 2) ok &= fail("failures were not persisted");
-    // The old launcher session ends cleanly; the next start still avoids the broken one.
     auto d4 = choose(contract(), d3.next_record, SessionReport{d3.next_record.last_session, kOld.sha256, true});
     ok &= expect_runs(d4, kOld, "the broken launcher stays skipped");
     if (record_boot_failure(BootRecord{}) != BootRecord{}) ok &= fail("failure without an attempt changed the record");

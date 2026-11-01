@@ -120,7 +120,6 @@ bool has_wal_content(const fs::path& db) {
     return fs::exists(wal, ec) && fs::file_size(wal, ec) > 0;
 }
 
-// VACUUM INTO a partial file, integrity_check it, flush, rename into place.
 bool consistent_copy(const fs::path& source, const fs::path& dest, std::string& error) {
     const fs::path partial = client::partial_path(dest);
     std::error_code ec;

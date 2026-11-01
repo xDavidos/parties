@@ -159,7 +159,6 @@ bool test_downgrade_offers() {
     auto none = std::get<StayPinned>(plan_channel_switch(installed(k161), manifest(Channel::Stable, {}), kProtocol, kData3));
     if (none.downgrade) ok &= fail("an empty channel offers nothing");
 
-    // Following a channel that is older than the install offers, never stages.
     auto offer = plan_update(installed(k161), manifest(Channel::Stable, {k152}), kProtocol, kData3Floor3);
     auto* o = as<OfferDowngrade>(offer);
     if (!o || o->offer.data_effect != DataEffect::NeedsRestore) ok &= fail("an older channel is only an offer");

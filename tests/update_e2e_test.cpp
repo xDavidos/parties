@@ -519,12 +519,18 @@ bool staged(const SupervisorState& s, const Release& r) {
     return st && st->build == r.entry.id();
 }
 
-
 bool settled(const SupervisorState& s) { return std::holds_alternative<Idle>(s.operation); }
 
 bool good_is_b(const World& w) {
     auto s = w.state();
     return s && settled(*s) && s->good == w.b.entry.id();
+}
+
+void prove_b(World& w) {
+    for (int i = 0; i < 6 && !good_is_b(w); ++i)
+        run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
+    auto s = w.state();
+    if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
 }
 
 bool rolled_back_to_a(const World& w, const SupervisorState& s, FailureReason reason) {
@@ -884,17 +890,11 @@ std::vector<Scenario> scenarios() {
                    },
                    true, false});
 
-    // ADV2: B is proven (A is previous_good), then B is revoked the way revoke.yml does it:
+    // B is proven (A is previous_good), then B is revoked the way revoke.yml does it:
     // B dropped from builds and listed in revoked[]. The newest build left is A.
     out.push_back({"adv-revoked-to-previous", "", 1, 1, true,
                    [](World& w) {
-                       for (int i = 0; i < 6; ++i) {
-                           auto s = w.state();
-                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
-                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
-                       }
-                       auto s = w.state();
-                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       prove_b(w);
                        publish(w.source, {&w.a}, 3, {.revoked = {w.b.entry.version}});
                    },
                    [](const World& w) {
@@ -912,13 +912,7 @@ std::vector<Scenario> scenarios() {
     // restore a backup: Parties keeps B and offers the move instead of making it.
     out.push_back({"adv-revoked-needs-restore", "", 3, 3, true,
                    [](World& w) {
-                       for (int i = 0; i < 6; ++i) {
-                           auto s = w.state();
-                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
-                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
-                       }
-                       auto s = w.state();
-                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       prove_b(w);
                        publish(w.source, {&w.a}, 3, {.revoked = {w.b.entry.version}});
                    },
                    [](const World& w) {
@@ -962,14 +956,14 @@ std::vector<Scenario> scenarios() {
                    [](World& w) {
                        // Ends session 1 right after B is staged (before the restart's AppExited commit),
                        // standing in for a user who closes the app without clicking "Restart to update".
-                       char* kat = nullptr; size_t kn = 0; _dupenv_s(&kat, &kn, "ADV_KILL_AT");
-                       std::string kill_at = kat ? kat : "6"; std::free(kat);
                        run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"},
-                                        {"PARTIES_KILL_AT", kill_at}});
+                                        {"PARTIES_KILL_AT", "6"}});
                        auto s = w.state();
                        auto* st = s ? std::get_if<Staged>(&s->activation) : nullptr;
-                       if (!st || st->build != w.b.entry.id()) fail(w.name, "B was not staged: " + read_file(w.install_root / "state" / "supervisor.json").value_or("") + "\nLOG:\n" + w.last_run_log());
-                       std::cout << "staged B before revocation: " << (st ? "yes" : "no") << "\n";
+                       if (!st || st->build != w.b.entry.id())
+                           fail(w.name, "B was not staged: " +
+                                            read_file(w.install_root / "state" / "supervisor.json").value_or("") +
+                                            "\nLOG:\n" + w.last_run_log());
                        publish(w.source, {&w.a}, 3, {.revoked = {w.b.entry.version}});
                    },
                    [](const World& w) {
@@ -978,8 +972,6 @@ std::vector<Scenario> scenarios() {
                    },
                    [](const World& w, const std::string& label) {
                        auto s = w.state();
-                       std::cout << "good after revocation: " << s->good.version.to_string()
-                                 << ", runs of revoked 2.0.0.0: " << markers(w.db(), "2.0.0.0") << "\n";
                        if (s->good == w.b.entry.id()) fail(label, "the revoked build B became good");
                        if (markers(w.db(), "2.0.0.0") > 1) fail(label, "the revoked build B was started again");
                        const BuildRecord* b = record(*s, w.b);
@@ -988,18 +980,11 @@ std::vector<Scenario> scenarios() {
                    },
                    false, false});
 
-    // B (schema 3) is good; the user switches to a Beta that only has A (schema 1).
-    // ADV2: B is good on Stable. The app switches to Beta (only A, older), takes "switch now",
+    // B is good on Stable. The app switches to Beta (only A, older), takes "switch now",
     // then immediately picks Stable again. The user's last choice is Stable, keep B.
     out.push_back({"adv-downgrade-then-stable", "downgrade-then-stable", 1, 1, true,
                    [](World& w) {
-                       for (int i = 0; i < 6; ++i) {
-                           auto s = w.state();
-                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
-                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
-                       }
-                       auto s = w.state();
-                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       prove_b(w);
                        publish(w.source, {&w.a}, 1, {.channel = Channel::Beta});
                    },
                    [](const World& w) {
@@ -1008,9 +993,6 @@ std::vector<Scenario> scenarios() {
                    },
                    [](const World& w, const std::string& label) {
                        auto s = w.state();
-                       std::cout << "last choice sent: stable/wait; final state channel "
-                                 << channel_name(s->channel) << ", good " << s->good.version.to_string()
-                                 << ", runs of A after the switch: " << markers(w.db(), "1.0.0.0") << std::endl;
                        if (s->channel != Channel::Stable) fail(label, "the channel is not the user's last choice");
                        if (s->good != w.b.entry.id() || !std::holds_alternative<Steady>(s->activation))
                            fail(label, "a downgrade the user withdrew was applied");
@@ -1019,13 +1001,7 @@ std::vector<Scenario> scenarios() {
 
     out.push_back({"downgrade-now", "wait-then-downgrade", 3, 3, true,
                    [](World& w) {
-                       for (int i = 0; i < 6; ++i) {
-                           auto s = w.state();
-                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
-                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
-                       }
-                       auto s = w.state();
-                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       prove_b(w);
                        publish(w.source, {&w.a}, 1, {.channel = Channel::Beta});
                    },
                    [](const World& w) {
@@ -1271,7 +1247,8 @@ int main(int argc, char** argv) {
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 2;
     if (g_launcher.empty() || g_fake_app.empty() || g_manifest_tool.empty()) {
-        std::cerr << "usage: update_e2e_test --launcher <exe> --fake-app <exe> [--only <name>] [--no-kill]\n";
+        std::cerr << "usage: update_e2e_test --launcher <exe> --fake-app <exe> --manifest-tool <exe> [--only <name>] "
+                     "[--no-kill]\n";
         return 2;
     }
     if (real_client) return smoke_real_client(*real_client);

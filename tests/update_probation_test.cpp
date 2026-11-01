@@ -54,7 +54,6 @@ BuildRecord with_verdict(BuildRecord r, Verdict v) {
     return r;
 }
 
-
 SupervisorState steady(const BuildRecord& good = A) {
     SupervisorState s = initial_state(good, Channel::Stable);
     s.generation = 10;
@@ -97,7 +96,6 @@ SupervisorState revoked(SupervisorState s, const BuildRecord& b, Channel channel
     s.revoked.of(channel).push_back(b.id.version);
     return s;
 }
-
 
 std::string describe(const Effect& e) {
     return std::visit(
@@ -567,7 +565,6 @@ bool retriable(const Event& e) {
            !std::holds_alternative<ConfirmTimerElapsed>(e);
 }
 
-
 void check_state(Walk& w, const SupervisorState& s) {
     const BuildRecord* good = s.find(s.good);
     w.check(good && std::holds_alternative<Proven>(good->verdict), "good is a proven record");
@@ -591,7 +588,6 @@ void check_state(Walk& w, const SupervisorState& s) {
     }
     if (auto* r = std::get_if<Running>(&s.operation)) w.check(s.find(r->build) != nullptr, "running build has a record");
 }
-
 
 void check_step(Walk& w, const SupervisorState& before, const Event& event, const Context& ctx, const Step& out) {
     const auto& fx = out.effects;
@@ -710,7 +706,6 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
     }
 }
 
-
 void open_db(World& world, const BuildRecord& build) {
     world.app_opened_db = true;
     Compatibility c = world.live ? compatibility(build.data_schema, world.live->info) : Compatibility::MigratesForward;
@@ -781,7 +776,6 @@ bool apply(Walk& w, World& world, const Effect& e) {
     }
     return true;
 }
-
 
 std::optional<Snapshot> random_snapshot(Walk& w, const World& world) {
     if (world.snapshots.empty() || w.chance(0.3)) return std::nullopt;

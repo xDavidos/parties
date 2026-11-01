@@ -471,7 +471,6 @@ void Supervisor::submit(Job job) {
     pump();
 }
 
-// Setup and uninstall end the launcher through here as well.
 void Supervisor::cancel_jobs() {
     jobs_.clear();
     worker_.cancel();

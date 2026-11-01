@@ -126,7 +126,7 @@ std::optional<Snapshot> choose_backup(const RecoveryRequest& r) {
     return Snapshot{r.backups[index].id, r.backups[index].data};
 }
 
-std::optional<RecoveryChoice> scripted(const RecoveryRequest& r, const std::string& answer) {
+RecoveryChoice scripted(const RecoveryRequest& r, const std::string& answer) {
     if (answer == "quit") return Quit{};
     if (answer == "start") return StartAgain{};
     if (answer == "previous") {
@@ -147,7 +147,7 @@ RecoveryChoice show_recovery(const RecoveryRequest& r) {
     log("recovery shown: {}", reason_name(r.why));
     if (auto answer = testing::scripted_recovery()) {
         if (r.on_shown) r.on_shown();
-        RecoveryChoice choice = *scripted(r, *answer);
+        RecoveryChoice choice = scripted(r, *answer);
         log("recovery answered by script: {}", *answer);
         return choice;
     }

@@ -31,6 +31,22 @@ struct FileDigest {
     friend bool operator==(const FileDigest&, const FileDigest&) = default;
 };
 
+class Sha256Hasher {
+public:
+    Sha256Hasher();
+    ~Sha256Hasher();
+    Sha256Hasher(const Sha256Hasher&) = delete;
+    Sha256Hasher& operator=(const Sha256Hasher&) = delete;
+
+    bool ok() const { return hash_ != nullptr; }
+    bool update(const void* data, unsigned long size);
+    std::optional<Sha256> finish();
+
+private:
+    void* alg_ = nullptr;
+    void* hash_ = nullptr;
+};
+
 std::optional<FileDigest> digest_file(const fs::path& path);
 // Hashes through an open handle from offset 0; the handle needs read access.
 std::optional<FileDigest> digest_handle(void* handle);

@@ -19,14 +19,6 @@ std::optional<uint32_t> u32(const rapidjson::Document& doc, const char* name) {
     return it->value.GetUint();
 }
 
-std::string describe(const ManifestError& e) {
-    return e.detail.empty() ? std::string("invalid entry") : e.detail;
-}
-
-void sort_newest_first(std::vector<BuildEntry>& builds) {
-    std::ranges::sort(builds, std::greater{}, &BuildEntry::version);
-}
-
 } // namespace
 
 Result<BuildInfo> parse_build_info(std::string_view json) {
@@ -62,12 +54,12 @@ Result<BuildEntry> make_entry(const BuildInfo& info, std::span<const StagedFile>
     // The same parser the launcher runs, so an entry the tool emits is one
     // verify_manifest accepts.
     auto checked = parse_build_entry(write_build_entry(entry));
-    if (!checked) return fail(describe(checked.error()));
+    if (!checked) return fail(checked.error().detail);
     return *checked;
 }
 
 std::vector<BuildEntry> retained(std::vector<BuildEntry> builds, size_t keep) {
-    sort_newest_first(builds);
+    std::ranges::sort(builds, std::greater{}, &BuildEntry::version);
     std::vector<bool> kept(builds.size(), false);
     for (size_t i = 0; i < builds.size() && i < keep; ++i) kept[i] = true;
     uint32_t newest_protocol = 0;
