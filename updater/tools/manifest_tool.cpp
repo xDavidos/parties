@@ -136,12 +136,6 @@ std::span<const uint8_t> bytes_of(std::string_view s) {
     return {reinterpret_cast<const uint8_t*>(s.data()), s.size()};
 }
 
-Sha256 sha256_of(std::string_view data) {
-    std::string hex = parties::sha256_hex(bytes_of(data).data(), data.size());
-    std::erase(hex, ':');
-    return *Sha256::from_hex(hex);
-}
-
 std::string to_hex(std::span<const uint8_t> bytes) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string out;
@@ -194,15 +188,15 @@ Keyring pinned_keyring(const Args& args) {
     return production_keyring();
 }
 
-Channel channel_arg(const Args& args, const std::string& flag = "--channel") {
-    auto c = parse_channel(args.one(flag));
-    if (!c) throw UsageError{flag + " must be stable or beta"};
+Channel channel_arg(const Args& args) {
+    auto c = parse_channel(args.one("--channel"));
+    if (!c) throw UsageError{"--channel must be stable or beta"};
     return *c;
 }
 
-Version version_arg(const Args& args, const std::string& flag = "--version") {
-    auto v = Version::parse(args.one(flag));
-    if (!v) throw UsageError{flag + " must be A.B.C.D"};
+Version version_arg(const Args& args) {
+    auto v = Version::parse(args.one("--version"));
+    if (!v) throw UsageError{"--version must be A.B.C.D"};
     return *v;
 }
 
@@ -330,7 +324,7 @@ bool check_assets(const ManifestPayload& p) {
                 if (!body) {
                     std::cerr << "asset check failed: " << body.error() << "\n";
                     ok = false;
-                } else if (body->size() != f.size || sha256_of(*body) != f.sha256) {
+                } else if (body->size() != f.size || sha256_of(bytes_of(*body)) != f.sha256) {
                     std::cerr << "asset check failed: " << url << " does not match the manifest's size and sha256 for "
                               << b.version.to_string() << " " << f.name << "\n";
                     ok = false;
@@ -362,7 +356,7 @@ int cmd_entry(const Args& args) {
         if (eq == std::string::npos) throw UsageError{"--file takes <name>=<path>"};
         fs::path path = spec.substr(eq + 1);
         std::string data = read_file(path);
-        files.push_back({spec.substr(0, eq), path.filename().string(), data.size(), sha256_of(data)});
+        files.push_back({spec.substr(0, eq), path.filename().string(), data.size(), sha256_of(bytes_of(data))});
     }
     BuildEntry entry = must(release::make_entry(info, files, args.one("--url-base")));
     std::string text = write_build_entry(entry);

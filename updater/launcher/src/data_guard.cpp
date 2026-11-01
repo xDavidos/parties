@@ -197,16 +197,22 @@ bool DataGuard::snapshot(const SnapshotId& id, std::string& error) const {
 
 // Everything that can fail without changing the live database runs before
 // its -wal is removed.
-std::expected<void, RestoreError> DataGuard::restore(const SnapshotId& from, const SnapshotId& preserve_live_as) const {
-    const fs::path snap = backup_path(from);
+std::expected<void, RestoreError> DataGuard::restore(const std::optional<SnapshotId>& from,
+                                                     const SnapshotId& preserve_live_as) const {
     const fs::path live = paths_.db();
     auto untouched = [](std::string why) { return std::unexpected(RestoreError{std::move(why), false}); };
-    if (!copy_intact(snap)) return untouched("backup " + utf8(snap) + " is missing or damaged");
-    if (!has_wal_content(live) && same_bytes(live, snap)) return {};
-
     std::error_code ec;
     std::string error;
+    const fs::path snap = from ? backup_path(*from) : fs::path{};
+    if (from) {
+        if (!copy_intact(snap)) return untouched("backup " + utf8(snap) + " is missing or damaged");
+        if (!has_wal_content(live) && same_bytes(live, snap)) return {};
+    } else if (!fs::exists(live, ec)) {
+        return {};
+    }
+
     const fs::path preserved = backup_path(preserve_live_as);
+    fs::create_directories(paths_.backups(), ec);
     if (fs::exists(live, ec) && !fs::exists(preserved, ec)) {
         std::string why;
         if (!consistent_copy(live, preserved, why)) {
@@ -218,10 +224,12 @@ std::expected<void, RestoreError> DataGuard::restore(const SnapshotId& from, con
 
     fs::create_directories(paths_.data(), ec);
     const fs::path partial = with_suffix(live, ".restore.partial");
-    fs::remove(partial, ec);
-    if (!CopyFileW(snap.c_str(), partial.c_str(), FALSE))
-        return untouched("cannot copy " + utf8(snap) + ": " + last_error_text());
-    if (!flush_file(partial, error)) return untouched(error);
+    if (from) {
+        fs::remove(partial, ec);
+        if (!CopyFileW(snap.c_str(), partial.c_str(), FALSE))
+            return untouched("cannot copy " + utf8(snap) + ": " + last_error_text());
+        if (!flush_file(partial, error)) return untouched(error);
+    }
     for (const char* suffix : {"-wal", "-shm"}) {
         fs::path side = with_suffix(live, suffix);
         if (fs::exists(side, ec) && !DeleteFileW(side.c_str())) {
@@ -229,9 +237,15 @@ std::expected<void, RestoreError> DataGuard::restore(const SnapshotId& from, con
             return std::unexpected(RestoreError{"cannot remove " + utf8(side) + ": " + last_error_text(), !wal});
         }
     }
+    if (!from) {
+        if (!DeleteFileW(live.c_str()))
+            return std::unexpected(RestoreError{"cannot remove " + utf8(live) + ": " + last_error_text(), true});
+        log("live database set aside as {}", preserve_live_as.stem);
+        return {};
+    }
     if (!MoveFileExW(partial.c_str(), live.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         return std::unexpected(RestoreError{"cannot put " + utf8(snap) + " in place: " + last_error_text(), true});
-    log("restored {} (live kept as {})", from.stem, preserve_live_as.stem);
+    log("restored {} (live kept as {})", from->stem, preserve_live_as.stem);
     return {};
 }
 

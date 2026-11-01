@@ -4,12 +4,32 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace parties::update::json {
+
+template <class E, size_t N>
+using Names = std::array<std::pair<E, std::string_view>, N>;
+
+template <class E, size_t N>
+std::string_view name_of(const Names<E, N>& names, E value) {
+    for (const auto& [v, n] : names)
+        if (v == value) return n;
+    return names[0].second;
+}
+
+template <class E, size_t N>
+std::optional<E> value_of(const Names<E, N>& names, std::optional<std::string_view> text) {
+    if (!text) return std::nullopt;
+    for (const auto& [v, n] : names)
+        if (n == *text) return v;
+    return std::nullopt;
+}
 
 using Value = rapidjson::Value;
 using Writer = rapidjson::Writer<rapidjson::StringBuffer>;

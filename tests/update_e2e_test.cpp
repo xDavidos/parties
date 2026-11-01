@@ -410,7 +410,8 @@ struct RunResult {
 
 RunResult run_launcher(World& w, const std::map<std::string, std::string>& extra_env,
                        const std::vector<std::wstring>& forwarded = {}, DWORD timeout_ms = 60000,
-                       const fs::path& launcher = {}, const std::function<bool()>& kill_when = {}) {
+                       const fs::path& launcher = {}, const std::function<bool()>& kill_when = {},
+                       const std::wstring& launcher_flags = {}) {
     w.log_mark = read_file(w.log_file()).value_or("").size();
     std::map<std::wstring, std::wstring> env;
     for (wchar_t* block = GetEnvironmentStringsW(), *p = block; *p; p += wcslen(p) + 1) {
@@ -432,7 +433,7 @@ RunResult run_launcher(World& w, const std::map<std::string, std::string>& extra
                        (w.server ? L"\" \"--feed-base=" + w.server->base() : L"\" \"--feed-dir=" + w.source.wstring()) +
                        L"\" --boot-session=42 --boot-ok-event=" +
                        std::to_wstring(reinterpret_cast<uintptr_t>(boot_ok)) +
-                       L" --test-namespace=PartiesE2E" + std::to_wstring(GetCurrentProcessId()) + L" --";
+                       L" --test-namespace=PartiesE2E" + std::to_wstring(GetCurrentProcessId()) + launcher_flags + L" --";
     for (const std::wstring& f : forwarded) cmd += L" " + f;
     STARTUPINFOW si{sizeof si};
     PROCESS_INFORMATION pi{};
@@ -509,12 +510,18 @@ bool staged(const SupervisorState& s, const Release& r) {
     return st && st->build == r.entry.id();
 }
 
-
 bool settled(const SupervisorState& s) { return std::holds_alternative<Idle>(s.operation); }
 
 bool good_is_b(const World& w) {
     auto s = w.state();
     return s && settled(*s) && s->good == w.b.entry.id();
+}
+
+void prove_b(World& w) {
+    for (int i = 0; i < 6 && !good_is_b(w); ++i)
+        run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
+    auto s = w.state();
+    if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
 }
 
 bool rolled_back_to_a(const World& w, const SupervisorState& s, FailureReason reason) {
@@ -559,6 +566,7 @@ struct Scenario {
     bool http = false;
     bool kill_points = true;
     std::map<std::string, std::string> env{};
+    std::wstring launcher_flags{}; // before "--", e.g. " --recover"
 };
 
 enum class Outcome { Converged, KillNotReached, Failed };
@@ -583,7 +591,7 @@ Outcome run_scenario(const Scenario& sc, std::optional<int> kill_at) {
             run_env["PARTIES_KILL_AT"] = std::to_string(*kill_at);
             run_env["PARTIES_KILL_COUNTER"] = w.counter.string();
         }
-        RunResult r = run_launcher(w, run_env);
+        RunResult r = run_launcher(w, run_env, {}, 60000, {}, {}, sc.launcher_flags);
         if (g_verbose) std::cout << "--- " << label << " run " << run << " exit " << r.exit_code << "\n" << w.last_run_log();
         if (r.timed_out) {
             fail(label, "the launcher did not exit within 60 s");
@@ -697,6 +705,71 @@ std::vector<Scenario> scenarios() {
                        if (!find_backup(w, "pre-")) fail(label, "no pre-candidate snapshot");
                    }});
 
+    // Setup staged B before A ever opened the data, so B starts with no database and no
+    // pre-candidate snapshot. B creates its own database, whose floor A cannot read, and
+    // crashes. The rollback sets B's database aside so A starts on fresh data.
+    out.push_back({"fresh-data-then-crash", "migrate-then-crash", 3, 3, true,
+                   [](World& w) {
+                       // Stopped right after B is staged, as the setup of a newer version leaves it.
+                       run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"},
+                                        {"PARTIES_KILL_AT", "6"}});
+                       if (!w.state() || !staged(*w.state(), w.b)) fail(w.name, "B was not staged");
+                       std::error_code ec;
+                       for (const char* suffix : {"", "-wal", "-shm"})
+                           fs::remove(fs::path(w.db().wstring() + widen(suffix)), ec);
+                       fs::remove_all(w.backups(), ec);
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && rolled_back_to_a(w, *s, FailureReason::CrashedBeforeHealthy) &&
+                              markers(w.db(), "1.0.0.0") >= 1;
+                   },
+                   [](const World& w, const std::string& label) {
+                       auto s = w.state();
+                       Db live(w.db());
+                       if (live.scalar("SELECT version FROM parties_schema") != 1)
+                           fail(label, "A does not run on a database of its own schema");
+                       if (markers(w.db(), "2.0.0.0") != 0) fail(label, "B's rows are in the live database");
+                       auto preserved = find_backup(w, "rolled-back-");
+                       if (!preserved) return fail(label, "B's database was not kept");
+                       if (!s->notice || !s->notice->preserved || preserved->stem().string() != s->notice->preserved->stem)
+                           fail(label, "the notice does not name the kept copy");
+                       Db kept(*preserved);
+                       if (kept.scalar("SELECT compat_floor FROM parties_schema") != 3 ||
+                           kept.scalar("SELECT count(*) FROM markers WHERE build = '2.0.0.0'") < 1)
+                           fail(label, "the kept copy is not B's database");
+                       if (w.full_log().find("recovery shown") != std::string::npos)
+                           fail(label, "recovery was shown after an automatic rollback");
+                   }});
+
+    // B (schema 3, floor 3) is proven, so A cannot read the live data. Recovery's "Start the
+    // previous version" starts A on the newest backup A can open, keeping B's database.
+    out.push_back({"recovery-start-previous", "", 3, 3, true,
+                   [](World& w) {
+                       for (int i = 0; i < 6 && !good_is_b(w); ++i)
+                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
+                       if (!good_is_b(w)) fail(w.name, "B did not become good");
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && settled(*s) && std::holds_alternative<Steady>(s->activation) &&
+                              s->good == w.a.entry.id() && Db(w.db()).scalar("SELECT version FROM parties_schema") == 1;
+                   },
+                   [](const World& w, const std::string& label) {
+                       if (markers(w.db(), "2.0.0.0") != 0) fail(label, "B's rows are in the restored database");
+                       if (label.find("kill@") == std::string::npos && markers(w.db(), "1.0.0.0") < 2)
+                           fail(label, "A did not start on the restored data");
+                       auto kept = find_backup(w, "pre-rollback-");
+                       if (!kept) return fail(label, "B's database was not kept");
+                       Db copy(*kept);
+                       if (copy.scalar("SELECT compat_floor FROM parties_schema") != 3 ||
+                           copy.scalar("SELECT count(*) FROM markers WHERE build = '2.0.0.0'") < 1)
+                           fail(label, "the kept copy is not B's database");
+                       if (w.full_log().find("recovery shown: data_incompatible") != std::string::npos)
+                           fail(label, "Start the previous version ended in Recovery");
+                   },
+                   false, true, {{"PARTIES_TEST_RECOVERY", "previous"}}, L" --recover"});
+
     out.push_back({"exit-data-unavailable", "exit-data-unavailable", 1, 1, true, nullptr,
                    [](const World& w) {
                        auto s = w.state();
@@ -805,17 +878,11 @@ std::vector<Scenario> scenarios() {
                    },
                    true, false});
 
-    // ADV2: B is proven (A is previous_good), then B is revoked the way revoke.yml does it:
+    // B is proven (A is previous_good), then B is revoked the way revoke.yml does it:
     // B dropped from builds and listed in revoked[]. The newest build left is A.
     out.push_back({"adv-revoked-to-previous", "", 1, 1, true,
                    [](World& w) {
-                       for (int i = 0; i < 6; ++i) {
-                           auto s = w.state();
-                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
-                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
-                       }
-                       auto s = w.state();
-                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       prove_b(w);
                        publish(w.source, {&w.a}, 3, {.revoked = {w.b.entry.version}});
                    },
                    [](const World& w) {
@@ -833,13 +900,7 @@ std::vector<Scenario> scenarios() {
     // restore a backup: Parties keeps B and offers the move instead of making it.
     out.push_back({"adv-revoked-needs-restore", "", 3, 3, true,
                    [](World& w) {
-                       for (int i = 0; i < 6; ++i) {
-                           auto s = w.state();
-                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
-                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
-                       }
-                       auto s = w.state();
-                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       prove_b(w);
                        publish(w.source, {&w.a}, 3, {.revoked = {w.b.entry.version}});
                    },
                    [](const World& w) {
@@ -883,14 +944,14 @@ std::vector<Scenario> scenarios() {
                    [](World& w) {
                        // Ends session 1 right after B is staged (before the restart's AppExited commit),
                        // standing in for a user who closes the app without clicking "Restart to update".
-                       char* kat = nullptr; size_t kn = 0; _dupenv_s(&kat, &kn, "ADV_KILL_AT");
-                       std::string kill_at = kat ? kat : "6"; std::free(kat);
                        run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"},
-                                        {"PARTIES_KILL_AT", kill_at}});
+                                        {"PARTIES_KILL_AT", "6"}});
                        auto s = w.state();
                        auto* st = s ? std::get_if<Staged>(&s->activation) : nullptr;
-                       if (!st || st->build != w.b.entry.id()) fail(w.name, "B was not staged: " + read_file(w.install_root / "state" / "supervisor.json").value_or("") + "\nLOG:\n" + w.last_run_log());
-                       std::cout << "staged B before revocation: " << (st ? "yes" : "no") << "\n";
+                       if (!st || st->build != w.b.entry.id())
+                           fail(w.name, "B was not staged: " +
+                                            read_file(w.install_root / "state" / "supervisor.json").value_or("") +
+                                            "\nLOG:\n" + w.last_run_log());
                        publish(w.source, {&w.a}, 3, {.revoked = {w.b.entry.version}});
                    },
                    [](const World& w) {
@@ -899,8 +960,6 @@ std::vector<Scenario> scenarios() {
                    },
                    [](const World& w, const std::string& label) {
                        auto s = w.state();
-                       std::cout << "good after revocation: " << s->good.version.to_string()
-                                 << ", runs of revoked 2.0.0.0: " << markers(w.db(), "2.0.0.0") << "\n";
                        if (s->good == w.b.entry.id()) fail(label, "the revoked build B became good");
                        if (markers(w.db(), "2.0.0.0") > 1) fail(label, "the revoked build B was started again");
                        const BuildRecord* b = record(*s, w.b);
@@ -909,17 +968,11 @@ std::vector<Scenario> scenarios() {
                    },
                    false, false});
 
-    // ADV2: B is good on Stable. The app switches to Beta (only A, older), takes "switch now",
+    // B is good on Stable. The app switches to Beta (only A, older), takes "switch now",
     // then immediately picks Stable again. The user's last choice is Stable, keep B.
     out.push_back({"adv-downgrade-then-stable", "downgrade-then-stable", 1, 1, true,
                    [](World& w) {
-                       for (int i = 0; i < 6; ++i) {
-                           auto s = w.state();
-                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
-                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
-                       }
-                       auto s = w.state();
-                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       prove_b(w);
                        publish(w.source, {&w.a}, 1, {.channel = Channel::Beta});
                    },
                    [](const World& w) {
@@ -928,9 +981,6 @@ std::vector<Scenario> scenarios() {
                    },
                    [](const World& w, const std::string& label) {
                        auto s = w.state();
-                       std::cout << "last choice sent: stable/wait; final state channel "
-                                 << channel_name(s->channel) << ", good " << s->good.version.to_string()
-                                 << ", runs of A after the switch: " << markers(w.db(), "1.0.0.0") << std::endl;
                        if (s->channel != Channel::Stable) fail(label, "the channel is not the user's last choice");
                        if (s->good != w.b.entry.id() || !std::holds_alternative<Steady>(s->activation))
                            fail(label, "a downgrade the user withdrew was applied");
@@ -939,13 +989,7 @@ std::vector<Scenario> scenarios() {
 
     out.push_back({"downgrade-now", "wait-then-downgrade", 3, 3, true,
                    [](World& w) {
-                       for (int i = 0; i < 6; ++i) {
-                           auto s = w.state();
-                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
-                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
-                       }
-                       auto s = w.state();
-                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       prove_b(w);
                        publish(w.source, {&w.a}, 1, {.channel = Channel::Beta});
                    },
                    [](const World& w) {
@@ -1191,7 +1235,8 @@ int main(int argc, char** argv) {
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 2;
     if (g_launcher.empty() || g_fake_app.empty() || g_manifest_tool.empty()) {
-        std::cerr << "usage: update_e2e_test --launcher <exe> --fake-app <exe> [--only <name>] [--no-kill]\n";
+        std::cerr << "usage: update_e2e_test --launcher <exe> --fake-app <exe> --manifest-tool <exe> [--only <name>] "
+                     "[--no-kill]\n";
         return 2;
     }
     if (real_client) return smoke_real_client(*real_client);

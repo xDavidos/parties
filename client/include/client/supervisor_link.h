@@ -27,7 +27,6 @@ public:
     bool exit_requested() const { return exit_requested_; }
 
     void report_healthy(uint32_t data_schema);
-    bool healthy_reported() const { return healthy_reported_; }
 
     void request(const update::link::Request& request);
 

@@ -79,8 +79,9 @@ ChannelSwitchPlan plan_channel_switch(const SupervisorState& state, const Verifi
 // without taking the downgrade.
 ChannelIntent intent_for(const ChannelSwitchPlan& plan);
 
-// The backup an accepted DataEffect::NeedsRestore downgrade puts in place:
-// the newest one `entry` can open, so the least recent data is set aside.
-std::optional<Snapshot> restore_point(const BuildEntry& entry, std::span<const Snapshot> newest_first);
+// The backup an accepted DataEffect::NeedsRestore downgrade, or Recovery's
+// "Start the previous version", puts in place: the newest one a build of
+// `data_schema` can open, so the least recent data is set aside.
+std::optional<Snapshot> restore_point(uint32_t data_schema, std::span<const Snapshot> newest_first);
 
 } // namespace parties::update

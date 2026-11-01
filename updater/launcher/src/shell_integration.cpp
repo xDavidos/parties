@@ -38,36 +38,34 @@ struct Com {
 
 std::wstring uninstall_key() { return testing::uninstall_key().value_or(kUninstallKey); }
 
-fs::path programs_folder() {
-    if (auto folder = testing::start_menu()) return *folder;
+// Empty when Windows cannot name the folder.
+fs::path known_folder(REFKNOWNFOLDERID id, DWORD flags = 0) {
     PWSTR path = nullptr;
     fs::path out;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Programs, KF_FLAG_CREATE, nullptr, &path))) out = path;
+    if (SUCCEEDED(SHGetKnownFolderPath(id, flags, nullptr, &path))) out = path;
     CoTaskMemFree(path);
     return out;
+}
+
+fs::path programs_folder() {
+    if (auto folder = testing::start_menu()) return *folder;
+    return known_folder(FOLDERID_Programs, KF_FLAG_CREATE);
 }
 
 // Testing builds read a Desktop only when the harness names one.
-std::optional<fs::path> desktop_folder() {
+fs::path desktop_folder() {
     if (auto folder = testing::desktop()) return *folder;
-    if (testing::enabled()) return std::nullopt;
-    PWSTR path = nullptr;
-    std::optional<fs::path> out;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &path))) out = path;
-    CoTaskMemFree(path);
-    return out;
+    if (testing::enabled()) return {};
+    return known_folder(FOLDERID_Desktop);
 }
 
 // Where the taskbar keeps pins. Testing builds read it only when the harness names one.
-std::optional<fs::path> taskbar_pins_folder() {
+fs::path taskbar_pins_folder() {
     if (auto folder = testing::taskbar()) return *folder;
-    if (testing::enabled()) return std::nullopt;
-    PWSTR path = nullptr;
-    std::optional<fs::path> out;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &path)))
-        out = fs::path(path) / L"Microsoft" / L"Internet Explorer" / L"Quick Launch" / L"User Pinned" / L"TaskBar";
-    CoTaskMemFree(path);
-    return out;
+    if (testing::enabled()) return {};
+    const fs::path appdata = known_folder(FOLDERID_RoamingAppData);
+    if (appdata.empty()) return {};
+    return appdata / L"Microsoft" / L"Internet Explorer" / L"Quick Launch" / L"User Pinned" / L"TaskBar";
 }
 
 fs::path expand(const std::wstring& text) {
@@ -75,8 +73,6 @@ fs::path expand(const std::wstring& text) {
     DWORD n = ExpandEnvironmentStringsW(text.c_str(), expanded, 32768);
     return n > 0 && n <= 32768 ? fs::path(std::wstring(expanded)) : fs::path(text);
 }
-
-std::wstring widen(std::string_view s) { return fs::path(std::u8string(s.begin(), s.end())).wstring(); }
 
 // A shortcut reads back the long spelling of a target saved under its 8.3 name.
 bool same_path(const fs::path& a, const fs::path& b) {
@@ -280,8 +276,8 @@ std::vector<fs::path> portable_shortcut_dirs() {
             for (const auto& e : fs::directory_iterator(folder, options, ec)) add(e);
     };
     collect(programs_folder(), true);
-    if (auto desktop = desktop_folder()) collect(*desktop, false);
-    if (auto pins = taskbar_pins_folder()) collect(*pins, false);
+    collect(desktop_folder(), false);
+    collect(taskbar_pins_folder(), false);
 
     std::vector<fs::path> dirs;
     for (const fs::path& file : links) {

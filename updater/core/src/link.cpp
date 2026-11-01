@@ -12,8 +12,9 @@ namespace parties::update::link {
 
 namespace {
 
-template <class E, size_t N>
-using Names = std::array<std::pair<E, std::string_view>, N>;
+using json::Names;
+using json::name_of;
+using json::value_of;
 
 constexpr Names<ChannelChoice, 3> kChoices{{
     {ChannelChoice::Follow, "follow"},
@@ -40,21 +41,6 @@ constexpr Names<StatusNotice::Kind, 4> kNoticeKinds{{
     {StatusNotice::Kind::Withdrawn, "withdrawn"},
     {StatusNotice::Kind::RestoreFailed, "restore_failed"},
 }};
-
-template <class E, size_t N>
-std::string_view name_of(const Names<E, N>& names, E value) {
-    for (const auto& [v, n] : names)
-        if (v == value) return n;
-    return names[0].second;
-}
-
-template <class E, size_t N>
-std::optional<E> value_of(const Names<E, N>& names, std::optional<std::string_view> text) {
-    if (!text) return std::nullopt;
-    for (const auto& [v, n] : names)
-        if (n == *text) return v;
-    return std::nullopt;
-}
 
 using json::Value;
 using json::Writer;

@@ -6,7 +6,6 @@
 #include <mutex>
 
 #include <windows.h>
-#include <bcrypt.h>
 #include <winhttp.h>
 
 #pragma comment(lib, "winhttp.lib")
@@ -21,14 +20,6 @@ namespace {
 
 constexpr int kTimeoutMs = 30000;
 constexpr DWORD kChunk = 64 * 1024;
-
-std::wstring widen(std::string_view s) {
-    if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
 
 std::string error_text(const char* what) { return std::string(what) + ": " + last_error_text(); }
 
@@ -67,31 +58,6 @@ public:
 
 private:
     HINTERNET h_;
-};
-
-class Sha256Stream {
-public:
-    Sha256Stream() {
-        if (BCryptOpenAlgorithmProvider(&alg_, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0)
-            BCryptCreateHash(alg_, &hash_, nullptr, 0, nullptr, 0, 0);
-    }
-    ~Sha256Stream() {
-        if (hash_) BCryptDestroyHash(hash_);
-        if (alg_) BCryptCloseAlgorithmProvider(alg_, 0);
-    }
-    bool update(const char* data, DWORD size) {
-        return hash_ && BCryptHashData(hash_, reinterpret_cast<PUCHAR>(const_cast<char*>(data)), size, 0) == 0;
-    }
-    std::optional<Sha256> finish() {
-        Sha256 out;
-        if (!hash_ || BCryptFinishHash(hash_, out.bytes.data(), static_cast<ULONG>(out.bytes.size()), 0) != 0)
-            return std::nullopt;
-        return out;
-    }
-
-private:
-    BCRYPT_ALG_HANDLE alg_ = nullptr;
-    BCRYPT_HASH_HANDLE hash_ = nullptr;
 };
 
 class HttpsSource final : public UpdateSource {
@@ -159,7 +125,7 @@ private:
                                                const Progress& progress, const std::atomic<bool>& cancel) {
         HANDLE out = CreateFileW(dest.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (out == INVALID_HANDLE_VALUE) return std::unexpected(SourceError{error_text("cannot create the download")});
-        Sha256Stream hash;
+        Sha256Hasher hash;
         uint64_t done = 0;
         bool write_failed = false;
         auto got = get(url, file.size,

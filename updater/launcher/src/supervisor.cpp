@@ -35,21 +35,6 @@ constexpr auto kCheckInterval = std::chrono::hours(6);
 // exits: a full build over a slow link, but not a hidden process all day.
 constexpr auto kJobCapAfterExit = std::chrono::minutes(15);
 
-std::wstring widen(std::string_view s) {
-    if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
-
-fs::path self_exe() {
-    std::wstring buffer(32768, L'\0');
-    DWORD n = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    buffer.resize(n);
-    return fs::path(buffer);
-}
-
 std::string random_hex(size_t bytes) {
     std::vector<unsigned char> raw(bytes);
     BCryptGenRandom(nullptr, raw.data(), static_cast<ULONG>(raw.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
@@ -584,7 +569,7 @@ void Supervisor::show_pending_recovery() {
     PendingRecovery pending = *recovery_;
     recovery_.reset();
     RecoveryChoice choice = show_recovery(
-        {pending.why, state_, data_.list(), options_.data.data(), [this] { signal_boot_ok(); }});
+        {pending.why, state_, live_db(), data_.list(), options_.data.data(), [this] { signal_boot_ok(); }});
     if (std::holds_alternative<Quit>(choice)) {
         quit_ = true;
         return;

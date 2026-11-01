@@ -54,6 +54,8 @@ int64_t steady_now_us() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+
+constexpr const char* kIdentityNotSaved = "Parties could not save your identity. Try again, or restart Parties.";
 } // namespace
 
 AppCore::AppCore() = default;
@@ -66,11 +68,6 @@ AppCore::~AppCore() { stop_query_thread(); }
 bool AppCore::init(PlatformBridge bridge, Rml::Context* rml_context)
 {
     bridge_ = std::move(bridge);
-
-    if (!settings_.is_open()) {
-        LOG_ERROR("AppCore::init requires an open settings database");
-        return false;
-    }
 
     // Wire audio subsystems
     audio_.set_mixer(&mixer_);
@@ -546,10 +543,6 @@ void AppCore::load_saved_prefs()
 // ─────────────────────────────────────────────────────────────────────────────
 // Identity
 // ─────────────────────────────────────────────────────────────────────────────
-
-namespace {
-constexpr const char* kIdentityNotSaved = "Parties could not save your identity. Try again, or restart Parties.";
-} // namespace
 
 void AppCore::load_or_generate_identity(const std::string& username_hint)
 {

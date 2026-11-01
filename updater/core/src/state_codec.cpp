@@ -11,11 +11,11 @@ namespace parties::update {
 
 namespace {
 
+using json::Names;
+using json::name_of;
+using json::value_of;
 using json::Value;
 using json::Writer;
-
-template <class E, size_t N>
-using Names = std::array<std::pair<E, std::string_view>, N>;
 
 constexpr Names<FailureReason, 10> kReasons{{
     {FailureReason::CrashedBeforeHealthy, "crashed_before_healthy"},
@@ -36,19 +36,6 @@ constexpr Names<Notice::Kind, 4> kNoticeKinds{{
     {Notice::Kind::Withdrawn, "withdrawn"},
     {Notice::Kind::RestoreFailed, "restore_failed"},
 }};
-
-template <class E, size_t N>
-std::string_view name_of(const Names<E, N>& names, E value) {
-    return std::ranges::find(names, value, &std::pair<E, std::string_view>::first)->second;
-}
-
-template <class E, size_t N>
-std::optional<E> value_of(const Names<E, N>& names, std::optional<std::string_view> text) {
-    if (!text) return std::nullopt;
-    auto it = std::ranges::find(names, *text, &std::pair<E, std::string_view>::second);
-    if (it == names.end()) return std::nullopt;
-    return it->first;
-}
 
 bool is_safe_stem(std::string_view stem) {
     if (stem.empty() || stem.size() > 200 || stem.front() == '.' || stem.find("..") != std::string_view::npos)
@@ -154,7 +141,7 @@ void write_operation(Writer& w, const Operation& o) {
                 json::key(w, "healthy_uptime_s"); w.Uint(v.healthy_uptime_s);
             } else {
                 write_kind(w, "restoring");
-                write_snapshot(w, "from", v.from);
+                if (v.from) write_snapshot(w, "from", *v.from);
                 json::key(w, "preserve_live_as"); json::str(w, v.preserve_live_as.stem);
             }
         },
@@ -219,7 +206,6 @@ std::optional<Verdict> parse_verdict(const Value* v) {
 }
 
 std::optional<BuildRecord> parse_record(const Value& v) {
-    BuildRecord r;
     auto id = id_at(v, "id");
     auto schema = json::u32(v, "data_schema");
     auto floor = json::u32(v, "data_compat_floor");
@@ -269,7 +255,7 @@ std::optional<Operation> parse_operation(const Value* v) {
         return Running{*build, *healthy, *uptime};
     }
     if (kind == "restoring") {
-        auto from = parse_snapshot(json::object(*v, "from"));
+        auto from = optional_member<Snapshot>(*v, "from", parse_snapshot);
         auto keep = parse_stem(json::string(*v, "preserve_live_as"));
         if (!from || !keep) return std::nullopt;
         return Restoring{*from, *keep};

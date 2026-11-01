@@ -136,9 +136,10 @@ struct Spawn {
 // Kill the app, wait for it, and report its exit as ExitKind::KilledHung.
 struct TerminateApp { friend bool operator==(const TerminateApp&, const TerminateApp&) = default; };
 // Keep the live database as backups\<preserve_live_as>.db, then put `from` in
-// place. Done when the live database already has from's content.
+// place, or leave no database when `from` is nullopt. Done when the live
+// database already has from's content, or is gone.
 struct RestoreSnapshot {
-    SnapshotId from;
+    std::optional<SnapshotId> from;
     SnapshotId preserve_live_as;
     friend bool operator==(const RestoreSnapshot&, const RestoreSnapshot&) = default;
 };

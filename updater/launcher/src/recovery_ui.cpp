@@ -1,8 +1,12 @@
 #include "recovery_ui.h"
 
+#include "file_io.h"
 #include "log.h"
 #include "testing.h"
 
+#include <parties/update/update_policy.h>
+
+#include <algorithm>
 #include <format>
 #include <string>
 
@@ -23,14 +27,6 @@ constexpr int kStartPrevious = 101;
 constexpr int kRestore = 102;
 constexpr int kOpenFolder = 103;
 constexpr int kRetryBase = 200;
-
-std::wstring widen(std::string_view s) {
-    if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
 
 std::wstring version_text(const BuildId& id) { return widen(id.version.to_string()); }
 
@@ -59,12 +55,28 @@ std::wstring explanation(const std::optional<RecoveryReason>& why) {
     return {};
 }
 
-std::optional<BuildId> previous_build(const SupervisorState& s) {
-    if (auto* p = std::get_if<Probation>(&s.activation)) return p->fallback;
+std::wstring backup_time(const Backup& b) {
+    auto when = std::chrono::clock_cast<std::chrono::system_clock>(b.written);
+    return widen(std::format("{:%Y-%m-%d %H:%M} UTC", std::chrono::floor<std::chrono::minutes>(when)));
+}
+
+// What "Start the previous version" does, or nullopt when it cannot start it.
+// A rollback under probation restores what the candidate changed by itself.
+// Otherwise a previous build that cannot read the live data starts on the
+// newest backup it can open.
+std::optional<StartBuild> start_previous(const RecoveryRequest& r) {
+    const SupervisorState& s = r.state;
+    if (auto* p = std::get_if<Probation>(&s.activation)) return StartBuild{p->fallback, std::nullopt};
     if (!s.previous_good) return std::nullopt;
-    const BuildRecord* r = s.find(*s.previous_good);
-    if (!r || !std::holds_alternative<Proven>(r->verdict) || s.revoked.contains(r->id.version)) return std::nullopt;
-    return r->id;
+    const BuildRecord* prev = s.find(*s.previous_good);
+    if (!prev || !std::holds_alternative<Proven>(prev->verdict) || s.revoked.contains(prev->id.version)) return std::nullopt;
+    if (!r.live_db || compatibility(prev->data_schema, *r.live_db) != Compatibility::Incompatible)
+        return StartBuild{prev->id, std::nullopt};
+    std::vector<Snapshot> newest_first;
+    for (const Backup& b : r.backups) newest_first.push_back({b.id, b.data});
+    auto point = restore_point(prev->data_schema, newest_first);
+    if (!point) return std::nullopt;
+    return StartBuild{prev->id, point};
 }
 
 std::vector<BuildId> retryable(const SupervisorState& s) {
@@ -88,13 +100,8 @@ HRESULT CALLBACK on_event(HWND, UINT notification, WPARAM, LPARAM, LONG_PTR data
 std::optional<Snapshot> choose_backup(const RecoveryRequest& r) {
     std::vector<std::wstring> labels;
     std::vector<TASKDIALOG_BUTTON> radios;
-    for (size_t i = 0; i < r.backups.size(); ++i) {
-        const Backup& b = r.backups[i];
-        auto when = std::chrono::clock_cast<std::chrono::system_clock>(b.written);
-        labels.push_back(widen(std::format("{:%Y-%m-%d %H:%M} UTC  {}  (data version {})",
-                                           std::chrono::floor<std::chrono::minutes>(when), b.id.stem,
-                                           b.data.version)));
-    }
+    for (const Backup& b : r.backups)
+        labels.push_back(backup_time(b) + widen(std::format("  {}  (data version {})", b.id.stem, b.data.version)));
     for (size_t i = 0; i < labels.size(); ++i) radios.push_back({static_cast<int>(1000 + i), labels[i].c_str()});
     TASKDIALOGCONFIG config{};
     config.cbSize = sizeof config;
@@ -112,11 +119,11 @@ std::optional<Snapshot> choose_backup(const RecoveryRequest& r) {
     return Snapshot{r.backups[index].id, r.backups[index].data};
 }
 
-std::optional<RecoveryChoice> scripted(const RecoveryRequest& r, const std::string& answer) {
+RecoveryChoice scripted(const RecoveryRequest& r, const std::string& answer) {
     if (answer == "quit") return Quit{};
     if (answer == "start") return StartAgain{};
     if (answer == "previous") {
-        if (auto prev = previous_build(r.state)) return StartBuild{*prev};
+        if (auto prev = start_previous(r)) return *prev;
     }
     if (answer == "retry") {
         auto builds = retryable(r.state);
@@ -133,12 +140,12 @@ RecoveryChoice show_recovery(const RecoveryRequest& r) {
     log("recovery shown: {}", reason_name(r.why));
     if (auto answer = testing::scripted_recovery()) {
         if (r.on_shown) r.on_shown();
-        RecoveryChoice choice = *scripted(r, *answer);
+        RecoveryChoice choice = scripted(r, *answer);
         log("recovery answered by script: {}", *answer);
         return choice;
     }
 
-    const std::optional<BuildId> previous = previous_build(r.state);
+    const std::optional<StartBuild> previous = start_previous(r);
     const std::vector<BuildId> retry = retryable(r.state);
     std::vector<std::wstring> labels;
     std::vector<TASKDIALOG_BUTTON> buttons;
@@ -148,8 +155,15 @@ RecoveryChoice show_recovery(const RecoveryRequest& r) {
         buttons.push_back({id, labels.back().c_str()});
     };
     add(kStartAgain, L"Start Parties " + version_text(r.state.good) + L"\nTry again with the current version.");
-    if (previous && *previous != r.state.good)
-        add(kStartPrevious, L"Start the previous version (" + version_text(*previous) + L")");
+    if (previous && previous->build != r.state.good) {
+        std::wstring label = L"Start the previous version (" + version_text(previous->build) + L")";
+        if (previous->restore) {
+            auto backup = std::ranges::find(r.backups, previous->restore->id, &Backup::id);
+            label += L"\nStarts on your data from " + backup_time(*backup) +
+                     L". Your current data is kept as a separate backup.";
+        }
+        add(kStartPrevious, std::move(label));
+    }
     for (size_t i = 0; i < retry.size(); ++i)
         add(kRetryBase + static_cast<int>(i), L"Try Parties " + version_text(retry[i]) + L" again");
     if (restorable(r.state) && !r.backups.empty())
@@ -196,7 +210,7 @@ std::vector<Event> events_for(const RecoveryChoice& choice) {
         [](const auto& c) -> std::vector<Event> {
             using T = std::decay_t<decltype(c)>;
             if constexpr (std::is_same_v<T, StartAgain>) return {StartRequested{}};
-            else if constexpr (std::is_same_v<T, StartBuild>) return {UserRollback{c.build, std::nullopt}};
+            else if constexpr (std::is_same_v<T, StartBuild>) return {UserRollback{c.build, c.restore}};
             else if constexpr (std::is_same_v<T, RetryBuild>) return {UserRetry{c.build}, StartRequested{}};
             else if constexpr (std::is_same_v<T, RestoreBackup>) return {UserRestore{c.snapshot}, StartRequested{}};
             else return {};

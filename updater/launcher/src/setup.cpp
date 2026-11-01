@@ -63,14 +63,6 @@ struct Outcome {
 
 Outcome failed(std::string message) { return {kFailed, std::move(message)}; }
 
-std::wstring widen(std::string_view s) { return fs::path(std::u8string(s.begin(), s.end())).wstring(); }
-
-fs::path self_exe() {
-    std::wstring buffer(32768, L'\0');
-    buffer.resize(GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size())));
-    return buffer;
-}
-
 bool same_name(const fs::path& file, const wchar_t* name) { return _wcsicmp(file.filename().c_str(), name) == 0; }
 
 bool inside(const fs::path& path, const fs::path& dir) {
@@ -253,8 +245,8 @@ LoadResult drop_unfinishable_restore(LoadResult loaded, const DataGuard& data, c
                                      StateStore& store) {
     auto* state = std::get_if<SupervisorState>(&loaded);
     auto* restoring = state ? std::get_if<Restoring>(&state->operation) : nullptr;
-    if (!restoring || data.intact(restoring->from.id)) return loaded;
-    log("the backup {} that a restore needs is missing or damaged; leaving the data as it is", restoring->from.id.stem);
+    if (!restoring || !restoring->from || data.intact(restoring->from->id)) return loaded;
+    log("the backup {} that a restore needs is missing or damaged; leaving the data as it is", restoring->from->id.stem);
     Step step_out = step(*state, RestoreFailed{}, {});
     std::string error;
     for (const Effect& effect : step_out.effects) {

@@ -40,7 +40,7 @@ std::vector<std::string> referenced(const SupervisorState& s) {
         out.push_back(staged->restore_first->id.stem);
     if (auto* p = std::get_if<Probation>(&s.activation); p && p->pre_snapshot) out.push_back(p->pre_snapshot->id.stem);
     if (auto* r = std::get_if<Restoring>(&s.operation)) {
-        out.push_back(r->from.id.stem);
+        if (r->from) out.push_back(r->from->id.stem);
         out.push_back(r->preserve_live_as.stem);
     }
     if (s.notice && s.notice->preserved) out.push_back(s.notice->preserved->stem);

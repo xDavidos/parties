@@ -227,23 +227,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                                   nullptr, nullptr, wc.hInstance, nullptr);
     apply_shell_identity(window);
 
-    bool fault_alias = false;
     peer.send(link::Healthy{build.schema});
     if (fault == "crash-after-health") {
         Sleep(100);
         die(kCrash);
     }
 
-    if (fault == "downgrade-then-stable") fault_alias = true;
-    if (fault == "wait-then-downgrade" || fault_alias)
-        peer.send(link::Request{link::SetChannel{Channel::Beta, link::ChannelChoice::Wait}});
+    const bool changes_mind = fault == "downgrade-then-stable";
+    const bool downgrades = fault == "wait-then-downgrade" || changes_mind;
+    if (downgrades) peer.send(link::Request{link::SetChannel{Channel::Beta, link::ChannelChoice::Wait}});
     const std::string status_log = env("PARTIES_FAKE_STATUS_LOG");
     bool restart_asked = false;
     bool downgrade_asked = false;
     // These faults assert on what the check told the app, so the app stays
     // until the check of its channel answers, however long that takes.
-    const bool until_checked = fault == "run-until-checked" || fault == "wait-then-downgrade" || fault_alias;
-    const Channel channel = fault == "wait-then-downgrade" || fault_alias ? Channel::Beta : Channel::Stable;
+    const bool until_checked = fault == "run-until-checked" || downgrades;
+    const Channel channel = downgrades ? Channel::Beta : Channel::Stable;
     bool checking = false;
     bool answered = false;
     const auto started = std::chrono::steady_clock::now();
@@ -261,21 +260,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             continue;
         }
         if (std::holds_alternative<link::ExitRequested>(*m)) break;
-        if (std::holds_alternative<link::Status>(*m) && !status_log.empty())
-            std::ofstream(status_log, std::ios::app) << link::write(*m);
-        if (auto* status = std::get_if<link::Status>(&*m)) {
-            if (status->phase == link::Phase::Checking) checking = true;
-            else if (checking && status->channel == channel) answered = true;
-        }
-        if (auto* status = std::get_if<link::Status>(&*m); status && (fault == "wait-then-downgrade" || fault_alias) &&
-                                                          !downgrade_asked && status->phase == link::Phase::Pinned &&
-                                                          status->downgrade) {
+        auto* status = std::get_if<link::Status>(&*m);
+        if (!status) continue;
+        if (!status_log.empty()) std::ofstream(status_log, std::ios::app) << link::write(*m);
+        if (status->phase == link::Phase::Checking) checking = true;
+        else if (checking && status->channel == channel) answered = true;
+        if (downgrades && !downgrade_asked && status->phase == link::Phase::Pinned && status->downgrade) {
             downgrade_asked = true;
             peer.send(link::Request{link::SetChannel{Channel::Beta, link::ChannelChoice::DowngradeNow}});
-            if (fault_alias) peer.send(link::Request{link::SetChannel{Channel::Stable, link::ChannelChoice::Wait}});
+            if (changes_mind) peer.send(link::Request{link::SetChannel{Channel::Stable, link::ChannelChoice::Wait}});
         }
-        if (auto* status = std::get_if<link::Status>(&*m); status && !restart_asked &&
-                                                          status->phase == link::Phase::ReadyToRestart) {
+        if (!restart_asked && status->phase == link::Phase::ReadyToRestart) {
             restart_asked = true;
             peer.send(link::Request{link::RestartToUpdate{}});
         }

@@ -68,14 +68,18 @@ void spawn(Tx& tx, const BuildId& build) {
 }
 
 // Emits the restore of a committed Restoring; the caller commits after it.
-DataInfo finish_restore(Tx& tx) {
+std::optional<DataInfo> finish_restore(Tx& tx) {
     Restoring r = std::get<Restoring>(tx.s.operation);
-    tx.emit(RestoreSnapshot{r.from.id, r.preserve_live_as});
     tx.s.operation = Idle{};
-    return r.from.data;
+    if (!r.from) {
+        tx.emit(RestoreSnapshot{std::nullopt, r.preserve_live_as});
+        return std::nullopt;
+    }
+    tx.emit(RestoreSnapshot{r.from->id, r.preserve_live_as});
+    return r.from->data;
 }
 
-void begin_restore(Tx& tx, const Snapshot& from, SnapshotId preserve_live_as) {
+void begin_restore(Tx& tx, const std::optional<Snapshot>& from, SnapshotId preserve_live_as) {
     tx.s.operation = Restoring{from, std::move(preserve_live_as)};
     tx.commit();
 }
@@ -103,6 +107,8 @@ void start_good(Tx& tx, const std::optional<DataInfo>& data) {
 
 // Leaves Probation for good. Restores the pre-candidate data when good cannot
 // read what the candidate left, or when the candidate ran on restored data.
+// Without a pre-candidate snapshot there was no database, so the candidate's
+// is set aside and good starts on none.
 void rollback(Tx& tx, FailureReason reason, bool start_fallback, std::optional<DataInfo> data) {
     Probation p = std::get<Probation>(tx.s.activation);
     if (BuildRecord* c = record(tx.s, p.candidate)) c->verdict = Quarantined{reason};
@@ -111,10 +117,10 @@ void rollback(Tx& tx, FailureReason reason, bool start_fallback, std::optional<D
     Notice notice{Notice::Kind::RolledBack, p.candidate.version, p.fallback.version, std::nullopt};
     bool restore = p.restore_on_rollback ||
                    compat_of(tx.s, p.fallback, data) == Compatibility::Incompatible;
-    if (restore && p.pre_snapshot) {
+    if (restore) {
         notice.preserved = snapshot_name("rolled-back", p.candidate, tx.next_generation());
         tx.s.notice = notice;
-        begin_restore(tx, *p.pre_snapshot, *notice.preserved);
+        begin_restore(tx, p.pre_snapshot, *notice.preserved);
         data = finish_restore(tx);
     } else {
         tx.s.notice = notice;

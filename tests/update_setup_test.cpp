@@ -544,8 +544,6 @@ void adv_setup_channel() {
     Build a = w.build("1.0.0.0");
     install_and_run(w, a);
     auto s = w.state();
-    std::cout << "embedded manifest channel: beta; installed state channel: "
-              << (s ? std::string(channel_name(s->channel)) : "(none)") << std::endl;
     check(s && s->channel == Channel::Stable, "a setup built from the Beta manifest leaves the user on Stable");
 }
 
@@ -901,7 +899,6 @@ void bridge_double_click_keeps_running_app() {
 }
 
 void bridge_manual_setup_finds_shortcuts() {
-    using namespace std::chrono_literals;
     World w("bridge-manual");
     Build a = w.build("1.0.0.0", g_fake_app, true, 2);
     const fs::path setup = w.setup_for(a);
@@ -993,8 +990,7 @@ void bridge_old_app_hangs() {
           "setup told the user to close the old window");
 }
 
-
-// ADV: a portable copy started from a shortcut Windows named itself
+// A portable copy started from a shortcut Windows named itself
 // ("parties_client.exe - Shortcut.lnk"), user runs PartiesSetup.exe from Downloads.
 void adv_manual_setup_default_shortcut_name() {
     World w("adv-shortcut");
@@ -1015,31 +1011,23 @@ void adv_manual_setup_default_shortcut_name() {
     auto args = std::vector<std::wstring>{L"--silent"};
     for (const auto& r : w.roots()) args.push_back(r);
     check(Run(downloads / "PartiesSetup.exe", args, w.env(), downloads).finish() == 0u, "setup exited 0");
-    std::printf("  [adv] after manual setup: live db exists=%d, live has portable identity=%d, legacy backups=%zu\n",
-                (int)fs::exists(w.db()), (int)has_identity(w.db(), kLegacyKey), legacy_backups(w).size());
-    check(has_identity(w.db(), kLegacyKey), "ADV: the portable identity was imported by a manual setup");
+    check(has_identity(w.db(), kLegacyKey), "the portable identity was imported by a manual setup");
     fs::rename(portable / "parties_client.exe", portable / "parties_client.old.exe");
     fs::copy_file(setup, portable / "parties_client.exe");
     std::vector<std::wstring> h{L"--update-cleanup", (portable / "parties_client.old.exe").wstring(), L"--silent"};
     for (const auto& r : w.roots()) h.push_back(r);
     check(Run(portable / "parties_client.exe", h, w.env(), portable).finish() == 0u, "the carrier exited 0");
-    std::printf("  [adv] after the legacy handoff: live has portable identity=%d, live has fake fresh identity=%lld, legacy backups=%zu, portable exe left=%d\n",
-                (int)has_identity(w.db(), kLegacyKey),
-                count_rows(w.db(), "SELECT count(*) FROM identity WHERE public_key = 'fake-identity-key'"),
-                legacy_backups(w).size(), (int)fs::exists(portable / "parties_client.old.exe"));
-    check(has_identity(w.db(), kLegacyKey), "ADV: the installed app uses the portable identity after the handoff");
+    check(has_identity(w.db(), kLegacyKey), "the installed app uses the portable identity after the handoff");
 }
 
-
-// ADV: a restore was committed (Recovery -> Restore, then the launcher was
-// killed) and the chosen backup is now unreadable. What does the next start do?
+// The user picked a backup in Recovery, the launcher committed Restoring and
+// was killed, and the chosen backup is then gone.
 void adv_restore_from_damaged_backup() {
     World w("adv-restore");
     Build a = w.build("1.0.0.0", g_fake_app, true, 2);
     const fs::path setup = w.setup_for(a);
     install_and_run(w, a);
     for (int i = 0; i < 3; ++i) w.start_via(w.install / kStubFile);  // the launcher gets confirmed
-    std::printf("  [adv] boot-record before: %s\n", read_file(w.install / "state" / "boot-record.json").value_or("").c_str());
     auto s = w.state();
     if (!check(s.has_value(), "state readable")) return;
     s->operation = Restoring{Snapshot{SnapshotId{"chosen"}, DataInfo{2, 2}}, SnapshotId{"pre-restore-adv-g99"}};
@@ -1052,26 +1040,16 @@ void adv_restore_from_damaged_backup() {
         return n;
     };
     const size_t healthy_before = healthy();
-    const long long runs = markers(w, "1.0.0.0");
-    auto start = [&](const char* what) {
-        Run run(w.install / kStubFile, {L"--data-root=" + w.data.wstring(), L"--test-namespace=" + w.ns,
-                L"--test-recovery=safe-mode"}, w.env());
-        auto code = run.finish();
-        std::printf("  [adv] %s: stub exit=%lu, app runs=%lld (was %lld), launcher-supervised healthy runs=%zu (was %zu)\n",
-                    what, code ? (unsigned long)*code : 0xFFFFFFFFul, markers(w, "1.0.0.0"), runs, healthy(), healthy_before);
+    auto start = [&] {
+        Run(w.install / kStubFile,
+            {L"--data-root=" + w.data.wstring(), L"--test-namespace=" + w.ns, L"--test-recovery=safe-mode"}, w.env())
+            .finish();
     };
-    start("start 1");
-    start("start 2");
+    start();
+    start();
     check(w.setup(setup, {L"--no-launch"}) == 0u, "repair setup exited 0");
-    start("start after running the installer again (repair)");
-    auto after = w.state();
-    std::printf("  [adv] state still Restoring after repair: %d\n", (int)(after && std::holds_alternative<Restoring>(after->operation)));
-    std::printf("  [adv] boot-record after: %s\n", read_file(w.install / "state" / "boot-record.json").value_or("").c_str());
-    std::istringstream lines(w.log());
-    int shown = 0;
-    for (std::string line; std::getline(lines, line);)
-        if (line.find("effect failed") != std::string::npos && shown++ < 2) std::cout << "    log: " << line << "\n";
-    check(healthy() > healthy_before, "ADV: the launcher starts Parties again after a restore it cannot finish");
+    start();
+    check(healthy() > healthy_before, "the launcher starts Parties again after a restore it cannot finish");
 }
 
 // Repair alone, with no start in between, gives up a restore whose backup is gone.
