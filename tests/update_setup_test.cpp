@@ -468,6 +468,18 @@ bool wait_for_log(const World& w, std::string_view text, std::chrono::millisecon
     return false;
 }
 
+// The launcher logs the app's health report before it commits the run as healthy.
+bool wait_for_healthy_run(const World& w, std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto s = w.state();
+        auto* run = s ? std::get_if<Running>(&s->operation) : nullptr;
+        if (run && run->healthy) return true;
+        std::this_thread::sleep_for(50ms);
+    }
+    return false;
+}
+
 long long count_rows(const fs::path& db, const std::string& sql) {
     sqlite3* h = nullptr;
     std::string uri = "file:" + utf8(db) + "?mode=ro";
@@ -896,7 +908,7 @@ void bridge_double_click_keeps_running_app() {
     for (const auto& r : w.roots()) args.push_back(r);
     Run running(p.carrier, args, w.env(), p.dir);
     check(running.exit_code() == 0u, "the handoff exited 0");
-    check(wait_for_log(w, "app reported healthy", 30s), "the installed app is up");
+    check(wait_for_healthy_run(w, 30s), "the installed app is up");
     const auto state_before = read_file(w.install / "state" / "supervisor.json");
     const auto started = std::chrono::steady_clock::now();
     check(run_carrier(w, p, {}) == 0u, "the double-clicked carrier exited 0");
