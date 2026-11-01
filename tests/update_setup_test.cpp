@@ -834,7 +834,7 @@ void check_installed_with_portable_data(const World& w, const Build& b, const Po
     check(s && s->good == b.id(), "the bundled build is installed as good");
     check(fs::exists(w.install / kStubFile), "the stub is installed");
     auto main = read_link(w.start_menu / "Parties.lnk");
-    check(main && fs::path(main->target) == w.install / kStubFile, "the Start menu shortcut starts the stub");
+    check(main && main->targets(w.install / kStubFile), "the Start menu shortcut starts the stub");
     check(has_identity(w.db(), kLegacyKey), "the live database holds the portable identity");
     check(count_rows(w.db(), "SELECT count(*) FROM saved_servers") == 2, "both saved servers were imported");
     check(count_rows(w.db(), "SELECT count(*) FROM tofu_certs") == 2, "both TOFU pins were imported");
@@ -934,7 +934,7 @@ void bridge_manual_setup_finds_shortcuts() {
     check(count_rows(w.db(), "SELECT count(*) FROM saved_servers") == 2, "its servers were imported");
     check(count_rows(w.db(), "SELECT version FROM parties_schema") == 2, "the app migrated the imported data");
     auto main = read_link(w.start_menu / "Parties.lnk");
-    check(main && fs::path(main->target) == w.install / kStubFile, "the Start menu shortcut now starts the stub");
+    check(main && main->targets(w.install / kStubFile), "the Start menu shortcut now starts the stub");
     bool kept_other = false;
     for (const fs::path& b : legacy_backups(w)) kept_other |= has_identity(b, 0x99);
     check(kept_other, "the Desktop copy's identity is kept in backups");
