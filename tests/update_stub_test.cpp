@@ -164,6 +164,16 @@ public:
         return out;
     }
 
+    // Safe mode spawns the app and exits, so the app's line can land after the stub is gone.
+    std::vector<Run> wait_for_runs(const Build& b, const std::string& exe, size_t count) const {
+        auto out = runs(b, exe);
+        for (int i = 0; i < 200 && out.size() < count; ++i) {
+            Sleep(50);
+            out = runs(b, exe);
+        }
+        return out;
+    }
+
     // Starts the stub without waiting. Tests run it from the install root unless `exe` is given.
     HANDLE launch(std::vector<std::wstring> args, const fs::path& exe = {}) {
         if (std::ranges::none_of(args, [](auto& a) { return a.starts_with(L"--test-recovery="); }))
@@ -326,7 +336,7 @@ void no_bootable_launcher_offers_safe_mode() {
     check(r.start({L"--test-recovery=safe-mode", L"parties://join/x"}) == 0, "safe mode started");
     check(r.runs(good).size() == 2, "unconfirmed good tried twice before recovery");
     check(r.runs(app, "PartiesLauncher.exe").empty(), "no supervisor started for safe mode");
-    auto apps = r.runs(app, "parties_client.exe");
+    auto apps = r.wait_for_runs(app, "parties_client.exe", 1);
     check(apps.size() == 1, "safe mode ran the last good app");
     if (apps.size() == 1)
         check(apps[0].args == std::vector<std::string>{"--data-dir=" + r.data.string(), "parties://join/x"},
