@@ -50,6 +50,14 @@ std::optional<std::wstring> uninstall_key();
 std::optional<std::filesystem::path> start_menu();
 std::optional<std::filesystem::path> recycle_log();
 
+// Where setup looks for a portable copy beyond the folders it was given:
+// PARTIES_TEST_DESKTOP=<dir> replaces the Desktop, and
+// PARTIES_TEST_LEGACY_IMAGE=<file name> replaces parties_client.exe as the
+// name of running portable copies. A testing build without them looks at
+// neither, so a harness never reads the real ones.
+std::optional<std::filesystem::path> desktop();
+std::optional<std::wstring> legacy_image();
+
 bool enabled();
 
 } // namespace parties::update::launcher::testing

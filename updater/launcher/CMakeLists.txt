@@ -18,6 +18,7 @@ add_library(parties_launcher_shell STATIC
     src/file_io.cpp
     src/https_source.cpp
     src/install_plan.cpp
+    src/legacy_bridge.cpp
     src/link_server.cpp
     src/local_dir_source.cpp
     src/log.cpp
@@ -31,14 +32,15 @@ add_library(parties_launcher_shell STATIC
     src/testing.cpp
     src/update_worker.cpp
     ${CMAKE_SOURCE_DIR}/client/src/sqlite_file.cpp
+    ${CMAKE_SOURCE_DIR}/client/src/windows/legacy_import.cpp
 )
 target_include_directories(parties_launcher_shell
     PUBLIC src
     PRIVATE ${CMAKE_SOURCE_DIR}/client/include)
 target_link_libraries(parties_launcher_shell
     PUBLIC parties_update_core
-    PRIVATE parties_update_release_keys rapidjson unofficial::sqlite3::sqlite3 bcrypt comctl32 shell32 winhttp
-        wintrust crypt32 ole32 propsys)
+    PRIVATE parties_update_release_keys parties_common rapidjson unofficial::sqlite3::sqlite3 bcrypt comctl32
+        shell32 winhttp wintrust crypt32 ole32 propsys)
 target_compile_definitions(parties_launcher_shell PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 if(PARTIES_UPDATE_TESTING)
     target_compile_definitions(parties_launcher_shell PRIVATE PARTIES_UPDATE_TESTING)

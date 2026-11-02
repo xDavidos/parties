@@ -108,8 +108,8 @@ public:
     bool init(PlatformBridge bridge, Rml::Context* rml_context);
     void shutdown();
 #ifdef _WIN32
-    // Call before init(). A supervising launcher owns updates, so the legacy
-    // updater stays off and the update UI sends its requests to the launcher.
+    // Call before init(). Only a supervising launcher updates the app; without
+    // one the app shows no update UI.
     void supervise_updates(std::function<void(const update::link::Request&)> send);
     void apply_update_status(const update::link::Status& status);
 #endif
@@ -416,7 +416,6 @@ private:
     uint64_t datagram_drops_logged_ = 0;
 
 #ifdef _WIN32
-    std::unique_ptr<class AutoUpdater> updater_;
     std::function<void(const update::link::Request&)> send_update_request_;  // set only when supervised
     std::optional<update::link::Status> update_status_;
     void on_update_action(UpdateAction action);

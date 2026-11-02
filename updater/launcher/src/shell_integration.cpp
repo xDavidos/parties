@@ -47,6 +47,17 @@ fs::path programs_folder() {
     return out;
 }
 
+// Testing builds read a Desktop only when the harness names one.
+std::optional<fs::path> desktop_folder() {
+    if (auto folder = testing::desktop()) return *folder;
+    if (testing::enabled()) return std::nullopt;
+    PWSTR path = nullptr;
+    std::optional<fs::path> out;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &path))) out = path;
+    CoTaskMemFree(path);
+    return out;
+}
+
 std::wstring widen(std::string_view s) { return fs::path(std::u8string(s.begin(), s.end())).wstring(); }
 
 // A shortcut reads back the long spelling of a target saved under its 8.3 name.
@@ -234,6 +245,20 @@ bool write_shortcuts(const InstallPaths& install, std::string& error) {
         log("wrote shortcut {}", utf8(s.file));
     }
     return true;
+}
+
+std::vector<fs::path> parties_shortcut_targets() {
+    std::vector<fs::path> folders{programs_folder()};
+    if (auto desktop = desktop_folder()) folders.push_back(*desktop);
+    std::vector<fs::path> targets;
+    for (const fs::path& folder : folders) {
+        auto link = folder.empty() ? std::nullopt : read_link(folder / L"Parties.lnk");
+        if (!link || link->target.empty()) continue;
+        wchar_t expanded[32768]{};
+        DWORD n = ExpandEnvironmentStringsW(link->target.c_str(), expanded, 32768);
+        targets.emplace_back(n > 0 && n <= 32768 ? std::wstring(expanded) : link->target);
+    }
+    return targets;
 }
 
 void remove_shortcuts(const InstallPaths& install) {

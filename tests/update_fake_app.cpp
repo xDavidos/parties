@@ -122,7 +122,18 @@ bool exec(sqlite3* db, const std::string& sql) {
     return sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK;
 }
 
+bool has_table(sqlite3* db, const char* name) {
+    sqlite3_stmt* stmt = nullptr;
+    bool found = sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", -1, &stmt,
+                                    nullptr) == SQLITE_OK &&
+                 sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+// A database from before data versioning (the portable zip's) is version 1, floor 1.
 std::optional<DataInfo> read_schema(sqlite3* db) {
+    if (has_table(db, "identity") && !has_table(db, "parties_schema")) return DataInfo{1, 1};
     sqlite3_stmt* stmt = nullptr;
     std::optional<DataInfo> info;
     if (sqlite3_prepare_v2(db, "SELECT version, compat_floor FROM parties_schema WHERE id = 1", -1, &stmt, nullptr) ==
@@ -159,13 +170,18 @@ uint32_t open_data(const fs::path& db_path, const BuildInfo& build, sqlite3*& db
     case Compatibility::Incompatible: die(4);
     case Compatibility::MigratesForward: {
         uint32_t floor = std::max(info->compat_floor, build.floor);
-        if (!exec(db, "UPDATE parties_schema SET version = " + std::to_string(build.schema) +
-                          ", compat_floor = " + std::to_string(floor) + " WHERE id = 1"))
+        if (!exec(db, "CREATE TABLE IF NOT EXISTS parties_schema (id INTEGER PRIMARY KEY CHECK (id = 1), "
+                      "version INTEGER NOT NULL, compat_floor INTEGER NOT NULL)") ||
+            !exec(db, "INSERT OR REPLACE INTO parties_schema VALUES (1, " + std::to_string(build.schema) + ", " +
+                          std::to_string(floor) + ")"))
             die(2);
         break;
     }
     case Compatibility::ReadsAsIs: break;
     }
+    if (!exec(db, "CREATE TABLE IF NOT EXISTS markers (n INTEGER PRIMARY KEY, build TEXT NOT NULL, "
+                  "opened_at INTEGER NOT NULL)"))
+        die(2);
     return info->version;
 }
 

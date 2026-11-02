@@ -128,9 +128,6 @@ else()
 
         # Parties application adapter over RmlUi's upstream Win32/DX12 backend
 
-        # Auto-updater (WinHTTP)
-        src/windows/auto_updater.cpp
-
         # Screen capture — DXGI
         src/windows/screen_capture.cpp
 
@@ -333,7 +330,6 @@ else()
             mfplat mfreadwrite mfuuid mf
             windowsapp
             dwmapi gdi32 shell32
-            winhttp wintrust crypt32
     )
 endif()
 

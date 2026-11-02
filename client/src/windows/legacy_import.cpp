@@ -5,8 +5,12 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <memory>
+#include <optional>
 #include <system_error>
 
 namespace parties::client {
@@ -125,17 +129,82 @@ bool copy_raw(const fs::path& from, const fs::path& to, std::string& error) {
     return commit_file(partial, to, error);
 }
 
-bool preserve(const LegacyCandidate& candidate, const fs::path& dest, std::string& error) {
+// Missing files count as equal, so a copy without a -wal matches a backup without one.
+bool same_bytes(const fs::path& a, const fs::path& b) {
+    std::error_code ec_a, ec_b;
+    const bool has_a = fs::exists(a, ec_a), has_b = fs::exists(b, ec_b);
+    if (!has_a || !has_b) return has_a == has_b;
+    if (fs::file_size(a, ec_a) != fs::file_size(b, ec_b) || ec_a || ec_b) return false;
+    std::ifstream in_a(a, std::ios::binary), in_b(b, std::ios::binary);
+    return std::equal(std::istreambuf_iterator<char>(in_a), std::istreambuf_iterator<char>(),
+                      std::istreambuf_iterator<char>(in_b), std::istreambuf_iterator<char>());
+}
+
+// A legacy-* backup holding exactly `db` and its -wal.
+std::optional<fs::path> existing_copy(const fs::path& backups_dir, const fs::path& db) {
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(backups_dir, ec)) {
+        const std::string name = utf8_path(entry.path().filename());
+        if (!name.starts_with("legacy-") || !name.ends_with(".db") || !entry.is_regular_file(ec)) continue;
+        if (same_bytes(entry.path(), db) && same_bytes(sidecar(entry.path(), "-wal"), sidecar(db, "-wal")))
+            return entry.path();
+    }
+    return std::nullopt;
+}
+
+// Copies `candidate` to `dest` and returns `dest`, or returns an empty path
+// when a legacy backup already holds the same bytes. VACUUM INTO writes the
+// same file for the same content, so an unchanged source is copied once.
+std::optional<fs::path> preserve(const LegacyCandidate& candidate, const fs::path& dest, std::string& error) {
+    const fs::path backups_dir = dest.parent_path();
+    std::error_code ec;
     if (candidate.readable) {
-        Db db = open_read_only(candidate.path);
-        if (db) return write_snapshot(db.get(), dest, error);
+        if (Db db = open_read_only(candidate.path)) {
+            const fs::path partial = partial_path(dest);
+            fs::remove(partial, ec);
+            if (!vacuum_into(db.get(), partial, error)) {
+                fs::remove(partial, ec);
+                return std::nullopt;
+            }
+            if (existing_copy(backups_dir, partial)) {
+                fs::remove(partial, ec);
+                return fs::path();
+            }
+            if (!commit_file(partial, dest, error)) return std::nullopt;
+            return dest;
+        }
     }
     // Unreadable files are kept byte for byte so nothing is lost even when
     // SQLite cannot make sense of them.
-    std::error_code ec;
+    if (existing_copy(backups_dir, candidate.path)) return fs::path();
     const fs::path wal = sidecar(candidate.path, "-wal");
-    if (fs::exists(wal, ec) && !copy_raw(wal, sidecar(dest, "-wal"), error)) return false;
-    return copy_raw(candidate.path, dest, error);
+    if (fs::exists(wal, ec) && !copy_raw(wal, sidecar(dest, "-wal"), error)) return std::nullopt;
+    if (!copy_raw(candidate.path, dest, error)) return std::nullopt;
+    return dest;
+}
+
+bool preserve_all(const DataLocation& location, const std::vector<LegacyCandidate>& candidates,
+                  std::span<const std::size_t> indices, LegacyImportResult& result) {
+    if (indices.empty()) return true;
+    std::error_code ec;
+    fs::create_directories(location.backups_dir, ec);
+    const std::string stamp = utc_file_stamp();
+    for (std::size_t i = 0; i < indices.size(); ++i) {
+        const LegacyCandidate& candidate = candidates[indices[i]];
+        const fs::path dest =
+            unique_backup_path(location.backups_dir, "legacy-" + stamp + "-" + std::to_string(i));
+        const std::optional<fs::path> kept = preserve(candidate, dest, result.error);
+        if (!kept) {
+            result.status = LegacyImportResult::Status::Failed;
+            result.error = "cannot preserve " + utf8_path(candidate.path) + ": " + result.error;
+            LOG_ERROR("Legacy import: {}", result.error);
+            return false;
+        }
+        if (kept->empty()) continue;
+        LOG_INFO("Legacy import: preserved {} as {}", utf8_path(candidate.path), utf8_path(*kept));
+        result.preserved.push_back(*kept);
+    }
+    return true;
 }
 
 bool import_copy(const LegacyCandidate& candidate, const fs::path& db_path, std::string& error) {
@@ -185,21 +254,7 @@ LegacyImportResult import_legacy_data(const DataLocation& location,
 
     // Preserve first: a crash after the import would otherwise skip the copies
     // forever, because the next start sees a database and does nothing.
-    const std::string stamp = utc_file_stamp();
-    if (!plan.preserve.empty()) fs::create_directories(location.backups_dir, ec);
-    for (std::size_t i = 0; i < plan.preserve.size(); ++i) {
-        const LegacyCandidate& candidate = candidates[plan.preserve[i]];
-        const fs::path dest = unique_backup_path(
-            location.backups_dir, "legacy-" + stamp + "-" + std::to_string(i));
-        if (!preserve(candidate, dest, result.error)) {
-            result.status = Status::Failed;
-            result.error = "cannot preserve " + utf8_path(candidate.path) + ": " + result.error;
-            LOG_ERROR("Legacy import: {}", result.error);
-            return result;
-        }
-        LOG_INFO("Legacy import: preserved {} as {}", utf8_path(candidate.path), utf8_path(dest));
-        result.preserved.push_back(dest);
-    }
+    if (!preserve_all(location, candidates, plan.preserve, result)) return result;
 
     if (!plan.import) {
         result.status = Status::NoneImported;
@@ -217,6 +272,16 @@ LegacyImportResult import_legacy_data(const DataLocation& location,
     LOG_INFO("Legacy import: imported {} into {}", utf8_path(chosen.path), utf8_path(db_path));
     result.status = Status::Imported;
     result.imported_from = chosen.path;
+    return result;
+}
+
+LegacyImportResult preserve_legacy_data(const DataLocation& location,
+                                        std::span<const fs::path> search_dirs) {
+    LegacyImportResult result;
+    const std::vector<LegacyCandidate> candidates = find_candidates(location, search_dirs);
+    std::vector<std::size_t> all(candidates.size());
+    for (std::size_t i = 0; i < all.size(); ++i) all[i] = i;
+    preserve_all(location, candidates, all, result);
     return result;
 }
 

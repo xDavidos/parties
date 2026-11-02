@@ -5,6 +5,7 @@
 #include "data_guard.h"
 #include "file_io.h"
 #include "install_plan.h"
+#include "legacy_bridge.h"
 #include "log.h"
 #include "setup_payload.h"
 #include "shell_integration.h"
@@ -13,6 +14,7 @@
 
 #include <parties/update/install_layout.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <charconv>
@@ -31,6 +33,8 @@ namespace {
 enum ExitCode : int { kDone = 0, kFailed = 1, kCancelled = 2 };
 
 constexpr DWORD kLauncherQuitTimeoutMs = 60'000;
+// The legacy updater calls ExitProcess right after starting the carrier.
+constexpr std::chrono::milliseconds kPortableExitTimeout{30'000};
 
 struct SetupOptions {
     enum class Mode { Install, Uninstall, Pack } mode = Mode::Install;
@@ -44,11 +48,18 @@ struct SetupOptions {
     fs::path pack_dir, pack_out;
     HANDLE wait_for = nullptr;  // set in the temporary uninstaller copy
     std::vector<std::wstring> args;
+    // Started as the zip's parties_client.exe: installs without asking, and
+    // a double-click while Parties runs only brings it forward.
+    bool carrier = false;
+    bool handed_over = false;  // the legacy updater started this run and is exiting
+    LegacyHints legacy;
+    std::chrono::milliseconds portable_exit_timeout = kPortableExitTimeout;
 };
 
 struct Outcome {
     int code = kDone;
     std::string message;
+    std::string note;  // shown after Parties starts
 };
 
 Outcome failed(std::string message) { return {kFailed, std::move(message)}; }
@@ -60,6 +71,8 @@ fs::path self_exe() {
     buffer.resize(GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size())));
     return buffer;
 }
+
+bool same_name(const fs::path& file, const wchar_t* name) { return _wcsicmp(file.filename().c_str(), name) == 0; }
 
 bool inside(const fs::path& path, const fs::path& dir) {
     std::wstring p = path.lexically_normal().wstring(), d = dir.lexically_normal().wstring();
@@ -77,9 +90,16 @@ void report(const std::string& text) {
     WriteFile(err, line.data(), static_cast<DWORD>(line.size()), &written, nullptr);
 }
 
+bool is_handoff_flag(const std::wstring& a) { return a == L"--update-cleanup" || a == L"--update-replace"; }
+
 std::optional<SetupOptions> parse(const std::vector<std::wstring>& args, std::string& error) {
     SetupOptions o;
     o.args = args;
+    const fs::path self = self_exe();
+    std::error_code ec;
+    o.legacy.working_dir = fs::current_path(ec);
+    o.legacy.self_dir = self.parent_path();
+    o.carrier = same_name(self, L"parties_client.exe") || std::ranges::any_of(args, is_handoff_flag);
     std::optional<fs::path> install_root, data_root;
     auto absolute = [&](std::wstring_view v, const char* what) -> std::optional<fs::path> {
         fs::path p(v);
@@ -87,7 +107,8 @@ std::optional<SetupOptions> parse(const std::vector<std::wstring>& args, std::st
         error = std::string(what) + " must be an absolute path";
         return std::nullopt;
     };
-    for (const std::wstring& a : args) {
+    for (size_t i = 0; i < args.size(); ++i) {
+        const std::wstring& a = args[i];
         auto value = [&](std::wstring_view flag) -> std::optional<std::wstring_view> {
             if (!a.starts_with(flag)) return std::nullopt;
             return std::wstring_view(a).substr(flag.size());
@@ -116,11 +137,29 @@ std::optional<SetupOptions> parse(const std::vector<std::wstring>& args, std::st
             o.wait_for = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(handle));
         } else if (auto v = value(L"--test-namespace=")) {
             if (testing::enabled() && !v->empty() && v->find(L'\\') == std::wstring_view::npos) o.object_prefix = *v;
+        } else if (is_handoff_flag(a)) {
+            if (i + 1 == args.size()) {
+                error = utf8(fs::path(a)) + " needs a path";
+                return std::nullopt;
+            }
+            const auto kind = a == L"--update-cleanup" ? OldBinary::Kind::Cleanup : OldBinary::Kind::Replace;
+            o.legacy.old = OldBinary{fs::absolute(args[++i], ec).lexically_normal(), kind};
+            o.handed_over = true;
+        } else if (auto v = value(L"--test-portable-wait-ms=")) {
+            uint64_t ms = 0;
+            std::string digits(v->begin(), v->end());
+            if (testing::enabled() && std::from_chars(digits.data(), digits.data() + digits.size(), ms).ec == std::errc{})
+                o.portable_exit_timeout = std::chrono::milliseconds(ms);
+        } else if (o.carrier) {
+            log("ignoring {}", utf8(fs::path(a)));  // old shortcuts may carry options of the portable app
         } else {
             error = "unknown argument " + utf8(fs::path(a));
             return std::nullopt;
         }
     }
+    // A handoff that was cut short leaves the old binary beside the carrier.
+    const fs::path leftover = o.legacy.self_dir / "parties_client.old.exe";
+    if (o.carrier && !o.legacy.old && fs::exists(leftover, ec)) o.legacy.old = OldBinary{leftover};
     if (o.mode == SetupOptions::Mode::Pack && o.pack_out.empty()) {
         error = "--pack needs --out=<setup exe>";
         return std::nullopt;
@@ -242,6 +281,14 @@ Outcome install(const SetupOptions& o, const Payload& payload) {
     auto exclusive = Mutex::launcher(o);
     if (!exclusive) return failed(kStillRunning);
 
+    // Before any shortcut changes: the Start menu Parties.lnk may be the only
+    // pointer to a portable copy, and before the first start the data root
+    // must already hold its identity.
+    testing::before_effect();
+    const LegacyData legacy = move_legacy_data(o.data, legacy_dirs(o.legacy));
+    if (!legacy.error.empty())
+        return failed("Parties could not copy your data, so nothing was installed: " + legacy.error);
+
     StateStore store(o.install, utf8(o.data.data()));
     BuildStore builds(o.install);
     const LoadResult loaded = store.load();
@@ -251,18 +298,30 @@ Outcome install(const SetupOptions& o, const Payload& payload) {
     std::error_code ec;
     fs::create_directories(o.install.builds(), ec);
     if (ec) return failed("Parties cannot create " + utf8(o.install.builds()) + ": " + ec.message());
+    testing::before_effect();
     if (plan.seal_bundled && !ensure_sealed(builds, payload, error)) return failed("Parties cannot be installed: " + error);
+    testing::before_effect();
     if (!ensure_stub(o.install, payload.stub, plan.replace_stub, error)) return failed("Parties cannot be installed: " + error);
+    testing::before_effect();
     auto good = apply_state(plan, loaded, builds, store, bundled.id);
     if (!good) return failed("Parties cannot save its install state: " + good.error());
+    testing::before_effect();
     if (*good && !write_uninstall_entry(o.install, **good, error)) return failed(error);
+    testing::before_effect();
     if (!write_shortcuts(o.install, error)) return failed(error);
 
     const std::string version = payload.entry.version.to_string();
-    if (std::holds_alternative<Adopt>(plan.state)) return {kDone, "Parties " + version + " is installed."};
+    if (std::holds_alternative<Adopt>(plan.state)) return {kDone, "Parties " + version + " is installed.", legacy.note};
     if (std::holds_alternative<Stage>(plan.state))
-        return {kDone, "Parties " + version + " is ready and starts the next time you open Parties."};
-    return {kDone, "Parties is repaired. Your data was not changed."};
+        return {kDone, "Parties " + version + " is ready and starts the next time you open Parties.", legacy.note};
+    return {kDone, "Parties is repaired. Your data was not changed.", legacy.note};
+}
+
+bool launcher_running(const SetupOptions& o) {
+    HANDLE m = OpenMutexW(SYNCHRONIZE, FALSE, (L"Local\\" + o.object_prefix + L".Launcher.Running").c_str());
+    if (!m) return false;
+    CloseHandle(m);
+    return true;
 }
 
 // Starts the installed app the way the Start menu shortcut does.
@@ -468,6 +527,51 @@ int run_install(const SetupOptions& o, const std::expected<Payload, std::string>
         return outcome.code;
     }
     if (o.launch) launch_installed(o);
+    if (!outcome.note.empty()) {
+        report(outcome.note);
+        if (!o.silent) show(L"Parties is installed", widen(outcome.note), TD_INFORMATION_ICON);
+    }
+    return kDone;
+}
+
+// The legacy updater swapped this carrier in for the portable app and
+// started it, or a user or old shortcut started the carrier again.
+int run_carrier(const SetupOptions& o, const std::expected<Payload, std::string>& payload) {
+    if (!payload) {
+        report("setup refused its payload: " + payload.error());
+        if (!o.silent)
+            show(L"Parties cannot be updated", widen(payload.error()) + L"\n\nDownload Parties again.", TD_ERROR_ICON);
+        return kFailed;
+    }
+    if (!o.handed_over && launcher_running(o)) {
+        log("Parties is running; bringing it forward");
+        launch_installed(o);
+        return kDone;
+    }
+    const bool portable_closed = !o.handed_over || wait_for_portable_exit(o.object_prefix, o.portable_exit_timeout);
+    auto work = [&] { return install(o, *payload); };
+    Outcome outcome = o.handed_over ? run_work(o, L"Updating Parties", work) : work();
+    report(outcome.message);
+    if (outcome.code != kDone) {
+        std::string message = outcome.message;
+        std::error_code ec;
+        if (o.legacy.old && fs::exists(o.legacy.old->path, ec))
+            message += " Your previous version is still in " + utf8(o.legacy.old->path) + ".";
+        if (!o.silent) show(L"Parties could not be updated", widen(message), TD_ERROR_ICON);
+        return outcome.code;
+    }
+    testing::before_effect();
+    if (o.legacy.old) retire_old_binary(*o.legacy.old, self_exe());
+    testing::before_effect();
+    std::string note = outcome.note;
+    if (!portable_closed)
+        note += (note.empty() ? "" : " ") + std::string("Close the older Parties window, then start Parties from the Start menu.");
+    else if (o.launch)
+        launch_installed(o);
+    if (!note.empty()) {
+        report(note);
+        if (!o.silent) show(L"Parties is updated", widen(note), TD_INFORMATION_ICON);
+    }
     return kDone;
 }
 
@@ -534,7 +638,10 @@ std::optional<int> run_setup_modes(const std::vector<std::wstring>& args) {
     switch (options->mode) {
     case SetupOptions::Mode::Pack: code = run_pack(*options); break;
     case SetupOptions::Mode::Uninstall: code = run_uninstall(*options); break;
-    case SetupOptions::Mode::Install: code = payload ? run_install(*options, *payload) : kFailed; break;
+    case SetupOptions::Mode::Install:
+        if (!payload) break;
+        code = options->carrier ? run_carrier(*options, *payload) : run_install(*options, *payload);
+        break;
     }
     if (SUCCEEDED(com)) CoUninitialize();
     return code;

@@ -104,11 +104,11 @@ To build a setup locally, run `cmake --build build --target PartiesSetup` in a b
 
 ### Release assets
 
-Each `vA.B.C.D` release holds these Windows assets. The first three are unchanged from before the update channels.
+Each `vA.B.C.D` release holds these Windows assets. The server and debug symbol archives are unchanged from before the update channels.
 
 | Asset | Contents |
 | --- | --- |
-| `parties-client-windows-vA.B.C.D.zip` | `parties_client.exe`, for the legacy in-app updater and manual installs |
+| `parties-client-windows-vA.B.C.D.zip` | `parties_client.exe`, which is `PartiesSetup-A.B.C.D.exe` under the name the legacy in-app updater installs. A release without a signed setup keeps the client itself here. |
 | `parties-server-windows-vA.B.C.D.zip` | `parties_server.exe` |
 | `parties-pdb-windows-vA.B.C.D.zip` | Debug symbols |
 | `PartiesLauncher-A.B.C.D.exe` | The launcher of the build, named `PartiesLauncher.exe` in the build directory |
@@ -117,6 +117,8 @@ Each `vA.B.C.D` release holds these Windows assets. The first three are unchange
 | `PartiesSetup-A.B.C.D.exe` | The installer. It installs or repairs per user, with no administrator rights, in `%LOCALAPPDATA%\Programs\Parties`. |
 
 `PartiesSetup-A.B.C.D.exe` is the launcher with the build, the stub and the signed Beta manifest embedded as resources. Before it writes anything, it verifies that manifest against its pinned keys and every embedded file against its digest. The `setup` job packs it after `publish-beta` has signed the manifest, then signs it and verifies its Authenticode signature. `--silent` installs without any dialog, and `--no-launch` skips starting Parties afterwards. Windows lists Parties under **Settings > Apps > Installed apps**. Uninstalling it from there keeps `%LOCALAPPDATA%\Parties` unless the user chooses to move it to the Recycle Bin.
+
+Portable users reach the installer through the legacy in-app updater once a release with a signed setup becomes **Latest**. The updater swaps the zip's `parties_client.exe`, which is the setup, in for the running app, keeps the old exe as `parties_client.old.exe`, and starts the setup with `--update-cleanup`. The setup waits for the old app to exit, then copies the portable `parties_client.db` into `%LOCALAPPDATA%\Parties\data` before it writes any shortcut, and keeps another copy in `backups\legacy-*`. If `data` already has a database, only the copy in `backups` is made, and the setup says where it is. The setup then deletes `parties_client.old.exe` and starts Parties. The portable folder keeps the setup as `parties_client.exe`, so old shortcuts start the installed Parties. A setup run by hand also looks for portable data, in its working folder, its own folder, the folders that the Start menu and Desktop `Parties.lnk` start from, and the folders of running portable copies.
 
 The launcher, app and stub assets appear once the launcher target builds `build-retail/updater/launcher/PartiesLauncher.exe`. The stub comes from `build-retail/updater/boot/Parties.exe`. Both paths are set once, in the `windows` job of `.github/workflows/release.yml`. All Windows executables carry the Authenticode signature from the signing service.
 
