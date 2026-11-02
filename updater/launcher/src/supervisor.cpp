@@ -14,6 +14,7 @@
 
 #include <parties/update/link.h>
 #include <parties/update/probation.h>
+#include <parties/update/update_policy.h>
 
 #include <algorithm>
 #include <charconv>
@@ -381,9 +382,8 @@ void Supervisor::on_request(const link::Request& request) {
                     submit(DowngradeJob{r.channel, state_.channel, state_.intent});
                     return;
                 }
-                ChannelIntent intent = r.choice == link::ChannelChoice::Wait
-                                           ? ChannelIntent{PinnedUntilAtLeast{state_.good.version}}
-                                           : ChannelIntent{Follow{}};
+                ChannelIntent intent =
+                    r.choice == link::ChannelChoice::Wait ? wait_intent(state_) : ChannelIntent{Follow{}};
                 dispatch(ChannelIntentSet{r.channel, intent});
                 start_check();
             }
