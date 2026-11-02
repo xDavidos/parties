@@ -35,12 +35,14 @@ std::optional<uint64_t> number(std::string_view text) {
     return value;
 }
 
-// The harness's own key, generated for it. Never a production key.
-const PinnedKey kKeys[] = {{
-    "parties-e2e-test",
-    {0x47, 0xac, 0x18, 0xc9, 0xb1, 0x2d, 0xc1, 0xbe, 0x44, 0x54, 0x33, 0x86, 0x8b, 0x82, 0xb5, 0x68,
-     0x8e, 0x7a, 0x30, 0xbc, 0x47, 0x65, 0xe5, 0x14, 0x87, 0x66, 0x97, 0x79, 0x16, 0x31, 0x44, 0x1a},
-}};
+// The harness's own key, generated for it. Never a production key. Pinned
+// twice: under the id the harnesses sign with, and under the id
+// parties_manifest_tool gives it (the public key's first 16 hex digits),
+// so a manifest the tool signs with it verifies too.
+constexpr Ed25519PublicKey kHarnessKey{0x47, 0xac, 0x18, 0xc9, 0xb1, 0x2d, 0xc1, 0xbe, 0x44, 0x54, 0x33,
+                                       0x86, 0x8b, 0x82, 0xb5, 0x68, 0x8e, 0x7a, 0x30, 0xbc, 0x47, 0x65,
+                                       0xe5, 0x14, 0x87, 0x66, 0x97, 0x79, 0x16, 0x31, 0x44, 0x1a};
+const PinnedKey kKeys[] = {{"parties-e2e-test", kHarnessKey}, {"47ac18c9b12dc1be", kHarnessKey}};
 
 } // namespace
 
@@ -107,6 +109,20 @@ std::optional<std::chrono::milliseconds> job_cap() {
 
 Keyring pinned_keys() { return kKeys; }
 
+namespace {
+
+std::optional<std::wstring> wide_env(const char* name) {
+    auto value = env(name);
+    if (!value) return std::nullopt;
+    return fs::path(std::u8string(value->begin(), value->end())).wstring();
+}
+
+} // namespace
+
+std::optional<std::wstring> uninstall_key() { return wide_env("PARTIES_TEST_UNINSTALL_KEY"); }
+std::optional<fs::path> start_menu() { return wide_env("PARTIES_TEST_START_MENU"); }
+std::optional<fs::path> recycle_log() { return wide_env("PARTIES_TEST_RECYCLE_LOG"); }
+
 #else
 
 bool enabled() { return false; }
@@ -115,7 +131,11 @@ void before_effect() {}
 std::optional<std::string> scripted_recovery() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> exit_after_healthy() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> job_cap() { return std::nullopt; }
+// Empty until a production key is committed, so no manifest verifies.
 Keyring pinned_keys() { return production_keyring(); }
+std::optional<std::wstring> uninstall_key() { return std::nullopt; }
+std::optional<std::filesystem::path> start_menu() { return std::nullopt; }
+std::optional<std::filesystem::path> recycle_log() { return std::nullopt; }
 
 #endif
 

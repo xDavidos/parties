@@ -437,7 +437,7 @@ endif()
 # Drives the real PartiesLauncher.exe over fake builds in a temp install root.
 if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
     find_package(RapidJSON CONFIG REQUIRED)
-    add_executable(update_fake_app WIN32 update_fake_app.cpp)
+    add_executable(update_fake_app WIN32 update_fake_app.cpp ../client/src/windows/shell_identity.cpp)
     target_link_libraries(update_fake_app PRIVATE parties_update_link rapidjson unofficial::sqlite3::sqlite3)
 
     add_executable(update_e2e_test update_e2e_test.cpp)
@@ -457,5 +457,23 @@ if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
         add_test(NAME update_e2e_smoke COMMAND update_e2e_test ${update_e2e_args}
             --real-client $<TARGET_FILE:parties_client>)
         set_tests_properties(update_e2e_smoke PROPERTIES TIMEOUT 300)
+    endif()
+
+    # Setup, repair and uninstall over fake builds. The Apps entry, the Start
+    # menu and the Recycle Bin are redirected into the test's own places.
+    add_executable(update_setup_test update_setup_test.cpp)
+    target_include_directories(update_setup_test PRIVATE ../client/include)
+    target_link_libraries(update_setup_test PRIVATE
+        parties_launcher_shell parties_common unofficial::sqlite3::sqlite3 ole32 propsys shell32)
+    add_dependencies(update_setup_test PartiesLauncher parties_boot_stub update_fake_app)
+    set(update_setup_args --launcher $<TARGET_FILE:PartiesLauncher> --stub $<TARGET_FILE:parties_boot_stub>
+        --fake-app $<TARGET_FILE:update_fake_app>)
+    add_test(NAME update_setup COMMAND update_setup_test ${update_setup_args})
+    set_tests_properties(update_setup PROPERTIES TIMEOUT 900)
+    # Needs a GPU, like update_e2e_smoke.
+    if(TARGET parties_client)
+        add_test(NAME update_e2e_setup_smoke COMMAND update_setup_test ${update_setup_args}
+            --real-client $<TARGET_FILE:parties_client>)
+        set_tests_properties(update_e2e_setup_smoke PROPERTIES TIMEOUT 300)
     endif()
 endif()

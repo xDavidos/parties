@@ -17,7 +17,7 @@ Only four-part tags get an update layout. A tag such as `v1.6.0` still publishes
 
 ## Set up the signing key the first time
 
-Until a production key is pinned and its secret is set, releases publish as before, `publish-beta` and **Re-sign channels** end with a notice, and **Promote to Stable** only marks the release as latest. A build pins the keys that its commit holds, so the first build that can receive signed updates is the first tag after the key commit.
+Until a production key is pinned and its secret is set, releases publish as before, `publish-beta`, `setup` and **Re-sign channels** end with a notice, and **Promote to Stable** only marks the release as latest. No release has a `PartiesSetup-A.B.C.D.exe` until then, because a setup whose manifest no launcher can verify is never shipped. A build pins the keys that its commit holds, so the first build that can receive signed updates is the first tag after the key commit.
 
 1. Build the tool on a machine you trust: `cmake --build --preset release --target parties_manifest_tool`.
 2. Generate the key: `build-release/updater/tools/parties_manifest_tool.exe keygen --out-secret update-key.secret --out-public update-key.pub`. The tool prints the key id.
@@ -74,6 +74,8 @@ GitHub disables scheduled workflows in a repository with no activity for 60 days
 
 If `publish-beta` failed or ended with the notice because the key was not ready, run **Publish to Beta** by hand. Enter the version and the ID of the Release run that built it, which is the number at the end of the run's URL. The job uses that run's artifacts, which GitHub keeps for 90 days.
 
+A hand-run **Publish to Beta** does not build `PartiesSetup-A.B.C.D.exe`. Only the `setup` job of the Release run does, right after its own `publish-beta` job. Afterwards, rerun only the failed `setup` job of that Release run. Do not rerun all of its jobs.
+
 Do not rerun all jobs of a Release run for a version that is already in a channel. The rebuild produces new bytes and replaces the release assets, so the published entry no longer matches them. Launchers then refuse the download, and the next re-sign fails its asset check. Tag a new version instead.
 
 ## Rehearse locally
@@ -96,6 +98,8 @@ bash tools/release/channels.sh revoke 1.6.0.0 both
 
 The tag must match the version the build reports, which comes from `git describe`. `promote` reads the real release named by `REPO`, so that release must exist. `SKIP_ASSET_CHECK=1` skips the downloads, because the rehearsal's URLs point at assets that were never uploaded.
 
+To build a setup locally, run `cmake --build build --target PartiesSetup` in a build configured with `-DPARTIES_UPDATE_TESTING=ON`. It packs that build's stub, launcher and client with a manifest signed by the test harness key, which only testing launchers trust. To pack other files, set `-DPARTIES_SETUP_PAYLOAD_DIR=<dir>`. The directory holds `manifest.json`, `Parties.exe`, and every file of one build that the manifest lists. The `setup` job runs the same packing, `PartiesLauncher.exe --pack=<dir> --out=<exe>`, directly on the release's signed files.
+
 ## Reference
 
 ### Release assets
@@ -110,8 +114,11 @@ Each `vA.B.C.D` release holds these Windows assets. The first three are unchange
 | `PartiesLauncher-A.B.C.D.exe` | The launcher of the build, named `PartiesLauncher.exe` in the build directory |
 | `parties_client-A.B.C.D.exe` | The app of the build, named `parties_client.exe` in the build directory |
 | `Parties-A.B.C.D.exe` | The boot stub, for setup. Updates never replace it. |
+| `PartiesSetup-A.B.C.D.exe` | The installer. It installs or repairs per user, with no administrator rights, in `%LOCALAPPDATA%\Programs\Parties`. |
 
-The last three appear once the launcher target builds `build-retail/updater/launcher/PartiesLauncher.exe`. The stub comes from `build-retail/updater/boot/Parties.exe`. Both paths are set once, in the `windows` job of `.github/workflows/release.yml`. All Windows executables carry the Authenticode signature from the signing service.
+`PartiesSetup-A.B.C.D.exe` is the launcher with the build, the stub and the signed Beta manifest embedded as resources. Before it writes anything, it verifies that manifest against its pinned keys and every embedded file against its digest. The `setup` job packs it after `publish-beta` has signed the manifest, then signs it and verifies its Authenticode signature. `--silent` installs without any dialog, and `--no-launch` skips starting Parties afterwards. Windows lists Parties under **Settings > Apps > Installed apps**. Uninstalling it from there keeps `%LOCALAPPDATA%\Parties` unless the user chooses to move it to the Recycle Bin.
+
+The launcher, app and stub assets appear once the launcher target builds `build-retail/updater/launcher/PartiesLauncher.exe`. The stub comes from `build-retail/updater/boot/Parties.exe`. Both paths are set once, in the `windows` job of `.github/workflows/release.yml`. All Windows executables carry the Authenticode signature from the signing service.
 
 ### Channel manifests
 
@@ -125,7 +132,7 @@ The `channels` release is a prerelease that holds `beta.manifest.json` and `stab
 
 | Workflow | Trigger | Signs | Other effect |
 | --- | --- | --- | --- |
-| **Release** (`release.yml`) | `v*` tag | Beta, through `publish-beta.yml` | Creates the prerelease and its assets |
+| **Release** (`release.yml`) | `v*` tag | Beta, through `publish-beta.yml` | Creates the prerelease and its assets, then `PartiesSetup-A.B.C.D.exe` |
 | **Publish to Beta** (`publish-beta.yml`) | Called by Release, or by hand with a run ID | Beta | None |
 | **Promote to Stable** (`promote.yml`) | By hand | Stable | Marks the release as a full, latest release |
 | **Re-sign channels** (`resign.yml`) | Mondays 06:17 UTC, or by hand | Beta and Stable | None |

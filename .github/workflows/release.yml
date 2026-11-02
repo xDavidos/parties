@@ -97,6 +97,18 @@ jobs:
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
+      # The setup job packs PartiesSetup.exe only after publish-beta has signed
+      # the manifest that setup embeds. Packing rewrites the resources and
+      # would break a signature, so it starts from the unsigned launcher. The
+      # packed setup is then signed on its own.
+      - name: Keep the unsigned launcher as the setup carrier
+        shell: pwsh
+        run: |
+          if (Test-Path $env:LAUNCHER_EXE) {
+            New-Item -ItemType Directory -Force dist-setup | Out-Null
+            Copy-Item $env:LAUNCHER_EXE dist-setup/PartiesSetup-carrier.exe
+          }
+
       - name: Sign executables
         shell: bash
         run: |
@@ -175,6 +187,13 @@ jobs:
         with:
           name: release-windows-update
           path: dist-update/
+
+      - name: Upload setup carrier artifact
+        if: steps.layout.outputs.staged == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-setup-carrier
+          path: dist-setup/PartiesSetup-carrier.exe
 
       # publish-beta.yml runs this exact binary, which pins the keys this
       # build's launcher pins.
@@ -574,3 +593,87 @@ jobs:
       actions: read
     with:
       version: ${{ needs.windows.outputs.version }}
+
+  # ── Setup ───────────────────────────────────────────────────────────────────
+  # PartiesSetup.exe embeds the signed build and the Beta manifest that lists
+  # it, so it exists only once publish-beta has signed that manifest. Without
+  # a production key nothing is signed, and setup is skipped rather than
+  # shipped with a payload that no launcher could verify.
+  setup:
+    needs: [windows, create-release, publish-beta]
+    if: needs.windows.outputs.update_layout == 'true'
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.windows.outputs.version }}
+      SIGNED: ${{ needs.publish-beta.outputs.signed }}
+    steps:
+      - name: Skip without a signed manifest
+        if: env.SIGNED != 'true'
+        run: echo "::notice::No Beta manifest was signed for $env:VERSION, so this release has no PartiesSetup-$env:VERSION.exe. See 'Set up the signing key the first time' in docs/releasing.md."
+
+      - name: Download the build's update layout
+        if: env.SIGNED == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: release-windows-update
+          path: update
+
+      - name: Download the setup carrier
+        if: env.SIGNED == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: release-windows-setup-carrier
+          path: carrier
+
+      - name: Download the signed manifest
+        if: env.SIGNED == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: release-windows-setup-manifest
+          path: manifest
+
+      # --pack verifies the manifest against the carrier's pinned production
+      # keys and every file against its digest, and refuses anything else.
+      - name: Pack PartiesSetup.exe
+        if: env.SIGNED == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force payload | Out-Null
+          Copy-Item "update/assets/PartiesLauncher-$env:VERSION.exe" payload/PartiesLauncher.exe
+          Copy-Item "update/assets/parties_client-$env:VERSION.exe" payload/parties_client.exe
+          Copy-Item "update/assets/Parties-$env:VERSION.exe" payload/Parties.exe
+          Copy-Item manifest/beta.manifest.json payload/manifest.json
+          $out = "$PWD/PartiesSetup-$env:VERSION.exe"
+          $pack = Start-Process carrier/PartiesSetup-carrier.exe -Wait -PassThru -NoNewWindow `
+            -ArgumentList "--pack=$PWD\payload", "--out=$out" -RedirectStandardError pack.err
+          Get-Content pack.err
+          if ($pack.ExitCode -ne 0) { throw "--pack failed with exit code $($pack.ExitCode)" }
+
+      - name: Sign PartiesSetup.exe
+        if: env.SIGNED == 'true'
+        shell: bash
+        run: |
+          exe="PartiesSetup-$VERSION.exe"
+          curl -sf -X POST \
+            -H "X-Sign-Token: ${{ secrets.HOME_CODE_SIGN_TOKEN }}" \
+            -H "CF-Access-Client-Id: ${{ secrets.HOME_CF_ACCESS_CLIENT_ID }}" \
+            -H "CF-Access-Client-Secret: ${{ secrets.HOME_CF_ACCESS_CLIENT_SECRET }}" \
+            --data-binary @"$exe" \
+            -o "${exe}.signed" \
+            "${{ secrets.HOME_CODE_SIGN_URL }}"
+          mv "${exe}.signed" "$exe"
+
+      - name: Verify the setup signature
+        if: env.SIGNED == 'true'
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature "PartiesSetup-$env:VERSION.exe"
+          if ($sig.Status -ne "Valid") { throw "Signature verification failed for PartiesSetup-$env:VERSION.exe: $($sig.Status)" }
+          Write-Host "Verified PartiesSetup-$env:VERSION.exe: $($sig.SignerCertificate.Subject)"
+
+      - name: Publish PartiesSetup.exe
+        if: env.SIGNED == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "PartiesSetup-$VERSION.exe" -R "$GITHUB_REPOSITORY" --clobber

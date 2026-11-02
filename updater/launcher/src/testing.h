@@ -7,6 +7,7 @@
 #include <parties/update/probation.h>
 
 #include <chrono>
+#include <filesystem>
 #include <optional>
 #include <string>
 
@@ -40,6 +41,14 @@ std::optional<std::chrono::milliseconds> job_cap();
 
 // The update keyring: production keys, or the harness key in testing builds.
 Keyring pinned_keys();
+
+// Setup's shell writes, redirected so a harness never touches the real ones:
+// PARTIES_TEST_UNINSTALL_KEY=<HKCU subkey> replaces the Apps entry's key,
+// PARTIES_TEST_START_MENU=<dir> replaces the Start menu Programs folder, and
+// PARTIES_TEST_RECYCLE_LOG=<file> records each path instead of recycling it.
+std::optional<std::wstring> uninstall_key();
+std::optional<std::filesystem::path> start_menu();
+std::optional<std::filesystem::path> recycle_log();
 
 bool enabled();
 

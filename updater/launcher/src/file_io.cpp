@@ -143,6 +143,21 @@ std::optional<FileDigest> digest_file(const fs::path& path) {
     return digest_handle(f.h);
 }
 
+std::optional<FileDigest> digest_bytes(std::span<const uint8_t> bytes) {
+    Sha256Hasher hasher;
+    if (!hasher.ok()) return std::nullopt;
+    FileDigest digest{bytes.size(), {}};
+    while (!bytes.empty()) {
+        ULONG chunk = static_cast<ULONG>(std::min<size_t>(bytes.size(), 1u << 30));
+        if (!hasher.update(bytes.data(), chunk)) return std::nullopt;
+        bytes = bytes.subspan(chunk);
+    }
+    auto sha = hasher.finish();
+    if (!sha) return std::nullopt;
+    digest.sha256 = *sha;
+    return digest;
+}
+
 bool remove_tree(const fs::path& dir, std::string& error) {
     static std::atomic<unsigned> counter{0};
     std::error_code ec;

@@ -16,6 +16,7 @@
 #   DRY_RUN=1                print the release edits instead of making them
 #   TOOL_ARGS                extra tool arguments, such as "--keyring <dir>" with a testing build
 #   SKIP_ASSET_CHECK=1       skip downloading assets, for rehearsals whose urls do not exist
+#   SIGNED_MANIFEST_OUT      publish-beta also copies the manifest it published here, for setup
 #
 # Every command writes only under a scratch directory until its last step,
 # which uploads one manifest with --clobber: the commit point. Rerunning any
@@ -136,6 +137,7 @@ cmd_publish_beta() {
         --keep "$KEEP" --out "$WORK/beta.payload.json"
     sign_and_check "$WORK/beta.payload.json" "$WORK/beta.manifest.json" beta
     publish "$WORK/beta.manifest.json"
+    if [ -n "${SIGNED_MANIFEST_OUT:-}" ]; then cp "$WORK/beta.manifest.json" "$SIGNED_MANIFEST_OUT"; fi
 }
 
 cmd_promote() {

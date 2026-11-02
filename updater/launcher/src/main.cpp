@@ -1,4 +1,5 @@
 #include "file_io.h"
+#include "setup.h"
 #include "supervisor.h"
 
 #include <string>
@@ -16,6 +17,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     for (int i = 1; i < argc; ++i) args.emplace_back(argv[i]);
     LocalFree(argv);
 
+    if (auto code = run_setup_modes(args)) return *code;
     std::string error;
     auto options = parse_options(args, error);
     if (!options) {

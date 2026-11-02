@@ -19,6 +19,7 @@
 #include <parties/thread_scheduling.h>
 
 #include "RmlUi_Platform_Win32.h"
+#include "shell_identity.h"
 #include "system_diagnostics.h"
 
 #include <dwmapi.h>
@@ -497,6 +498,7 @@ int main(int argc, char* argv[]) {
         return kInitFailed;
     }
 
+    apply_shell_identity(hwnd);
     ShowWindow(hwnd, SW_SHOW);
 
     // Force frame recalculation now that the app is initialized.
@@ -538,6 +540,7 @@ int main(int argc, char* argv[]) {
     // Cleanup (order matters: app before window destruction)
     SetPropW(hwnd, L"App", nullptr);
     app.shutdown();
+    clear_shell_identity(hwnd);
     DestroyWindow(hwnd);
     UnregisterClassW(window_class, wc.hInstance);
     parties::quic_cleanup();

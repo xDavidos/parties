@@ -7,6 +7,12 @@
 
 namespace parties::update::launcher {
 
+SupervisorState adopted_state(const BuildRecord& installed) {
+    SupervisorState s = initial_state(installed, Channel::Stable);
+    s.generation = 1;
+    return s;
+}
+
 StateStore::StateStore(InstallPaths install, std::string data_dir)
     : install_(std::move(install)), data_dir_(std::move(data_dir)) {}
 

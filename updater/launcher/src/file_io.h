@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -33,6 +34,7 @@ struct FileDigest {
 std::optional<FileDigest> digest_file(const fs::path& path);
 // Hashes through an open handle from offset 0; the handle needs read access.
 std::optional<FileDigest> digest_handle(void* handle);
+std::optional<FileDigest> digest_bytes(std::span<const uint8_t> bytes);
 
 // Renames `dir` to a unique ".trash-*" sibling, then deletes that, so a
 // half-deleted directory never carries a sealed build's name.
