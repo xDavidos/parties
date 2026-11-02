@@ -345,8 +345,14 @@ void stage(Tx& tx, const BuildRecord& rec, const std::optional<Snapshot>& restor
     if (replaced) tx.emit(DeleteBuild{*replaced});
 }
 
+// A previous_good newer than good is the build a user switched back from, and
+// a check that finds it again stages it. An older one sealed again is a repair.
 void handle(Tx& tx, const BuildSealed& e) {
-    if (tx.s.find(e.record.id) || probation(tx.s) || revoked(tx.s, e.record.id)) return;
+    if (probation(tx.s) || revoked(tx.s, e.record.id)) return;
+    const BuildRecord* known = tx.s.find(e.record.id);
+    if (known && (tx.s.previous_good != e.record.id || known->quarantined() ||
+                  e.record.id.version <= tx.s.good.version))
+        return;
     stage(tx, e.record, e.restore_first);
 }
 
