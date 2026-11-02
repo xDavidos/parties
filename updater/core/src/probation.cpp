@@ -172,6 +172,13 @@ void start_staged(Tx& tx, Staged staged, const std::optional<DataInfo>& data) {
         if (dropped) tx.emit(DeleteBuild{*dropped});
         return start_good(tx, data);
     }
+    // A trial needs a fallback that can open the data. Without one, the
+    // candidate is trusted at once, as setup trusts a fresh install.
+    if (!staged.restore_first && compat_of(tx.s, tx.s.good, data) == Compatibility::Incompatible) {
+        tx.s.activation = Probation{c, tx.s.good, std::nullopt, 0, false};
+        confirm(tx);
+        return start_good(tx, data);
+    }
     // Over a restore, the live copy may be the only one of data newer than the
     // backup, so it must not carry the automatic "pre" name retention prunes.
     SnapshotId pre_id = snapshot_name(staged.restore_first ? "pre-downgrade" : "pre", c, tx.next_generation());
