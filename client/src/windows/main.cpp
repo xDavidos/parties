@@ -3,9 +3,11 @@
 #include <client/data_location.h>
 #include <client/exit_codes.h>
 #include <client/legacy_import.h>
+#include <client/settings_schema.h>
 #include <client/sqlite_file.h>
 #include <client/supervisor_link.h>
 #include <client/win32_single_instance.h>
+#include <parties/update/build_info.h>
 #include <parties/version.h>
 #include <parties/crypto.h>
 #include <parties/net_common.h>
@@ -28,6 +30,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -318,6 +321,18 @@ static std::unique_ptr<SupervisorLink> connect_supervisor() {
     return SupervisorLink::from_args(args, version.value_or(parties::update::Version{}));
 }
 
+static int write_build_info(const char* path) {
+    const parties::update::BuildInfo info{
+        .version = parties::APP_VERSION,
+        .data_schema = static_cast<uint32_t>(schema::kCurrent.version),
+        .data_compat_floor = static_cast<uint32_t>(schema::kCurrent.compat_floor),
+    };
+    std::ofstream out(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
+    out << parties::update::format_build_info(info);
+    out.close();
+    return out ? 0 : 1;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Entry point
 // ═══════════════════════════════════════════════════════════════════════
@@ -325,6 +340,9 @@ static std::unique_ptr<SupervisorLink> connect_supervisor() {
 int main(int argc, char* argv[]) {
     // Must be first: if launched as crashpad handler subprocess, run handler and exit.
     parties::crash_reporter_is_crashpad_handler(argc, argv);
+
+    for (int i = 1; i + 1 < argc; ++i)
+        if (std::strcmp(argv[i], "--write-build-info") == 0) return write_build_info(argv[i + 1]);
 
     if (AutoUpdater::handle_update_args(argc, argv)) return 1;
 

@@ -315,9 +315,9 @@ void Supervisor::on_link() {
     for (link::AppMessage& message : app_->link->poll()) {
         if (!app_) return;
         if (auto* hello = std::get_if<link::Hello>(&message)) {
-            auto protocol = link::negotiate(*hello, link::kProtocol);
+            auto protocol = link::negotiate(*hello, kLinkProtocol);
             if (!protocol) {
-                log("app {} cannot talk link protocol {}", hello->version.to_string(), link::kProtocol);
+                log("app {} cannot talk link protocol {}", hello->version.to_string(), kLinkProtocol);
                 continue;
             }
             app_->link->send(link::Welcome{*protocol});

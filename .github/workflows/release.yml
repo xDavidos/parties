@@ -16,9 +16,16 @@ jobs:
   # ── Windows retail build ────────────────────────────────────────────────────
   windows:
     runs-on: windows-latest
+    outputs:
+      update_layout: ${{ steps.layout.outputs.staged }}
+      version: ${{ steps.layout.outputs.version }}
     env:
       VCPKG_DOWNLOADS: ${{ github.workspace }}/.vcpkg-downloads
       VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/emcifuntik/index.json,readwrite"
+      # The update layout ships these next to parties_client.exe once their
+      # targets exist; until then the release goes out without it.
+      LAUNCHER_EXE: build-retail/updater/launcher/PartiesLauncher.exe
+      STUB_EXE: build-retail/updater/boot/Parties.exe
     steps:
       - uses: actions/checkout@v6
         with:
@@ -92,7 +99,11 @@ jobs:
       - name: Sign executables
         shell: bash
         run: |
-          for exe in build-retail/client/parties_client.exe build-retail/server/parties_server.exe; do
+          exes=(build-retail/client/parties_client.exe build-retail/server/parties_server.exe)
+          for exe in "$LAUNCHER_EXE" "$STUB_EXE"; do
+            if [ -f "$exe" ]; then exes+=("$exe"); else echo "::warning::$exe was not built, so it is not signed"; fi
+          done
+          for exe in "${exes[@]}"; do
             echo "Signing $exe..."
             curl -sf -X POST \
               -H "X-Sign-Token: ${{ secrets.HOME_CODE_SIGN_TOKEN }}" \
@@ -108,16 +119,26 @@ jobs:
       - name: Verify signatures
         shell: pwsh
         run: |
-          foreach ($exe in @(
-            "build-retail/client/parties_client.exe",
-            "build-retail/server/parties_server.exe"
-          )) {
+          $exes = @("build-retail/client/parties_client.exe", "build-retail/server/parties_server.exe")
+          $exes += @($env:LAUNCHER_EXE, $env:STUB_EXE) | Where-Object { Test-Path $_ }
+          foreach ($exe in $exes) {
             $sig = Get-AuthenticodeSignature $exe
             if ($sig.Status -ne "Valid") {
               throw "Signature verification failed for $exe`: $($sig.Status)"
             }
             Write-Host "Verified $exe`: $($sig.SignerCertificate.Subject)"
           }
+
+      # The zip, server and macOS assets must publish even if this step fails;
+      # a failure here leaves the release without its Beta entry.
+      - name: Stage update layout
+        id: layout
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/release/stage-update-layout.ps1 `
+            -Tag "$env:GITHUB_REF_NAME" -Repository "$env:GITHUB_REPOSITORY" `
+            -BuildDir build-retail -OutDir dist-update -Launcher "$env:LAUNCHER_EXE" -Stub "$env:STUB_EXE"
 
       - name: Collect PDB files
         shell: pwsh
@@ -146,6 +167,22 @@ jobs:
         with:
           name: release-windows-pdb
           path: pdb-staging/
+
+      - name: Upload Windows update layout artifact
+        if: steps.layout.outputs.staged == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-update
+          path: dist-update/
+
+      # publish-beta.yml runs this exact binary, which pins the keys this
+      # build's launcher pins.
+      - name: Upload manifest tool artifact
+        if: steps.layout.outputs.staged == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-manifest-tool
+          path: build-retail/updater/tools/parties_manifest_tool.exe
 
   # ── macOS retail build ──────────────────────────────────────────────────────
   macos:
@@ -497,19 +534,42 @@ jobs:
           name: release-appcast
           path: dist/appcast
 
+      - name: Download Windows update layout
+        if: needs.windows.outputs.update_layout == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: release-windows-update
+          path: dist/update
+
       - name: Package release archives
         run: |
           cd dist/windows-client && zip -r ../../parties-client-windows-${{ github.ref_name }}.zip . && cd ../..
           cd dist/windows-server && zip -r ../../parties-server-windows-${{ github.ref_name }}.zip . && cd ../..
           cd dist/windows-pdb && zip -r ../../parties-pdb-windows-${{ github.ref_name }}.zip . && cd ../..
 
+      # Every tag starts as a prerelease, which /releases/latest never returns,
+      # so the legacy updater and Sparkle see it only after promote.yml.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: true
+          make_latest: false
           files: |
             parties-client-windows-${{ github.ref_name }}.zip
             parties-server-windows-${{ github.ref_name }}.zip
             parties-pdb-windows-${{ github.ref_name }}.zip
             dist/macos/parties-client-macos-${{ github.ref_name }}.dmg
             dist/appcast/appcast.xml
+            dist/update/assets/*
+
+  # ── Beta channel ────────────────────────────────────────────────────────────
+  publish-beta:
+    needs: [windows, create-release]
+    if: needs.windows.outputs.update_layout == 'true'
+    uses: ./.github/workflows/publish-beta.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      version: ${{ needs.windows.outputs.version }}
