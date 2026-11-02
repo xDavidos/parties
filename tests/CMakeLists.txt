@@ -391,7 +391,7 @@ endif()
 
 # ── Update manager pure core (offline, deterministic) ────────────────────────
 if(TARGET parties_update_core)
-    foreach(update_test version data_compat manifest probation state_codec policy link)
+    foreach(update_test version data_compat manifest probation state_codec policy link retention)
         add_executable(update_${update_test}_test update_${update_test}_test.cpp)
         target_link_libraries(update_${update_test}_test PRIVATE parties_update_core parties_common)
         add_test(NAME update_${update_test} COMMAND update_${update_test}_test)
@@ -447,6 +447,10 @@ if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
     add_dependencies(update_e2e_test PartiesLauncher update_fake_app)
     set(update_e2e_args --launcher $<TARGET_FILE:PartiesLauncher> --fake-app $<TARGET_FILE:update_fake_app>)
     add_test(NAME update_e2e COMMAND update_e2e_test ${update_e2e_args})
+
+    add_executable(update_authenticode_test update_authenticode_test.cpp)
+    target_link_libraries(update_authenticode_test PRIVATE parties_launcher_shell)
+    add_test(NAME update_authenticode COMMAND update_authenticode_test)
     set_tests_properties(update_e2e PROPERTIES TIMEOUT 1800)
     # Needs a GPU: the real client reaches healthy only after presenting a frame.
     if(TARGET parties_client)

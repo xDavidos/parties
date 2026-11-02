@@ -159,7 +159,9 @@ void start_staged(Tx& tx, Staged staged, const std::optional<DataInfo>& data) {
         if (dropped) tx.emit(DeleteBuild{*dropped});
         return start_good(tx, data);
     }
-    SnapshotId pre_id = snapshot_name("pre", c, tx.next_generation());
+    // Over a restore, the live copy may be the only one of data newer than the
+    // backup, so it must not carry the automatic "pre" name retention prunes.
+    SnapshotId pre_id = snapshot_name(staged.restore_first ? "pre-downgrade" : "pre", c, tx.next_generation());
     std::optional<Snapshot> pre;
     if (data) pre = Snapshot{pre_id, *data};
     Probation p{c, tx.s.good, pre, 0, false};
@@ -297,15 +299,31 @@ void handle(Tx& tx, const ConfirmTimerElapsed& e) {
     tx.commit();
 }
 
-void handle(Tx& tx, const BuildSealed& e) {
-    if (tx.s.find(e.record.id) || probation(tx.s)) return;
+// Stages `rec` in place of whatever was staged, adding its record if it is new.
+void stage(Tx& tx, const BuildRecord& rec, const std::optional<Snapshot>& restore_first) {
     std::optional<BuildId> replaced = unstage(tx);
-    BuildRecord rec = e.record;
-    rec.verdict = Unproven{};
-    tx.s.builds.push_back(rec);
-    tx.s.activation = Staged{rec.id, e.restore_first};
+    if (!tx.s.find(rec.id)) {
+        BuildRecord fresh = rec;
+        fresh.verdict = Unproven{};
+        tx.s.builds.push_back(fresh);
+    }
+    tx.s.activation = Staged{rec.id, restore_first};
     tx.commit();
     if (replaced) tx.emit(DeleteBuild{*replaced});
+}
+
+void handle(Tx& tx, const BuildSealed& e) {
+    if (tx.s.find(e.record.id) || probation(tx.s)) return;
+    stage(tx, e.record, e.restore_first);
+}
+
+// Unlike BuildSealed, a known previous_good is staged again: it is the build a
+// user most often switches back to, and its directory is still intact.
+void handle(Tx& tx, const UserDowngrade& e) {
+    if (probation(tx.s) || e.record.id == tx.s.good) return;
+    const BuildRecord* known = tx.s.find(e.record.id);
+    if (known && (tx.s.previous_good != e.record.id || known->quarantined())) return;
+    stage(tx, e.record, e.restore_first);
 }
 
 void handle(Tx& tx, const UserRollback& e) {

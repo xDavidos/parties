@@ -1,5 +1,6 @@
 // End to end: PartiesLauncher.exe supervising fake builds (update_fake_app.exe)
-// in a throwaway install root, data root and local update source. Each
+// in a throwaway install root, data root and update source: a local folder,
+// or the same folder served over HTTP on 127.0.0.1 by FeedServer. Each
 // scenario adopts build A, publishes build B in a signed manifest, and runs the
 // launcher the way the boot stub does until the outcome settles. With
 // kill points on, every scenario is replayed once per effect index n with the
@@ -21,16 +22,24 @@
 #include <sqlite3.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
+
+#pragma comment(lib, "ws2_32.lib")
 
 namespace fs = std::filesystem;
 using namespace parties::update;
@@ -65,6 +74,128 @@ SigningKey test_key() {
     return k;
 }
 
+// Serves a folder over HTTP/1.1 on 127.0.0.1, one thread per connection, and
+// can corrupt chosen paths or stall one halfway until released.
+class FeedServer {
+public:
+    explicit FeedServer(fs::path root) : root_(std::move(root)) {
+        listener_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        int len = sizeof addr;
+        if (listener_ == INVALID_SOCKET || bind(listener_, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 ||
+            listen(listener_, 16) != 0 || getsockname(listener_, reinterpret_cast<sockaddr*>(&addr), &len) != 0)
+            std::abort();
+        port_ = ntohs(addr.sin_port);
+        accept_thread_ = std::thread([this] { accept_loop(); });
+    }
+    ~FeedServer() {
+        {
+            std::lock_guard lock(mutex_);
+            stopping_ = true;
+        }
+        released_.notify_all();
+        closesocket(listener_);
+        accept_thread_.join();
+        for (std::thread& t : connections_) t.join();
+    }
+
+    std::wstring base() const { return L"http://127.0.0.1:" + std::to_wstring(port_) + L"/"; }
+    void tamper(const std::string& path) {
+        std::lock_guard lock(mutex_);
+        tampered_.insert(path);
+    }
+    void stall(const std::string& path) {
+        std::lock_guard lock(mutex_);
+        stalled_path_ = path;
+        stalled_ = false;
+    }
+    bool stalled() const {
+        std::lock_guard lock(mutex_);
+        return stalled_;
+    }
+    void release() {
+        {
+            std::lock_guard lock(mutex_);
+            stalled_path_.clear();
+            stalled_ = false;
+        }
+        released_.notify_all();
+    }
+
+private:
+    void accept_loop() {
+        for (;;) {
+            SOCKET s = accept(listener_, nullptr, nullptr);
+            if (s == INVALID_SOCKET) return;
+            std::lock_guard lock(mutex_);
+            if (stopping_) {
+                closesocket(s);
+                return;
+            }
+            connections_.emplace_back([this, s] { serve(s); });
+        }
+    }
+
+    static void send_all(SOCKET s, std::string_view bytes) {
+        while (!bytes.empty()) {
+            int n = send(s, bytes.data(), static_cast<int>(std::min<size_t>(bytes.size(), 1 << 16)), 0);
+            if (n <= 0) return;
+            bytes.remove_prefix(static_cast<size_t>(n));
+        }
+    }
+
+    void serve(SOCKET s) {
+        std::string request;
+        char buffer[4096];
+        while (request.find("\r\n\r\n") == std::string::npos && request.size() < 16384) {
+            int n = recv(s, buffer, sizeof buffer, 0);
+            if (n <= 0) break;
+            request.append(buffer, static_cast<size_t>(n));
+        }
+        std::string path;
+        if (request.starts_with("GET /")) path = request.substr(5, request.find(' ', 5) - 5);
+        auto body = path.find("..") == std::string::npos ? read_file(root_ / path) : std::nullopt;
+        if (!body) {
+            send_all(s, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            closesocket(s);
+            return;
+        }
+        std::unique_lock lock(mutex_);
+        if (tampered_.contains(path) && !body->empty()) (*body)[body->size() / 2] ^= 0x5a;
+        bool stall = !stalled_path_.empty() && path == stalled_path_;
+        lock.unlock();
+        send_all(s, "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body->size()) +
+                        "\r\nConnection: close\r\n\r\n");
+        size_t sent = 0;
+        if (stall) {
+            sent = body->size() / 2;
+            send_all(s, std::string_view(*body).substr(0, sent));
+            lock.lock();
+            stalled_ = true;
+            released_.wait(lock, [&] { return stopping_ || stalled_path_.empty(); });
+            if (stopping_) sent = body->size();
+            lock.unlock();
+        }
+        send_all(s, std::string_view(*body).substr(sent));
+        shutdown(s, SD_SEND);
+        closesocket(s);
+    }
+
+    fs::path root_;
+    SOCKET listener_ = INVALID_SOCKET;
+    uint16_t port_ = 0;
+    std::thread accept_thread_;
+    mutable std::mutex mutex_;
+    std::condition_variable released_;
+    std::vector<std::thread> connections_;
+    std::set<std::string> tampered_;
+    std::string stalled_path_;
+    bool stalled_ = false;
+    bool stopping_ = false;
+};
+
 class TempRoot {
 public:
     explicit TempRoot(const std::string& name) {
@@ -93,7 +224,7 @@ FileEntry file_entry(const fs::path& file) {
     auto digest = digest_file(file);
     if (!digest) std::abort();
     return {file.filename().string(), digest->size, digest->sha256,
-            {"https://example.invalid/" + digest->sha256.to_hex()}};
+            {"https://example.invalid/files/" + digest->sha256.to_hex()}};
 }
 
 Release make_release(const fs::path& root, const fs::path& app_exe, const std::string& version, uint32_t schema,
@@ -125,13 +256,22 @@ fs::path install(const fs::path& install_root, const Release& r) {
     return dir;
 }
 
-void publish(const fs::path& source, const std::vector<const Release*>& releases, uint64_t serial) {
+struct Publish {
+    Channel channel = Channel::Stable;
+    std::vector<Version> revoked;
+    bool expired = false;
+};
+
+void publish(const fs::path& source, const std::vector<const Release*>& releases, uint64_t serial,
+             const Publish& how = {}) {
     fs::create_directories(source / "files");
     ManifestPayload p;
-    p.channel = Channel::Stable;
+    p.channel = how.channel;
     p.serial = serial;
-    p.issued_at = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()) - 60s;
+    p.issued_at = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()) -
+                  (how.expired ? std::chrono::days(50) : std::chrono::days(0)) - 60s;
     p.expires_at = p.issued_at + std::chrono::days(45);
+    p.revoked = how.revoked;
     for (const Release* r : releases) {
         p.builds.push_back(r->entry);
         for (const FileEntry& f : r->entry.files)
@@ -142,7 +282,8 @@ void publish(const fs::path& source, const std::vector<const Release*>& releases
     SigningKey key = test_key();
     auto envelope = sign_manifest({reinterpret_cast<const uint8_t*>(payload.data()), payload.size()}, {&key, 1});
     std::string error;
-    if (!envelope || !durable_replace(source / "stable.manifest.json", *envelope, error)) std::abort();
+    const fs::path file = source / (std::string(channel_name(how.channel)) + ".manifest.json");
+    if (!envelope || !durable_replace(file, *envelope, error)) std::abort();
 }
 
 class Db {
@@ -179,6 +320,7 @@ struct World {
     Release a, b;
     bool with_b = true;
     size_t log_mark = 0;  // launcher.log size before the latest run
+    std::unique_ptr<FeedServer> server;  // set: the launcher reads the feed over HTTP
 
     World(std::string n, const std::string& b_version, uint32_t b_schema, uint32_t b_floor, bool publish_b)
         : name(std::move(n)), root(name) {
@@ -198,6 +340,18 @@ struct World {
     fs::path db() const { return data_root / "data" / "parties_client.db"; }
     fs::path backups() const { return data_root / "backups"; }
     fs::path log_file() const { return data_root / "logs" / "launcher.log"; }
+    fs::path status_log() const { return root.path() / "status.log"; }
+    fs::path build_dir(const Release& r) const { return install_root / "builds" / r.entry.id().dir_name(); }
+    std::string statuses() const { return read_file(status_log()).value_or(""); }
+    std::string full_log() const { return read_file(log_file()).value_or(""); }
+    bool leftovers() const {
+        std::error_code ec;
+        for (const auto& item : fs::directory_iterator(install_root / "builds", ec))
+            if (item.path().filename().string().starts_with(".staging-")) return true;
+        for (const auto& item : fs::directory_iterator(install_root / "downloads", ec))
+            if (item.path().extension() == ".partial") return true;
+        return false;
+    }
 
     std::optional<SupervisorState> state() const {
         auto text = read_file(install_root / "state" / "supervisor.json");
@@ -223,7 +377,7 @@ struct RunResult {
 
 RunResult run_launcher(World& w, const std::map<std::string, std::string>& extra_env,
                        const std::vector<std::wstring>& forwarded = {}, DWORD timeout_ms = 60000,
-                       const fs::path& launcher = {}) {
+                       const fs::path& launcher = {}, const std::function<bool()>& kill_when = {}) {
     w.log_mark = read_file(w.log_file()).value_or("").size();
     std::map<std::wstring, std::wstring> env;
     for (wchar_t* block = GetEnvironmentStringsW(), *p = block; *p; p += wcslen(p) + 1) {
@@ -231,6 +385,7 @@ RunResult run_launcher(World& w, const std::map<std::string, std::string>& extra
         size_t eq = kv.find(L'=', 1);
         if (eq != std::wstring::npos) env[kv.substr(0, eq)] = kv.substr(eq + 1);
     }
+    env[L"PARTIES_FAKE_STATUS_LOG"] = w.status_log().wstring();
     for (const auto& [k, v] : extra_env) env[widen(k)] = widen(v);
     std::wstring block;
     for (const auto& [k, v] : env) block += k + L"=" + v + L'\0';
@@ -240,7 +395,8 @@ RunResult run_launcher(World& w, const std::map<std::string, std::string>& extra
     HANDLE boot_ok = CreateEventW(&inherit, TRUE, FALSE, nullptr);
     fs::path exe = launcher.empty() ? w.launcher_in(w.a) : launcher;
     std::wstring cmd = L"\"" + exe.wstring() + L"\" \"--install-root=" + w.install_root.wstring() +
-                       L"\" \"--data-root=" + w.data_root.wstring() + L"\" \"--feed-dir=" + w.source.wstring() +
+                       L"\" \"--data-root=" + w.data_root.wstring() +
+                       (w.server ? L"\" \"--feed-base=" + w.server->base() : L"\" \"--feed-dir=" + w.source.wstring()) +
                        L"\" --boot-session=42 --boot-ok-event=" +
                        std::to_wstring(reinterpret_cast<uintptr_t>(boot_ok)) +
                        L" --test-namespace=PartiesE2E" + std::to_wstring(GetCurrentProcessId()) + L" --";
@@ -254,10 +410,18 @@ RunResult run_launcher(World& w, const std::map<std::string, std::string>& extra
         CloseHandle(boot_ok);
         return result;
     }
-    if (WaitForSingleObject(pi.hProcess, timeout_ms) != WAIT_OBJECT_0) {
-        result.timed_out = true;
-        TerminateProcess(pi.hProcess, 1);
-        WaitForSingleObject(pi.hProcess, INFINITE);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (WaitForSingleObject(pi.hProcess, 20) != WAIT_OBJECT_0) {
+        if (kill_when && kill_when()) {
+            TerminateProcess(pi.hProcess, kKilled);
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            break;
+        }
+        if (std::chrono::steady_clock::now() > deadline) {
+            result.timed_out = true;
+            TerminateProcess(pi.hProcess, 1);
+            WaitForSingleObject(pi.hProcess, INFINITE);
+        }
     }
     GetExitCodeProcess(pi.hProcess, &result.exit_code);
     result.boot_ok = WaitForSingleObject(boot_ok, 0) == WAIT_OBJECT_0;
@@ -267,9 +431,63 @@ RunResult run_launcher(World& w, const std::map<std::string, std::string>& extra
     return result;
 }
 
+// What Windows sends at logoff or shutdown, delivered to the launcher running
+// from w's install root.
+bool end_session(const World& w) {
+    struct Search {
+        std::wstring root;
+        HWND found = nullptr;
+    } search{w.install_root.wstring()};
+    EnumWindows(
+        [](HWND hwnd, LPARAM lp) -> BOOL {
+            auto* s = reinterpret_cast<Search*>(lp);
+            wchar_t cls[64];
+            if (!GetClassNameW(hwnd, cls, 64) || std::wstring_view(cls) != L"PartiesLauncherSession") return TRUE;
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            wchar_t image[4096];
+            DWORD n = 4096;
+            bool ours = p && QueryFullProcessImageNameW(p, 0, image, &n) && n > s->root.size() &&
+                        _wcsnicmp(image, s->root.c_str(), s->root.size()) == 0;
+            if (p) CloseHandle(p);
+            if (ours) s->found = hwnd;
+            return !ours;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    DWORD_PTR ignored = 0;
+    return search.found &&
+           SendMessageTimeoutW(search.found, WM_ENDSESSION, TRUE, 0, SMTO_ABORTIFHUNG, 5000, &ignored) != 0;
+}
+
+std::string stalled_app_file(const World& w) { return "files/" + w.b.entry.file(kAppFile)->sha256.to_hex(); }
+
+// One launcher run whose app exits right after healthy while B's executable
+// stalls on the feed. `headless` is polled while the launcher lives, from the
+// moment the app has exited with the download still stalled.
+RunResult run_short_session(World& w, const std::function<void()>& headless) {
+    w.server->stall(stalled_app_file(w));
+    const size_t mark = w.full_log().size();
+    return run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "50"}}, {}, 60000, {}, [&] {
+        if (w.full_log().find("app exited", mark) != std::string::npos && w.server->stalled()) headless();
+        return false;
+    });
+}
+
 const BuildRecord* record(const SupervisorState& s, const Release& r) { return s.find(r.entry.id()); }
 
+bool staged(const SupervisorState& s, const Release& r) {
+    auto* st = std::get_if<Staged>(&s.activation);
+    return st && st->build == r.entry.id();
+}
+
+
 bool settled(const SupervisorState& s) { return std::holds_alternative<Idle>(s.operation); }
+
+bool good_is_b(const World& w) {
+    auto s = w.state();
+    return s && settled(*s) && s->good == w.b.entry.id();
+}
 
 bool rolled_back_to_a(const World& w, const SupervisorState& s, FailureReason reason) {
     const BuildRecord* b = record(s, w.b);
@@ -312,6 +530,9 @@ struct Scenario {
     std::function<void(World&)> prepare;           // runs without kill points
     std::function<bool(const World&)> done;        // the outcome has settled
     std::function<void(const World&, const std::string&)> verify;
+    bool http = false;                             // the feed comes from FeedServer
+    bool kill_points = true;
+    std::map<std::string, std::string> env{};      // overrides the launcher's environment
 };
 
 enum class Outcome { Converged, KillNotReached, Failed };
@@ -319,12 +540,14 @@ enum class Outcome { Converged, KillNotReached, Failed };
 Outcome run_scenario(const Scenario& sc, std::optional<int> kill_at) {
     const std::string label = sc.name + (kill_at ? " kill@" + std::to_string(*kill_at) : "");
     World w(sc.name, "2.0.0.0", sc.b_schema, sc.b_floor, sc.publish_b);
+    if (sc.http) w.server = std::make_unique<FeedServer>(w.source);
     std::map<std::string, std::string> env{
         {"PARTIES_TEST_TIMING", kTiming},
         {"PARTIES_TEST_RECOVERY", "quit"},
         {"PARTIES_FAKE_RUN_MS", "700"},
         {"PARTIES_FAKE_FAULT", sc.b_fault.empty() ? "" : "2.0.0.0:" + sc.b_fault},
     };
+    for (const auto& [k, v] : sc.env) env[k] = v;
     if (sc.prepare) sc.prepare(w);
 
     bool killed = false;
@@ -383,7 +606,9 @@ std::vector<Scenario> scenarios() {
                            read_file(w.install_root / "state" / "boot-contract.json").value_or(""));
                        if (!contract || contract->good.dir != build_dir(w.b.entry.id()))
                            fail(label, "boot-contract.json does not point at B");
-                   }});
+                       if (w.leftovers()) fail(label, "a partial download or staging directory was left behind");
+                   },
+                   true});
 
     auto rollback_scenario = [](std::string name, std::string fault, FailureReason reason) {
         return Scenario{name, fault, 1, 1, true, nullptr,
@@ -440,6 +665,9 @@ std::vector<Scenario> scenarios() {
                            fail(label, "the preserved copy is not the migrated database");
                        if (kept.scalar("SELECT count(*) FROM markers WHERE build = '2.0.0.0'") < 1)
                            fail(label, "the preserved copy lost B's marker row");
+                       if (w.statuses().find("\"preserved\":\"backups\\\\" + preserved->filename().string() + "\"") ==
+                           std::string::npos)
+                           fail(label, "the notice does not give the preserved copy relative to the data root");
                        if (!find_backup(w, "pre-")) fail(label, "no pre-candidate snapshot");
                    }});
 
@@ -456,13 +684,30 @@ std::vector<Scenario> scenarios() {
                        if (s->good != w.a.entry.id()) fail(label, "good changed");
                    }});
 
-    out.push_back({"corrupt-good-exe", "", 1, 1, false,
-                   [](World& w) {
-                       RunResult r = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "300"}});
-                       if (r.exit_code != 0 || markers(w.db(), "1.0.0.0") != 1)
-                           fail(w.name, "the clean first run did not start A");
-                       fs::path exe = w.install_root / "builds" / w.a.entry.id().dir_name() / kAppFile;
-                       std::ofstream(exe, std::ios::binary | std::ios::app).put('\0');
+    auto corrupt_a = [](World& w) {
+        RunResult r = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "300"}});
+        if (r.exit_code != 0 || markers(w.db(), "1.0.0.0") != 1) fail(w.name, "the clean first run did not start A");
+        std::ofstream(w.build_dir(w.a) / kAppFile, std::ios::binary | std::ios::app).put('\0');
+    };
+    out.push_back({"corrupt-good-exe", "", 1, 1, false, corrupt_a,
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && settled(*s) && markers(w.db(), "1.0.0.0") >= 2;
+                   },
+                   [](const World& w, const std::string& label) {
+                       auto s = w.state();
+                       if (s->good != w.a.entry.id()) fail(label, "good changed");
+                       if (digest_file(w.build_dir(w.a) / kAppFile)->sha256 != w.a.entry.file(kAppFile)->sha256)
+                           fail(label, "the executable was not repaired");
+                       if (w.full_log().find("recovery shown") != std::string::npos)
+                           fail(label, "recovery was shown although the feed lists the build");
+                   },
+                   true});
+
+    out.push_back({"corrupt-good-unlisted", "", 1, 1, false,
+                   [corrupt_a](World& w) {
+                       corrupt_a(w);
+                       publish(w.source, {&w.b}, 2);
                    },
                    [](const World& w) {
                        auto s = w.state();
@@ -471,9 +716,269 @@ std::vector<Scenario> scenarios() {
                    },
                    [](const World& w, const std::string& label) {
                        if (markers(w.db(), "1.0.0.0") != 1) fail(label, "the corrupt executable was started");
+                       if (w.state()->good != w.a.entry.id()) fail(label, "good changed");
+                   },
+                   false, false});
+
+    out.push_back({"tampered-file", "", 1, 1, true,
+                   [](World& w) { w.server->tamper("files/" + w.b.entry.file(kAppFile)->sha256.to_hex()); },
+                   [](const World& w) {
+                       return w.last_run_log().find("SHA-256 does not match the manifest") != std::string::npos;
+                   },
+                   [](const World& w, const std::string& label) {
                        auto s = w.state();
-                       if (s->good != w.a.entry.id()) fail(label, "good changed");
-                   }});
+                       if (!s || s->good != w.a.entry.id() || s->find(w.b.entry.id()))
+                           fail(label, "a tampered build reached the state");
+                       if (fs::exists(w.build_dir(w.b))) fail(label, "a tampered build was sealed");
+                       if (w.leftovers()) fail(label, "the rejected download was left on disk");
+                       if (markers(w.db(), "1.0.0.0") < 1) fail(label, "A stopped working");
+                   },
+                   true, false});
+
+    out.push_back({"replayed-manifest", "", 1, 1, true,
+                   [](World& w) {
+                       publish(w.source, {&w.a}, 5);
+                       RunResult r = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "300"}});
+                       if (r.exit_code != 0) fail(w.name, "the first run failed");
+                       publish(w.source, {&w.a, &w.b}, 3);
+                   },
+                   [](const World& w) { return w.last_run_log().find("replayed") != std::string::npos; },
+                   [](const World& w, const std::string& label) {
+                       auto trust = parse_trust(read_file(w.data_root / "update" / "trust.json").value_or(""));
+                       if (!trust || trust->stable.serial != 5) fail(label, "the ratchet moved backwards");
+                       if (w.state()->find(w.b.entry.id()) || fs::exists(w.build_dir(w.b)))
+                           fail(label, "a replayed manifest staged a build");
+                   },
+                   true, false});
+
+    out.push_back({"stale-feed", "", 1, 1, true,
+                   [](World& w) { publish(w.source, {&w.a, &w.b}, 2, {.expired = true}); },
+                   [](const World& w) { return w.last_run_log().find("update feed is stale") != std::string::npos; },
+                   [](const World& w, const std::string& label) {
+                       if (w.statuses().find("\"phase\":\"feed_stale\"") == std::string::npos)
+                           fail(label, "the app was not told the feed is stale");
+                       if (w.state()->find(w.b.entry.id())) fail(label, "a stale manifest staged a build");
+                       if (markers(w.db(), "1.0.0.0") < 1) fail(label, "A stopped working");
+                   },
+                   true, false, {{"PARTIES_FAKE_FAULT", "1.0.0.0:run-until-checked"}}});
+
+    // B cannot talk to this launcher, so the newest build A can leave its revoked self for is the older D.
+    out.push_back({"good-revoked", "", 1, 1, true,
+                   [](World& w) {
+                       Release d = make_release(w.root.path(), g_fake_app, "0.9.0.0", 1, 1, true);
+                       w.b.entry.link_protocol = w.b.entry.min_supported_launcher_link = 99;
+                       publish(w.source, {&w.b, &d}, 2, {.revoked = {w.a.entry.version}});
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && settled(*s) && s->good.version == *Version::parse("0.9.0.0");
+                   },
+                   [](const World& w, const std::string& label) {
+                       auto s = w.state();
+                       if (s->find(w.b.entry.id()) || fs::exists(w.build_dir(w.b))) fail(label, "B was staged");
+                       if (markers(w.db(), "0.9.0.0") < 1) fail(label, "D never ran");
+                   },
+                   true, false});
+
+    // B (schema 3) is good; the user switches to a Beta that only has A (schema 1).
+    out.push_back({"downgrade-now", "wait-then-downgrade", 3, 3, true,
+                   [](World& w) {
+                       for (int i = 0; i < 6; ++i) {
+                           auto s = w.state();
+                           if (s && settled(*s) && s->good == w.b.entry.id()) break;
+                           run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"}});
+                       }
+                       auto s = w.state();
+                       if (!s || s->good != w.b.entry.id()) fail(w.name, "B did not become good");
+                       publish(w.source, {&w.a}, 1, {.channel = Channel::Beta});
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && settled(*s) && s->good == w.a.entry.id() && s->channel == Channel::Beta;
+                   },
+                   [](const World& w, const std::string& label) {
+                       auto s = w.state();
+                       if (s->previous_good != w.b.entry.id()) fail(label, "B is not kept as previous_good");
+                       Db live(w.db());
+                       if (live.scalar("SELECT version FROM parties_schema") != 1)
+                           fail(label, "the live database was not restored to schema 1");
+                       if (markers(w.db(), "2.0.0.0") != 0) fail(label, "B's rows are in the restored database");
+                       auto kept = find_backup(w, "pre-downgrade-");
+                       if (!kept) return fail(label, "the live database was not preserved");
+                       Db copy(*kept);
+                       if (copy.scalar("SELECT version FROM parties_schema") != 3 ||
+                           copy.scalar("SELECT count(*) FROM markers WHERE build = '2.0.0.0'") < 1)
+                           fail(label, "the preserved copy is not B's database");
+                       if (w.statuses().find("\"data_effect\":\"restores_backup\",\"backup_taken_at\"") ==
+                           std::string::npos)
+                           fail(label, "the offer did not name the backup's date");
+                   },
+                   true});
+
+    out.push_back({"launcher-too-old", "", 1, 1, true,
+                   [](World& w) {
+                       w.b.entry.link_protocol = w.b.entry.min_supported_launcher_link = 99;
+                       publish(w.source, {&w.a, &w.b}, 2);
+                   },
+                   [](const World& w) { return markers(w.db(), "1.0.0.0") >= 1; },
+                   [](const World& w, const std::string& label) {
+                       if (w.statuses().find("\"phase\":\"idle\",\"channel\":\"stable\",\"current\":\"1.0.0.0\","
+                                             "\"available\":\"2.0.0.0\"") == std::string::npos)
+                           fail(label, "the app was not told about the newer build it cannot take yet");
+                       if (w.state()->find(w.b.entry.id())) fail(label, "a build this launcher cannot run was staged");
+                   },
+                   true, false, {{"PARTIES_FAKE_FAULT", "1.0.0.0:run-until-checked"}}});
+
+    out.push_back({"retention", "", 1, 1, false,
+                   [](World& w) {
+                       RunResult r = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "300"}});
+                       if (r.exit_code != 0) fail(w.name, "the first run failed");
+                       fs::create_directories(w.backups());
+                       sqlite3* db = nullptr;
+                       sqlite3_open(w.db().string().c_str(), &db);
+                       auto now = fs::file_time_type::clock::now();
+                       auto copy = [&](const std::string& stem, int minutes_ago) {
+                           fs::path dest = w.backups() / (stem + ".db");
+                           std::string sql = "VACUUM INTO '" + dest.string() + "'";
+                           if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) != SQLITE_OK) std::abort();
+                           fs::last_write_time(dest, now - std::chrono::minutes(minutes_ago));
+                       };
+                       for (int g = 1; g <= 13; ++g) copy("pre-" + w.a.entry.id().dir_name() + "-g" + std::to_string(g), 100 - g);
+                       copy("pre-migration-v1-20200101T000000Z", 1000);
+                       for (const char* stem : {"rolled-back-x", "legacy-20200101T000000Z-0", "pre-uninstall-20200101T000000Z",
+                                                "pre-restore-y", "pre-downgrade-z"})
+                           copy(stem, 5000);
+                       sqlite3_close(db);
+                   },
+                   [](const World&) { return true; },
+                   [](const World& w, const std::string& label) {
+                       for (const char* stem : {"rolled-back-x", "legacy-20200101T000000Z-0", "pre-uninstall-20200101T000000Z",
+                                                "pre-restore-y", "pre-downgrade-z"})
+                           if (!fs::exists(w.backups() / (std::string(stem) + ".db")))
+                               fail(label, std::string("retention deleted the preserved ") + stem);
+                       int automatic = 0;
+                       for (int g = 1; g <= 13; ++g)
+                           if (fs::exists(w.backups() / ("pre-" + w.a.entry.id().dir_name() + "-g" + std::to_string(g) + ".db"))) {
+                               ++automatic;
+                               if (g <= 3) fail(label, "an older automatic snapshot outlived a newer one");
+                           }
+                       if (fs::exists(w.backups() / "pre-migration-v1-20200101T000000Z.db"))
+                           fail(label, "the oldest automatic snapshot was kept");
+                       if (automatic != 10) fail(label, "retention did not keep exactly the 10 newest automatic snapshots");
+                   },
+                   false, false});
+
+    out.push_back({"kill-during-download", "", 1, 1, true,
+                   [](World& w) {
+                       const std::string app = stalled_app_file(w);
+                       w.server->stall(app);
+                       auto started = std::chrono::steady_clock::now();
+                       RunResult capped = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming},
+                                                           {"PARTIES_FAKE_RUN_MS", "700"},
+                                                           {"PARTIES_TEST_JOB_CAP_MS", "1000"}});
+                       if (capped.exit_code != 0 || std::chrono::steady_clock::now() - started > 10s ||
+                           w.last_run_log().find("giving up on the update job") == std::string::npos)
+                           fail(w.name, "the cap did not end a stalled download after the app exited");
+                       w.server->stall(app);
+                       RunResult killed = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "20000"}},
+                                                       {}, 60000, {}, [&] { return w.server->stalled(); });
+                       if (killed.exit_code != kKilled) fail(w.name, "the launcher was not killed mid-download");
+                       if (fs::exists(w.build_dir(w.b))) fail(w.name, "a half-downloaded build was sealed");
+                       if (!w.leftovers()) fail(w.name, "the kill did not land mid-download");
+                       if (w.statuses().find("\"phase\":\"downloading\",\"channel\":\"stable\",\"current\":\"1.0.0.0\","
+                                             "\"available\":\"2.0.0.0\"") == std::string::npos)
+                           fail(w.name, "the app was not told which version is downloading");
+                       w.server->release();
+                   },
+                   good_is_b,
+                   [](const World& w, const std::string& label) {
+                       if (w.leftovers()) fail(label, "the interrupted download was never cleaned up");
+                   },
+                   true, false});
+
+    out.push_back({"download-after-exit", "", 1, 1, true,
+                   [](World& w) {
+                       std::optional<std::chrono::steady_clock::time_point> released;
+                       RunResult r = run_short_session(w, [&] {
+                           if (released) return;
+                           w.server->release();
+                           released = std::chrono::steady_clock::now();
+                       });
+                       if (!released) return fail(w.name, "the launcher exited with the app while B was downloading");
+                       if (r.timed_out || r.exit_code != 0 || std::chrono::steady_clock::now() - *released > 10s)
+                           fail(w.name, "the launcher did not exit on its own once the download finished");
+                       auto s = w.state();
+                       if (!s || !staged(*s, w.b)) fail(w.name, "B was not staged after the app exited");
+                       std::string log = w.last_run_log();
+                       size_t exited = log.find("app exited"), sealed = log.find("sealed " + w.b.entry.id().dir_name());
+                       if (sealed == std::string::npos || sealed < exited)
+                           fail(w.name, "B was not sealed after the app exited");
+                   },
+                   good_is_b,
+                   [](const World& w, const std::string& label) {
+                       if (markers(w.db(), "2.0.0.0") < 1) fail(label, "B never ran");
+                       if (w.leftovers()) fail(label, "a partial download or staging directory was left behind");
+                   },
+                   true, false});
+
+    out.push_back({"relaunch-during-download", "", 1, 1, true,
+                   [](World& w) {
+                       const size_t mark = w.full_log().size();
+                       auto since = [&](std::string_view what) {
+                           std::string log = w.full_log().substr(mark);
+                           size_t n = 0;
+                           for (size_t at = log.find(what); at != std::string::npos; at = log.find(what, at + 1)) ++n;
+                           return n;
+                       };
+                       std::optional<RunResult> relaunch;
+                       bool released = false;
+                       RunResult r = run_short_session(w, [&] {
+                           if (!relaunch) relaunch = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}});
+                           else if (!released && since("app exited") >= 2) {
+                               w.server->release();
+                               released = true;
+                           }
+                       });
+                       if (!relaunch) return fail(w.name, "the launcher exited with the app while B was downloading");
+                       if (relaunch->exit_code != 0 || !relaunch->boot_ok)
+                           fail(w.name, "the relaunch was not handed to the running launcher");
+                       if (!released) fail(w.name, "the relaunch did not start the app");
+                       if (since("another launcher is running") != 1)
+                           fail(w.name, "the relaunch did not find the running launcher");
+                       if (r.timed_out || r.exit_code != 0) fail(w.name, "the launcher did not exit on its own");
+                       if (markers(w.db(), "1.0.0.0") != 2) fail(w.name, "A did not run once per launch");
+                       auto s = w.state();
+                       if (!s || !staged(*s, w.b)) fail(w.name, "B was not staged after the relaunched app exited");
+                   },
+                   good_is_b,
+                   [](const World& w, const std::string& label) {
+                       if (markers(w.db(), "2.0.0.0") < 1) fail(label, "B never ran");
+                   },
+                   true, false});
+
+    out.push_back({"shutdown-during-download", "", 1, 1, true,
+                   [](World& w) {
+                       std::optional<std::chrono::steady_clock::time_point> ended;
+                       RunResult r = run_short_session(w, [&] {
+                           if (ended) return;
+                           if (!end_session(w)) fail(w.name, "cannot reach the launcher's session window");
+                           ended = std::chrono::steady_clock::now();
+                       });
+                       if (!ended) return fail(w.name, "the launcher exited with the app while B was downloading");
+                       if (r.timed_out || r.exit_code != 0 || std::chrono::steady_clock::now() - *ended > 10s)
+                           fail(w.name, "session end did not stop the download promptly");
+                       auto session = w.session();
+                       if (!session || !session->ended_clean) fail(w.name, "session end did not leave a clean report");
+                       auto s = w.state();
+                       if (!s || s->find(w.b.entry.id()) || fs::exists(w.build_dir(w.b)))
+                           fail(w.name, "a half-downloaded build reached the state");
+                       w.server->release();
+                   },
+                   good_is_b,
+                   [](const World& w, const std::string& label) {
+                       if (w.leftovers()) fail(label, "the interrupted download was never cleaned up");
+                   },
+                   true, false});
     return out;
 }
 
@@ -526,6 +1031,8 @@ int main(int argc, char** argv) {
         else if (a == "--verbose") g_verbose = true;
     }
     if (!parties::crypto_init()) return 2;
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 2;
     if (g_launcher.empty() || g_fake_app.empty()) {
         std::cerr << "usage: update_e2e_test --launcher <exe> --fake-app <exe> [--only <name>] [--no-kill]\n";
         return 2;
@@ -541,7 +1048,7 @@ int main(int argc, char** argv) {
         bool plain = run_scenario(sc, std::nullopt) == Outcome::Converged && g_failures == before;
         int kills = 0;
         bool kills_ok = true;
-        if (kill_points && plain) {
+        if (kill_points && sc.kill_points && plain) {
             for (int n = 1; n < 200; ++n) {
                 int b = g_failures;
                 Outcome o = run_scenario(sc, n);
@@ -553,7 +1060,7 @@ int main(int argc, char** argv) {
         total_kills += kills;
         auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
         std::printf("%-24s %-6s %s (%d) %.0fs\n", sc.name.c_str(), plain ? "pass" : "FAIL",
-                    !kill_points ? "skipped" : kills_ok && plain ? "pass" : "FAIL", kills, seconds);
+                    !kill_points || !sc.kill_points ? "skipped" : kills_ok && plain ? "pass" : "FAIL", kills, seconds);
         std::fflush(stdout);
     }
     std::printf("kill points exercised: %d\n", total_kills);

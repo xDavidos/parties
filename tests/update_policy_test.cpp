@@ -123,6 +123,13 @@ bool test_switch_to_older_channel_pins() {
     auto* report = as<ReportPinned>(plan_update(s, stable, kProtocol, kData3));
     if (!report || report->until != k160.version || report->channel_newest != k152.version)
         ok &= fail("a pinned user is told what they wait for, and nothing is staged");
+    if (!report || !report->downgrade || report->downgrade->entry.version != k152.version ||
+        report->downgrade->data_effect != DataEffect::ReadsAsIs)
+        ok &= fail("a pinned user is offered switch now onto the channel's newest older build");
+    auto* restoring = as<ReportPinned>(plan_update(s, manifest(Channel::Stable, {entry("1.5.1.0", 1, 1)}), kProtocol,
+                                                   DataInfo{3, 3}));
+    if (!restoring || !restoring->downgrade || restoring->downgrade->data_effect != DataEffect::NeedsRestore)
+        ok &= fail("switch now onto data the older build cannot read restores a backup");
 
     // Stable catches up with the promoted, byte-identical build: the pin lifts, nothing downloads.
     auto caught_up = plan_update(s, manifest(Channel::Stable, {k152, k160}), kProtocol, kData3);
@@ -216,6 +223,17 @@ bool test_data_gate_on_newer_builds() {
     return true;
 }
 
+bool test_restore_point() {
+    const BuildEntry old = entry("1.5.0.0", 1, 1);
+    std::vector<Snapshot> newest_first{{{"rolled-back-x"}, DataInfo{3, 3}},
+                                       {{"pre-b"}, DataInfo{2, 1}},
+                                       {{"pre-a"}, DataInfo{1, 1}}};
+    auto chosen = restore_point(old, newest_first);
+    if (!chosen || chosen->id.stem != "pre-b") return fail("the newest backup the build can open is restored");
+    if (restore_point(old, std::span(newest_first).first(1))) return fail("no backup the build can open means none");
+    return true;
+}
+
 } // namespace
 
 int main() {
@@ -227,6 +245,7 @@ int main() {
     ok &= test_launcher_protocol_gate();
     ok &= test_quarantine_until_newer();
     ok &= test_data_gate_on_newer_builds();
+    ok &= test_restore_point();
     if (ok) std::cout << "update_policy_test: all passed\n";
     return ok ? 0 : 1;
 }

@@ -3,6 +3,8 @@
 #include "file_io.h"
 #include "log.h"
 
+#include <parties/update/release_keys.h>
+
 #include <charconv>
 #include <cstdlib>
 #include <string_view>
@@ -96,6 +98,13 @@ std::optional<std::chrono::milliseconds> exit_after_healthy() {
     return std::chrono::milliseconds(*n);
 }
 
+std::optional<std::chrono::milliseconds> job_cap() {
+    auto text = env("PARTIES_TEST_JOB_CAP_MS");
+    auto n = text ? number(*text) : std::nullopt;
+    if (!n) return std::nullopt;
+    return std::chrono::milliseconds(*n);
+}
+
 Keyring pinned_keys() { return kKeys; }
 
 #else
@@ -105,8 +114,8 @@ Timing timing() { return {}; }
 void before_effect() {}
 std::optional<std::string> scripted_recovery() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> exit_after_healthy() { return std::nullopt; }
-// Production keys arrive with the release pipeline; until then no manifest verifies.
-Keyring pinned_keys() { return {}; }
+std::optional<std::chrono::milliseconds> job_cap() { return std::nullopt; }
+Keyring pinned_keys() { return production_keyring(); }
 
 #endif
 

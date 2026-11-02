@@ -1,9 +1,9 @@
 #pragma once
 
-// The launcher's only access to user data. Owns backups\ (retention comes
-// later; nothing here deletes a backup). Every method runs only while no app
-// process exists, so the launcher and the app never write the database at the
-// same time.
+// The launcher's only access to user data. Owns backups\ and their retention
+// (parties/update/retention.h). Every method runs only while no app process
+// exists, so the launcher and the app never write the database at the same
+// time.
 
 #include "paths.h"
 
@@ -44,6 +44,9 @@ public:
 
     // Intact backups, newest first.
     std::vector<Backup> list() const;
+
+    // Deletes the automatic snapshots retention allows, given the committed state.
+    void prune(const SupervisorState& committed) const;
 
 private:
     DataPaths paths_;

@@ -34,6 +34,10 @@ std::optional<std::string> scripted_recovery();
 // reports healthy, so a harness can end a real client through its normal path.
 std::optional<std::chrono::milliseconds> exit_after_healthy();
 
+// PARTIES_TEST_JOB_CAP_MS=<n>: how long a feed job may keep the launcher
+// running after the app exits.
+std::optional<std::chrono::milliseconds> job_cap();
+
 // The update keyring: production keys, or the harness key in testing builds.
 Keyring pinned_keys();
 

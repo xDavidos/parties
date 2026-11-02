@@ -31,6 +31,9 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr auto kCheckInterval = std::chrono::hours(6);
+// How long a check or download may keep the launcher running after the app
+// exits: a full build over a slow link, but not a hidden process all day.
+constexpr auto kJobCapAfterExit = std::chrono::minutes(15);
 
 std::wstring widen(std::string_view s) {
     if (s.empty()) return {};
@@ -79,7 +82,7 @@ link::StatusNotice wire_notice(const Notice& n) {
                                                   : link::StatusNotice::Kind::DataRestored;
     out.from = n.from;
     out.to = n.to;
-    if (n.preserved) out.preserved = n.preserved->stem + ".db";
+    if (n.preserved) out.preserved = "backups\\" + n.preserved->stem + ".db";
     return out;
 }
 
@@ -87,12 +90,20 @@ struct PendingRecovery {
     std::optional<RecoveryReason> why;
 };
 
+std::unique_ptr<UpdateSource> make_source(const LauncherOptions& o) {
+    if (o.feed_dir) return make_local_dir_source(*o.feed_dir);
+    if (o.feed_base) return make_https_source(*o.feed_base, true);
+    // A testing launcher talks to no real feed unless told to, and a build
+    // that pins no key could verify nothing it fetched.
+    if (testing::enabled() || testing::pinned_keys().empty()) return nullptr;
+    return make_https_source(std::string(kFeedBase), false);
+}
+
 class Supervisor {
 public:
     explicit Supervisor(const LauncherOptions& o)
         : options_(o), store_(o.install, utf8(o.data.data())), builds_(o.install), data_(o.data),
-          worker_(o.feed_dir ? make_local_dir_source(*o.feed_dir) : nullptr, testing::pinned_keys(), o.data.trust(),
-                  BuildStore(o.install)),
+          worker_(make_source(o), testing::pinned_keys(), o.data.trust(), BuildStore(o.install)),
           timing_(testing::timing()) {}
 
     int run();
@@ -125,6 +136,10 @@ private:
     void on_timers();
     std::optional<Clock::time_point> next_deadline() const;
     void start_check();
+    void submit(Job job);
+    void pump();
+    void cancel_jobs();
+    bool repairing() const;
     void show_pending_recovery();
     void publish_status();
     link::Status status() const;
@@ -156,6 +171,9 @@ private:
     bool quit_ = false;
     bool session_ended_ = false;
     Clock::time_point next_check_ = Clock::time_point::max();
+    std::optional<Clock::time_point> jobs_cut_off_;  // set while no app runs
+    std::deque<Job> jobs_;
+    std::optional<Job> running_job_;
 
     fs::path self_exe_;
     Sha256 self_sha_;
@@ -231,7 +249,9 @@ bool Supervisor::execute(const Effect& effect) {
             using T = std::decay_t<decltype(e)>;
             if constexpr (std::is_same_v<T, TakeSnapshot>) {
                 if (app_) return (error = "the app is running", false);
-                return data_.snapshot(e.id, error);
+                if (!data_.snapshot(e.id, error)) return false;
+                data_.prune(state_);
+                return true;
             } else if constexpr (std::is_same_v<T, Commit>) {
                 if (!store_.commit(e.state, error)) return false;
                 state_ = e.state;
@@ -253,7 +273,8 @@ bool Supervisor::execute(const Effect& effect) {
                 if (!builds_.remove(e.build, state_, error)) log("cannot delete {}: {}", e.build.dir_name(), error);
                 return true;
             } else if constexpr (std::is_same_v<T, Redownload>) {
-                log("{} needs to be downloaded again; this launcher has no download source yet", e.build.dir_name());
+                if (!worker_.available()) log("{} needs to be downloaded again, but there is no update feed", e.build.dir_name());
+                else submit(RepairJob{e.build});
                 return true;
             } else if constexpr (std::is_same_v<T, ShowRecovery>) {
                 recovery_ = PendingRecovery{e.why};
@@ -295,6 +316,7 @@ bool Supervisor::spawn(const BuildId& build) {
     }
     (*link)->expect_client(process->pid());
     app_.emplace(AppRun{build, std::move(*process), std::move(*link), Clock::now()});
+    jobs_cut_off_.reset();
     return true;
 }
 
@@ -308,6 +330,12 @@ void Supervisor::on_app_exit() {
         restart_requested_ = false;
         dispatch(StartRequested{});
     }
+    if (app_) return;
+    // The job in flight finishes, or a user whose sessions are shorter than a
+    // download would never get an update. Nobody is left to see the queued
+    // checks and downgrades; a queued repair is what lets the next start succeed.
+    std::erase_if(jobs_, [](const Job& j) { return !std::holds_alternative<RepairJob>(j); });
+    jobs_cut_off_ = Clock::now() + testing::job_cap().value_or(kJobCapAfterExit);
 }
 
 void Supervisor::on_link() {
@@ -329,6 +357,9 @@ void Supervisor::on_link() {
             log("app reported healthy (data schema {})", healthy->data_schema);
             app_->healthy_at = Clock::now();
             dispatch(AppHealthy{});
+            // The first check of a launcher run waits for the app, so it never
+            // competes with startup.
+            if (next_check_ == Clock::time_point::max()) start_check();
         } else if (auto* request = std::get_if<link::Request>(&message)) {
             on_request(*request);
         }
@@ -350,7 +381,7 @@ void Supervisor::on_request(const link::Request& request) {
                 dispatch(NoticeAcknowledged{});
             } else {
                 if (r.choice == link::ChannelChoice::DowngradeNow) {
-                    log("an immediate downgrade is not offered by this launcher yet");
+                    submit(DowngradeJob{r.channel});
                     return;
                 }
                 ChannelIntent intent = r.choice == link::ChannelChoice::Wait
@@ -381,15 +412,58 @@ void Supervisor::on_worker() {
         publish_status();
         return;
     }
-    feed_view_ = outcome->view;
-    for (Event& e : outcome->events) dispatch(std::move(e));
+    running_job_.reset();
+    if (std::holds_alternative<CheckJob>(outcome->job) && outcome->channel != state_.channel) {
+        log("dropping a check of the channel the user just left");
+        if (app_) submit(CheckJob{});
+    } else if (std::holds_alternative<RepairJob>(outcome->job)) {
+        for (Event& e : outcome->events) dispatch(std::move(e));
+        if (outcome->ok && recovery_ && recovery_->why == RecoveryReason::Repairing && !app_ && !repairing()) {
+            log("repaired; starting again");
+            recovery_.reset();
+            dispatch(StartRequested{});
+        }
+    } else {
+        feed_view_ = outcome->view;
+        for (Event& e : outcome->events) dispatch(std::move(e));
+        if (std::holds_alternative<DowngradeJob>(outcome->job) && app_) submit(CheckJob{});
+    }
+    pump();
     publish_status();
 }
 
 void Supervisor::start_check() {
     next_check_ = Clock::now() + kCheckInterval;
+    submit(CheckJob{});
+}
+
+void Supervisor::submit(Job job) {
     if (!worker_.available()) return;
-    if (worker_.start(CheckRequest{state_, last_live_db_})) publish_status();
+    bool duplicate = std::ranges::find(jobs_, job) != jobs_.end() ||
+                     (std::holds_alternative<CheckJob>(job) && running_job_ == job);
+    if (!duplicate) jobs_.push_back(std::move(job));
+    pump();
+}
+
+// Setup and uninstall end the launcher through here as well.
+void Supervisor::cancel_jobs() {
+    jobs_.clear();
+    worker_.cancel();
+}
+
+void Supervisor::pump() {
+    if (running_job_ || jobs_.empty() || worker_.busy()) return;
+    Job job = jobs_.front();
+    std::vector<Backup> backups = std::holds_alternative<RepairJob>(job) ? std::vector<Backup>{} : data_.list();
+    if (!worker_.start(JobRequest{job, state_, last_live_db_, std::move(backups)})) return;
+    jobs_.pop_front();
+    running_job_ = std::move(job);
+    publish_status();
+}
+
+bool Supervisor::repairing() const {
+    auto repair = [](const Job& j) { return std::holds_alternative<RepairJob>(j); };
+    return (running_job_ && repair(*running_job_)) || std::ranges::any_of(jobs_, repair);
 }
 
 std::optional<Clock::time_point> Supervisor::next_deadline() const {
@@ -397,8 +471,11 @@ std::optional<Clock::time_point> Supervisor::next_deadline() const {
     auto consider = [&](Clock::time_point t) {
         if (!next || t < *next) next = t;
     };
+    if (!app_) {
+        if (jobs_cut_off_) consider(*jobs_cut_off_);
+        return next;
+    }
     if (worker_.available()) consider(next_check_);
-    if (!app_) return next;
     if (!app_->healthy_at) {
         if (!app_->deadline_fired) consider(app_->started + units(timing_.policy.health_deadline_s));
         return next;
@@ -412,8 +489,15 @@ std::optional<Clock::time_point> Supervisor::next_deadline() const {
 
 void Supervisor::on_timers() {
     const auto now = Clock::now();
+    if (!app_) {
+        if (jobs_cut_off_ && now >= *jobs_cut_off_) {
+            jobs_cut_off_.reset();
+            if (running_job_) log("giving up on the update job: the app exited too long ago");
+            cancel_jobs();
+        }
+        return;
+    }
     if (worker_.available() && now >= next_check_) start_check();
-    if (!app_) return;
     if (!app_->healthy_at) {
         if (!app_->deadline_fired && now >= app_->started + units(timing_.policy.health_deadline_s)) {
             app_->deadline_fired = true;
@@ -443,15 +527,18 @@ link::Status Supervisor::status() const {
     link::Status s;
     s.channel = state_.channel;
     s.current = app_ ? app_->build.version : state_.good.version;
-    if (worker_.busy()) {
-        auto percent = worker_.percent();
-        s.phase = percent ? link::Phase::Downloading : link::Phase::Checking;
-        s.percent = percent;
+    if (auto download = worker_.download()) {
+        s.phase = link::Phase::Downloading;
+        s.percent = download->percent;
+        s.available = download->version;
+    } else if (worker_.busy()) {
+        s.phase = link::Phase::Checking;
     } else if (auto* staged = std::get_if<Staged>(&state_.activation)) {
         s.phase = link::Phase::ReadyToRestart;
         s.available = staged->build.version;
     } else {
         s.phase = feed_view_.phase;
+        s.available = feed_view_.available;
     }
     if (auto* pin = std::get_if<PinnedUntilAtLeast>(&state_.intent)) {
         s.pinned_until = pin->floor;
@@ -496,6 +583,7 @@ void Supervisor::end_session() {
     if (session_ended_) return;
     log("session is ending");
     if (app_ && WaitForSingleObject(app_->process.handle(), 5000) == WAIT_OBJECT_0) on_app_exit();
+    cancel_jobs();
     write_session(true);
     session_ended_ = true;
     quit_ = true;
@@ -544,20 +632,25 @@ int Supervisor::run() {
     fs::create_directories(options_.data.data(), ec);
     if (!load_state()) return 1;
     builds_.collect_garbage(state_, self_exe_.parent_path());
-    if (worker_.available()) next_check_ = Clock::now();
+    data_.prune(state_);
 
     dispatch(Resumed{});
     if (options_.recover) recovery_ = PendingRecovery{std::nullopt};
     else dispatch(StartRequested{});
 
     while (!quit_) {
-        if (recovery_ && !app_) {
+        // A repair in flight may make the recovery dialog unnecessary.
+        if (recovery_ && !app_ && !repairing()) {
             show_pending_recovery();
             continue;
         }
-        if (!app_) break;
+        // running_job_, not worker_.busy(): a job that just ended still has an
+        // outcome to commit.
+        if (!app_ && !running_job_ && jobs_.empty()) break;
 
-        std::vector<HANDLE> handles{activate, worker_.event(), app_->link->event(), app_->process.handle()};
+        const bool with_app = app_.has_value();
+        std::vector<HANDLE> handles{activate, worker_.event()};
+        if (with_app) handles.insert(handles.end(), {app_->link->event(), app_->process.handle()});
         DWORD timeout = INFINITE;
         if (auto deadline = next_deadline()) {
             auto wait = std::chrono::ceil<std::chrono::milliseconds>(*deadline - Clock::now()).count();
@@ -567,8 +660,8 @@ int Supervisor::run() {
                                               MWMO_INPUTAVAILABLE);
         if (r == WAIT_OBJECT_0) on_activate();
         else if (r == WAIT_OBJECT_0 + 1) on_worker();
-        else if (r == WAIT_OBJECT_0 + 2) on_link();
-        else if (r == WAIT_OBJECT_0 + 3) on_app_exit();
+        else if (with_app && r == WAIT_OBJECT_0 + 2) on_link();
+        else if (with_app && r == WAIT_OBJECT_0 + 3) on_app_exit();
         else if (r == WAIT_OBJECT_0 + handles.size()) {
             MSG msg;
             while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -638,6 +731,11 @@ std::optional<LauncherOptions> parse_options(const std::vector<std::wstring>& ar
         } else if (auto v = value_of(L"--feed-dir=")) {
             if (!testing::enabled()) continue;
             if (!(o.feed_dir = absolute(*v, "--feed-dir"))) return std::nullopt;
+        } else if (auto v = value_of(L"--feed-base=")) {
+            if (!testing::enabled()) continue;
+            if (!v->starts_with(L"http://127.0.0.1:") || !v->ends_with(L"/"))
+                return (error = "--feed-base must be http://127.0.0.1:<port>/", std::nullopt);
+            o.feed_base = utf8(fs::path(*v));
         } else {
             log("ignoring unknown argument {}", utf8(fs::path(a)));
         }

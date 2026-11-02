@@ -78,7 +78,10 @@ UpdateDecision plan_update(const SupervisorState& state, const VerifiedManifest&
     if (auto* pin = std::get_if<PinnedUntilAtLeast>(&state.intent)) {
         if (!newest_runnable || newest_runnable->version < pin->floor) {
             const BuildEntry* top = f.newest([&](const BuildEntry& e) { return !manifest.is_revoked(e.version); });
-            return {ReportPinned{pin->floor, top ? std::optional(top->version) : std::nullopt}};
+            ReportPinned report{pin->floor, top ? std::optional(top->version) : std::nullopt, std::nullopt};
+            const BuildEntry* older = f.newest([&](const BuildEntry& e) { return f.offerable(e); });
+            if (older && older->version < installed) report.downgrade = DowngradeOffer{*older, f.data_effect(*older)};
+            return {report};
         }
         new_intent = Follow{};
     }
@@ -112,6 +115,14 @@ ChannelSwitchPlan plan_channel_switch(const SupervisorState& state, const Verifi
 ChannelIntent intent_for(const ChannelSwitchPlan& plan) {
     if (auto* pinned = std::get_if<StayPinned>(&plan)) return PinnedUntilAtLeast{pinned->until};
     return Follow{};
+}
+
+std::optional<Snapshot> restore_point(const BuildEntry& entry, std::span<const Snapshot> newest_first) {
+    auto it = std::ranges::find_if(newest_first, [&](const Snapshot& s) {
+        return compatibility(entry.data_schema, s.data) != Compatibility::Incompatible;
+    });
+    if (it == newest_first.end()) return std::nullopt;
+    return *it;
 }
 
 } // namespace parties::update

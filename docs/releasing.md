@@ -29,6 +29,16 @@ Until a production key is pinned and its secret is set, releases publish as befo
 
 The secret file holds the 32-byte Ed25519 private key (the RFC 8032 seed) as 64 lowercase hex characters. The public file holds the 32-byte public key the same way. The key id is the first 16 characters of the public key's hex.
 
+## Pin the Authenticode publisher
+
+The signed manifest is what makes a launcher trust a download. As a second, independent check, a launcher can also require that every executable it downloads carries a valid Authenticode signature from your publisher. Revocation is checked along the whole certificate chain. A launcher built without a publisher skips this check.
+
+1. Read the signer's name from a signed release asset: `(Get-AuthenticodeSignature parties_client.exe).SignerCertificate.Subject`. The publisher is the value after `CN=`, for example `Parties Project`.
+2. In the repository settings, under **Secrets and variables**, **Actions**, **Variables**, add the repository variable `PARTIES_AUTHENTICODE_PUBLISHER` with that exact value. The **Release** workflow passes it to CMake as `-DPARTIES_AUTHENTICODE_PUBLISHER=...`.
+3. Tag the next release. Its launcher refuses any downloaded executable that is unsigned, has a revoked or untrusted certificate, or was signed by anyone else, and it keeps running the installed build.
+
+Before you move to a certificate with a different common name, clear the variable and ship one release that is still signed with the old certificate. Launchers that update to it no longer pin a publisher. Once users run it, switch the certificate and set the variable to the new name.
+
 ## Rotate the key
 
 A launcher verifies a manifest if at least one signature comes from a key its build pins, and every signature from a pinned key verifies. A build pins at most two keys. To move to a new key without stranding any installed build:

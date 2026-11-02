@@ -18,6 +18,7 @@ struct LauncherOptions {
     bool recover = false;
     std::vector<std::wstring> forwarded;   // everything after "--"
     std::optional<fs::path> feed_dir;      // testing builds only: a local update source
+    std::optional<std::string> feed_base;  // testing builds only: http://127.0.0.1:<port>/
     std::wstring object_prefix = L"Parties";  // --test-namespace in testing builds
 };
 

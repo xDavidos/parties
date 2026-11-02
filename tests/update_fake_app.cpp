@@ -5,7 +5,8 @@
 //
 // Its version and data schema come from fake-build.json next to the exe, so
 // one binary plays every build. Faults are chosen per version by
-// PARTIES_FAKE_FAULT=<version>:<fault>[;<version>:<fault>...].
+// PARTIES_FAKE_FAULT=<version>:<fault>[;<version>:<fault>...]. Every status
+// the launcher sends is appended to PARTIES_FAKE_STATUS_LOG when it is set.
 
 #define NOMINMAX
 
@@ -211,15 +212,43 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         die(kCrash);
     }
 
+    // Switches to Beta and waits, then takes "switch now" once it is offered.
+    if (fault == "wait-then-downgrade")
+        peer.send(link::Request{link::SetChannel{Channel::Beta, link::ChannelChoice::Wait}});
+    const std::string status_log = env("PARTIES_FAKE_STATUS_LOG");
     bool restart_asked = false;
-    auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(run_ms > 0 ? run_ms : 1000);
-    while (std::chrono::steady_clock::now() < end) {
+    bool downgrade_asked = false;
+    // These faults assert on what the check told the app, so the app stays
+    // until the check of its channel answers, however long that takes.
+    const bool until_checked = fault == "run-until-checked" || fault == "wait-then-downgrade";
+    const Channel channel = fault == "wait-then-downgrade" ? Channel::Beta : Channel::Stable;
+    bool checking = false;
+    bool answered = false;
+    const auto started = std::chrono::steady_clock::now();
+    auto running = [&] {
+        auto elapsed = std::chrono::steady_clock::now() - started;
+        if (until_checked && !answered) return elapsed < std::chrono::seconds(30);
+        return elapsed < std::chrono::milliseconds(run_ms > 0 ? run_ms : 1000);
+    };
+    while (running()) {
         auto m = peer.poll();
         if (!m) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
         if (std::holds_alternative<link::ExitRequested>(*m)) break;
+        if (std::holds_alternative<link::Status>(*m) && !status_log.empty())
+            std::ofstream(status_log, std::ios::app) << link::write(*m);
+        if (auto* status = std::get_if<link::Status>(&*m)) {
+            if (status->phase == link::Phase::Checking) checking = true;
+            else if (checking && status->channel == channel) answered = true;
+        }
+        if (auto* status = std::get_if<link::Status>(&*m); status && fault == "wait-then-downgrade" &&
+                                                          !downgrade_asked && status->phase == link::Phase::Pinned &&
+                                                          status->downgrade) {
+            downgrade_asked = true;
+            peer.send(link::Request{link::SetChannel{Channel::Beta, link::ChannelChoice::DowngradeNow}});
+        }
         if (auto* status = std::get_if<link::Status>(&*m); status && !restart_asked &&
                                                           status->phase == link::Phase::ReadyToRestart) {
             restart_asked = true;

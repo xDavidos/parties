@@ -1,5 +1,6 @@
 #include <parties/update/link.h>
 
+#include "encoding.h"
 #include "json_util.h"
 
 #include <algorithm>
@@ -136,6 +137,10 @@ std::string write_status(const Status& s) {
             write_version(w, "version", s.downgrade->version);
             json::key(w, "data_effect");
             json::str(w, name_of(kEffects, s.downgrade->data_effect));
+            if (s.downgrade->backup_taken_at) {
+                json::key(w, "backup_taken_at");
+                json::str(w, format_utc(*s.downgrade->backup_taken_at));
+            }
             w.EndObject();
         }
         if (s.notice) {
@@ -171,7 +176,10 @@ std::optional<Status> parse_status(const Value& doc) {
     if (const Value* d = json::object(doc, "downgrade")) {
         auto version = version_at(*d, "version");
         auto effect = value_of(kEffects, json::string(*d, "data_effect"));
-        if (version && effect) s.downgrade = DowngradeOffer{*version, *effect};
+        if (version && effect) {
+            s.downgrade = DowngradeOffer{*version, *effect, std::nullopt};
+            if (auto taken = json::string(*d, "backup_taken_at")) s.downgrade->backup_taken_at = parse_utc(*taken);
+        }
     }
     if (const Value* n = json::object(doc, "notice")) {
         auto kind = value_of(kNoticeKinds, json::string(*n, "kind"));
