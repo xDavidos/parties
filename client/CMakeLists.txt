@@ -58,6 +58,7 @@ set(CLIENT_COMMON_SOURCES
     src/lobby_model.cpp
     src/server_list_model.cpp
     src/settings.cpp
+    src/sqlite_file.cpp
     src/audio_engine.cpp
     src/voice_mixer.cpp
     src/miniaudio_impl.cpp
@@ -114,6 +115,8 @@ else()
         # Platform specific
         src/windows/main.cpp
         src/windows/app.cpp
+        src/windows/data_location.cpp
+        src/windows/legacy_import.cpp
         src/windows/system_diagnostics.cpp
         src/windows/stream_audio_capture.cpp
         src/windows/ui_manager.cpp

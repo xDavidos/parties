@@ -2,9 +2,13 @@
 
 #include <parties/types.h>
 
+#include <client/settings_schema.h>
+
+#include <filesystem>
+#include <optional>
+#include <span>
 #include <string>
 #include <vector>
-#include <optional>
 
 struct sqlite3;
 
@@ -20,10 +24,22 @@ struct SavedServer {
     std::string password;
 };
 
+// An empty seed_phrase is a raw-key identity, imported from a private key.
 struct Identity {
     std::string seed_phrase;
     SecretKey   secret_key{};
     PublicKey   public_key{};
+};
+
+struct ArchivedIdentity {
+    Identity    identity;
+    std::string archived_at;   // UTC, SQLite datetime format
+    std::string reason;        // "replaced" or "deleted"
+};
+
+struct SettingsPaths {
+    std::filesystem::path db;
+    std::filesystem::path backups_dir;   // receives pre-migration snapshots
 };
 
 class Settings {
@@ -31,15 +47,24 @@ public:
     Settings();
     ~Settings();
 
-    bool open(const std::string& path);
+    enum class OpenStatus { Ready, TooNew, Unavailable };
+    struct OpenResult {
+        OpenStatus  status = OpenStatus::Unavailable;
+        std::string reason;   // empty when Ready
+    };
+
+    OpenResult open(const SettingsPaths& paths);
+    bool is_open() const { return db_ != nullptr; }
     void close();
 
     // --- Identity ---
+    // Append-only: replacing or deleting an identity moves it to the archive.
     bool has_identity();
     bool save_identity(const std::string& seed_phrase,
                        const SecretKey& sk, const PublicKey& pk);
-    void delete_identity();
+    bool delete_identity();
     std::optional<Identity> load_identity();
+    std::vector<ArchivedIdentity> archived_identities();
     std::string get_fingerprint();
 
     // --- TOFU certificate store ---
@@ -68,8 +93,11 @@ public:
     std::optional<std::string> get_pref(const std::string& key);
 
 private:
-    bool exec(const std::string& sql);
-    bool create_schema();
+    friend struct SettingsTestSeam;
+
+    OpenResult open_with(const SettingsPaths& paths, std::span<const schema::Migration> migrations);
+    bool exec(const char* sql, std::string& error);
+    bool apply_migration(const schema::Migration& migration, std::string& error);
 
     sqlite3* db_ = nullptr;
 };

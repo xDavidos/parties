@@ -1,5 +1,9 @@
 #include <client/app.h>
 #include <client/auto_updater.h>
+#include <client/data_location.h>
+#include <client/exit_codes.h>
+#include <client/legacy_import.h>
+#include <client/sqlite_file.h>
 #include <client/win32_single_instance.h>
 #include <parties/version.h>
 #include <parties/crypto.h>
@@ -22,6 +26,9 @@
 
 #include <cstring>
 #include <filesystem>
+#include <string>
+#include <system_error>
+#include <vector>
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -275,6 +282,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+static std::wstring widen(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    const int length = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    std::wstring wide(static_cast<size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), wide.data(), length);
+    return wide;
+}
+
+// Running without persistence would silently lose everything the user does,
+// so a data failure stops startup with an exit code the launcher understands.
+static int refuse_to_start(ExitCode code, const std::filesystem::path& where, const std::string& reason) {
+    LOG_ERROR("Refusing to start (exit code {}): {} ({})", static_cast<int>(code),
+              reason, utf8_path(where));
+    std::wstring text = code == ExitCode::DataTooNew
+        ? L"Your Parties data was saved by a newer version of Parties. Install the latest version to open it."
+        : L"Parties cannot start because it cannot open its data.";
+    if (!where.empty()) text += L"\n\nLocation: " + where.wstring();
+    text += L"\n\nReason: " + widen(reason);
+    MessageBoxW(nullptr, text.c_str(), L"Parties", MB_OK | MB_ICONERROR);
+    return static_cast<int>(code);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Entry point
 // ═══════════════════════════════════════════════════════════════════════
@@ -322,13 +351,41 @@ int main(int argc, char* argv[]) {
         LOG_WARN("Failed to request 1 ms Windows timer resolution");
     if (!main_priority_set)
         LOG_WARN("Failed to set the main thread to highest priority");
+    const DataLocationResult resolved = resolve_process_data_location();
+    if (!resolved.location)
+        return refuse_to_start(ExitCode::DataUnavailable, {}, resolved.error);
+    const DataLocation& data = *resolved.location;
 #ifdef SENTRY_DSN_VALUE
-    parties::crash_reporter_init(SENTRY_DSN_VALUE, argv[0]);
+    parties::crash_reporter_init(SENTRY_DSN_VALUE, argv[0], data.sentry_dir());
 #else
-    parties::crash_reporter_init(nullptr);
+    parties::crash_reporter_init(nullptr, nullptr, data.sentry_dir());
 #endif
     LOG_INFO("{} Client v{}", parties::APP_NAME, parties::APP_VERSION);
+    LOG_INFO("Data directory: {}", utf8_path(data.data_dir));
     parties::alloctrack::start_reporting(10);
+
+#ifdef PARTIES_RETAIL
+    {
+        // Portable zip builds kept the database next to the exe or in whatever
+        // folder they were started from.
+        std::error_code ec;
+        std::vector<std::filesystem::path> legacy_dirs{std::filesystem::current_path(ec)};
+        wchar_t exe_path[32768]{};
+        const DWORD exe_length = GetModuleFileNameW(nullptr, exe_path, 32768);
+        if (exe_length > 0 && exe_length < 32768)
+            legacy_dirs.push_back(std::filesystem::path(exe_path).parent_path());
+        const LegacyImportResult imported = import_legacy_data(data, legacy_dirs);
+        if (imported.status == LegacyImportResult::Status::Failed)
+            return refuse_to_start(ExitCode::DataUnavailable, data.db_path(), imported.error);
+    }
+#endif
+
+    App app;
+    const Settings::OpenResult opened = app.open_data(data.settings_paths());
+    if (opened.status != Settings::OpenStatus::Ready)
+        return refuse_to_start(opened.status == Settings::OpenStatus::TooNew
+                                   ? ExitCode::DataTooNew : ExitCode::DataUnavailable,
+                               data.db_path(), opened.reason);
 
     // Per-monitor DPI awareness (must be set before creating any windows)
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -394,7 +451,6 @@ int main(int argc, char* argv[]) {
     DwmExtendFrameIntoClientArea(hwnd, &margins);
 
     // Initialize application
-    App app;
     SetPropW(hwnd, L"App", &app);
 
     if (!app.init(hwnd)) {

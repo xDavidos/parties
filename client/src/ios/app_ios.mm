@@ -687,7 +687,14 @@ void PopulateIOSPreview(AppCore& core, const std::string& scenario)
         _quicInitialized = true;
 
         // ── Init AppCore ─────────────────────────────────────────────────
-        if (!_core.init(std::string(dbPath.UTF8String), std::move(bridge), _rmlContext)) {
+        const SettingsPaths dataPaths{std::filesystem::path(dbPath.UTF8String),
+                                      std::filesystem::path(docs.UTF8String) / "backups"};
+        const Settings::OpenResult opened = _core.settings_.open(dataPaths);
+        if (opened.status != Settings::OpenStatus::Ready) {
+            NSLog(@"[Parties] Cannot open data at %s: %s", dbPath.UTF8String, opened.reason.c_str());
+            return;
+        }
+        if (!_core.init(std::move(bridge), _rmlContext)) {
             NSLog(@"[Parties] AppCore init failed");
             return;
         }
