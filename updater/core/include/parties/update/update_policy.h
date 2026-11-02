@@ -79,7 +79,9 @@ ChannelSwitchPlan plan_channel_switch(const SupervisorState& state, const Verifi
 // without taking the downgrade.
 ChannelIntent intent_for(const ChannelSwitchPlan& plan);
 
-// The intent to commit when the user picks a channel and chooses to wait.
+// The intent to commit when the user picks a channel and chooses to wait: stay
+// on the version you run, the candidate during a trial, until the channel
+// reaches it.
 ChannelIntent wait_intent(const SupervisorState& state);
 
 // The backup an accepted DataEffect::NeedsRestore downgrade, or Recovery's

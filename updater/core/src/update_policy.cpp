@@ -120,7 +120,10 @@ ChannelIntent intent_for(const ChannelSwitchPlan& plan) {
     return Follow{};
 }
 
-ChannelIntent wait_intent(const SupervisorState& state) { return PinnedUntilAtLeast{state.good.version}; }
+ChannelIntent wait_intent(const SupervisorState& state) {
+    if (auto* p = std::get_if<Probation>(&state.activation)) return PinnedUntilAtLeast{p->candidate.version};
+    return PinnedUntilAtLeast{state.good.version};
+}
 
 std::optional<Snapshot> restore_point(uint32_t data_schema, std::span<const Snapshot> newest_first) {
     auto it = std::ranges::find_if(newest_first, [&](const Snapshot& s) {
