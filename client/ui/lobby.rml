@@ -50,17 +50,30 @@
         </div>
     </div>
 
+    <!-- The launcher rolled back a build that did not start -->
+    <div class="update-notice" id="update-notice" data-model="lobby" data-if="update_notice != ''">
+        <div class="update-notice-copy">
+            <span class="update-notice-text ui-body">{{ update_notice }}</span>
+            <span class="update-notice-detail ui-caption" data-if="update_notice_detail != ''">{{ update_notice_detail }}</span>
+        </div>
+        <div class="update-notice-dismiss ui-icon-button" id="update-notice-dismiss"
+             data-event-click="dismiss_update_notice" title="Dismiss">
+            <svg src="icon-close.svg" width="14" height="14" />
+        </div>
+    </div>
+
     <!-- App content area (below titlebar) -->
     <div class="app-content" data-model="lobby"
          data-class-mobile-content="mobile_show_content">
 
     <!-- Update pill (absolutely positioned over titlebar) -->
-    <div class="titlebar-update" data-if="update_available"
+    <div class="titlebar-update" id="titlebar-update" data-if="update_available"
          data-event-click="apply_update"
          data-class-downloading="update_downloading"
          data-class-ready="update_ready">
-        <span class="update-pill-text" data-if="update_ready == false">Update {{ update_version }}</span>
-        <span class="update-pill-text" data-if="update_ready">Restart to update</span>
+        <span class="update-pill-text ui-control" data-if="update_ready == false && update_percent < 0">Update {{ update_version }}</span>
+        <span class="update-pill-text ui-control" data-if="update_percent >= 0">Downloading {{ update_percent }}%</span>
+        <span class="update-pill-text ui-control" data-if="update_ready">Restart to update</span>
     </div>
 
     <!-- ============================================================
@@ -309,6 +322,11 @@
                     <span class="settings-nav-icon"><svg src="icon-key.svg" width="15" height="15" /></span>
                     <span>Account &amp; Keys</span>
                 </div>
+                <div class="settings-nav-item" id="settings-nav-updates" data-if="update_managed"
+                     data-class-active="settings_section == 5" data-event-click="navigate_settings(5)">
+                    <span class="settings-nav-icon"><svg src="icon-download.svg" width="15" height="15" /></span>
+                    <span>Updates</span>
+                </div>
             </div>
 
             <div class="settings-page">
@@ -318,6 +336,7 @@
                     <div data-if="settings_section == 2"><span class="settings-page-title ui-heading-page">Hotkeys</span></div>
                     <div data-if="settings_section == 3"><span class="settings-page-title ui-heading-page">Account &amp; Keys</span></div>
                     <div data-if="settings_section == 4"><span class="settings-page-title ui-heading-page">Camera</span></div>
+                    <div data-if="settings_section == 5"><span class="settings-page-title ui-heading-page">Updates</span></div>
                     <div class="settings-close ui-icon-button" data-event-click="route_back" title="Close settings">
                         <svg src="icon-close.svg" width="17" height="17" />
                     </div>
@@ -507,6 +526,32 @@
                             <div class="share-codec-btn ui-segment ui-control" data-class-active="camera_quality == 2" data-event-click="select_camera_quality(2)"><span class="ui-control">1080p</span></div>
                         </div></div>
                         <div class="settings-camera-hint ui-caption">Changes apply right away, even while your camera is on. The video codec follows the Screen Share setting.</div>
+                    </div>
+                </div>
+
+                <div class="settings-scroll" id="settings-updates-page" data-if="settings_section == 5">
+                    <div class="settings-page-intro ui-body" id="settings-updates-intro">Parties downloads updates in the background and installs them when you restart.</div>
+                    <div class="settings-config-card settings-updates-card">
+                        <div class="settings-account-row settings-update-version">
+                            <div class="settings-row-copy">
+                                <span class="settings-feature-title">Parties {{ update_current }}</span>
+                                <span class="settings-feature-copy" id="settings-update-status">{{ update_status_line }}</span>
+                            </div>
+                            <div class="settings-secondary-action ui-button ui-button-secondary ui-button-compact" id="settings-update-restart" data-if="update_ready" data-event-click="apply_update"><span class="ui-button-label ui-control">Restart</span></div>
+                        </div>
+                        <div class="share-setting-group">
+                            <div class="settings-field-label ui-label">Release channel</div>
+                            <div class="share-codec-buttons ui-segment-group">
+                                <div class="share-codec-btn ui-segment ui-control" id="settings-update-stable" data-class-active="update_channel == 0" data-event-click="choose_update_channel(0)"><span class="ui-control">Stable</span></div>
+                                <div class="share-codec-btn ui-segment ui-control" id="settings-update-beta" data-class-active="update_channel == 1" data-event-click="choose_update_channel(1)"><span class="ui-control">Beta</span></div>
+                            </div>
+                            <div class="settings-camera-hint ui-caption" data-if="update_hold == ''">Beta gets new versions first. Stable gets them once they have run well on Beta.</div>
+                        </div>
+                        <div class="settings-update-hold" id="settings-update-hold" data-if="update_hold != ''">
+                            <span class="settings-update-hold-text ui-body">{{ update_hold }}</span>
+                            <span class="settings-update-hold-note ui-caption" data-if="update_can_switch">{{ update_switch_note }}</span>
+                            <div class="settings-secondary-action ui-button ui-button-secondary ui-button-compact" id="settings-update-switch-now" data-if="update_can_switch" data-event-click="switch_channel_now"><span class="ui-button-label ui-control">Switch now</span></div>
+                        </div>
                     </div>
                 </div>
 

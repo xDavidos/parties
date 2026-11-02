@@ -124,6 +124,7 @@ else()
         src/windows/win32_tray.cpp
         src/windows/supervisor_link.cpp
         src/windows/shell_identity.cpp
+        src/update_view.cpp
 
         # Parties application adapter over RmlUi's upstream Win32/DX12 backend
 

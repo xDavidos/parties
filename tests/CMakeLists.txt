@@ -431,6 +431,14 @@ if(TARGET parties_update_core)
     endif()
     # 100000 seeded random-walk sequences; about two minutes in a Debug build.
     set_tests_properties(update_probation PROPERTIES TIMEOUT 900)
+
+    if(BUILD_CLIENT)
+        add_executable(update_view_test update_view_test.cpp
+            ../client/src/update_view.cpp ../client/src/lobby_model.cpp)
+        target_include_directories(update_view_test PRIVATE ../client/include ../common/include)
+        target_link_libraries(update_view_test PRIVATE parties_update_link RmlUi::RmlUi)
+        add_test(NAME update_view COMMAND update_view_test)
+    endif()
 endif()
 
 # â”€â”€ Update launcher end to end (testing builds only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

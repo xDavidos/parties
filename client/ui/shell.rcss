@@ -40,40 +40,64 @@
 .titlebar-update {
     display: block;
     position: absolute;
-    top: 4dp;
+    top: 7dp;
     left: 120dp;
-    background-color: #3B82F6;
-    border-radius: 4dp;
-    padding: 2dp 8dp;
+    padding: 3dp 10dp;
+    background-color: var(--color-accent);
+    color: var(--color-accent-ink);
+    border: 1dp transparent;
+    border-radius: var(--radius-pill);
     z-index: 10;
+    cursor: pointer;
     window-action: none;
 }
 
 .titlebar-update:hover {
-    background-color: #22C55E;
+    background-color: var(--color-accent-hover);
 }
 
-.titlebar-update.downloading {
-    background-color: #1E40AF;
-}
-
+/* Progress is information, not a call to action. */
+.titlebar-update.downloading,
 .titlebar-update.downloading:hover {
-    background-color: #1E40AF;
-}
-
-.titlebar-update.ready {
-    background-color: #22C55E;
-}
-
-.titlebar-update.ready:hover {
-    background-color: #4ADE80;
+    background-color: var(--color-surface-raised);
+    color: var(--color-text-soft);
+    border-color: var(--color-border-strong);
+    cursor: default;
 }
 
 .update-pill-text {
     display: inline;
-    color: #FFFFFF;
-    font-size: 11dp;
-    font-weight: bold;
+}
+
+/* ── Rollback notice ────────────────────────────────── */
+
+.update-notice {
+    display: flex;
+    flex: none;
+    flex-direction: row;
+    align-items: center;
+    gap: 12dp;
+    padding: 9dp 12dp 9dp 20dp;
+    background-color: var(--color-surface-raised);
+    border-bottom: 1dp var(--color-border-strong);
+}
+
+.update-notice-copy {
+    display: flex;
+    flex: 1;
+    min-width: 0dp;
+    flex-direction: column;
+    gap: 2dp;
+}
+
+.update-notice-text {
+    display: block;
+    color: var(--color-text);
+}
+
+.update-notice-detail {
+    display: block;
+    color: var(--color-text-soft);
 }
 
 .titlebar-stats {

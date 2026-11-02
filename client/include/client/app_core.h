@@ -109,8 +109,8 @@ public:
     void shutdown();
 #ifdef _WIN32
     // Call before init(). A supervising launcher owns updates, so the legacy
-    // updater stays off and "restart to update" goes to the launcher.
-    void supervise_updates(std::function<void()> restart_to_update);
+    // updater stays off and the update UI sends its requests to the launcher.
+    void supervise_updates(std::function<void(const update::link::Request&)> send);
     void apply_update_status(const update::link::Status& status);
 #endif
     void tick();
@@ -417,7 +417,9 @@ private:
 
 #ifdef _WIN32
     std::unique_ptr<class AutoUpdater> updater_;
-    std::function<void()> restart_to_update_;  // set only when supervised
+    std::function<void(const update::link::Request&)> send_update_request_;  // set only when supervised
+    std::optional<update::link::Status> update_status_;
+    void on_update_action(UpdateAction action);
 #endif
 
     // Pending file uploads: file data cached until CHAT_MESSAGE assigns attachment IDs

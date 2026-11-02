@@ -1,6 +1,7 @@
 #include <client/app_core.h>
 #ifdef _WIN32
 #include <client/auto_updater.h>
+#include <client/update_view.h>
 #endif
 #include <parties/protocol.h>
 #include <parties/serialization.h>
@@ -252,7 +253,7 @@ bool AppCore::init(PlatformBridge bridge, Rml::Context* rml_context)
     stream_audio_player_.init();
 
 #ifdef _WIN32
-    if (!restart_to_update_) {
+    if (!send_update_request_) {
         updater_ = std::make_unique<AutoUpdater>();
         updater_->start();
     }
@@ -264,19 +265,21 @@ bool AppCore::init(PlatformBridge bridge, Rml::Context* rml_context)
 }
 
 #ifdef _WIN32
-void AppCore::supervise_updates(std::function<void()> restart_to_update)
+void AppCore::supervise_updates(std::function<void(const update::link::Request&)> send)
 {
-    restart_to_update_ = std::move(restart_to_update);
+    send_update_request_ = std::move(send);
 }
 
 void AppCore::apply_update_status(const update::link::Status& status)
 {
-    using update::link::Phase;
-    model_.update_available  = status.phase == Phase::Downloading || status.phase == Phase::ReadyToRestart;
-    model_.update_downloading = status.phase == Phase::Downloading;
-    model_.update_ready       = status.phase == Phase::ReadyToRestart;
-    if (status.available)
-        model_.update_version = Rml::String("v") + status.available->to_string().c_str();
+    update_status_ = status;
+    show_update_status(model_, status);
+}
+
+void AppCore::on_update_action(UpdateAction action)
+{
+    if (!send_update_request_ || !update_status_) return;
+    if (auto request = update_request(*update_status_, action)) send_update_request_(*request);
 }
 #endif
 
@@ -2780,8 +2783,8 @@ void AppCore::setup_model_callbacks()
 
 #ifdef _WIN32
     model_.on_apply_update = [this]() {
-        if (restart_to_update_) {
-            if (model_.update_ready.get()) restart_to_update_();
+        if (send_update_request_) {
+            on_update_action(UpdateAction::ClickPill);
             return;
         }
         if (!updater_) return;
@@ -2792,6 +2795,7 @@ void AppCore::setup_model_callbacks()
             updater_->apply_and_restart();
         }
     };
+    model_.on_update_action = [this](UpdateAction action) { on_update_action(action); };
 #endif
 
     // Admin operations
