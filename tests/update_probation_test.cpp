@@ -297,6 +297,13 @@ std::vector<Row> table() {
          BuildSealed{B, std::nullopt}, kV1, {}});
     row({"no staging during probation", probation(B), BuildSealed{C, std::nullopt}, kV1, {}});
     row({"sealing good again (repair) changes nothing", steady(), BuildSealed{A, std::nullopt}, kV1, {}});
+    row({"a seal stages a newer previous good again", with_previous(steady(), B), BuildSealed{B, std::nullopt}, kV1,
+         {"Commit"}, [](auto& s) {
+             auto* st = std::get_if<Staged>(&s.activation);
+             return st && st->build == B.id && s.previous_good == B.id && s.builds.size() == 2;
+         }});
+    row({"sealing an older previous good again (repair) changes nothing", with_previous(steady(B), A),
+         BuildSealed{A, std::nullopt}, kV1, {}});
     row({"a downgrade stages a new older build", steady(C), UserDowngrade{D, backup_v1}, kV3, {"Commit"},
          [](auto& s) {
              auto* st = std::get_if<Staged>(&s.activation);
