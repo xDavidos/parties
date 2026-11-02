@@ -176,6 +176,11 @@ std::vector<Row> table() {
     row({"staged build that cannot open the data is dropped", staged(D, std::nullopt, C), StartRequested{}, kV3,
          {"Commit", "DeleteBuild 0.9.0.0", "Commit", "Spawn 1.2.0.0"},
          [](auto& s) { return steady_on(s, C) && !s.find(D.id); }});
+    row({"staged build is trusted at once when good cannot open the data", staged(C), StartRequested{}, kV3,
+         {"Commit", "Commit", "Spawn 1.2.0.0"}, [](auto& s) {
+             return steady_on(s, C) && s.previous_good == A.id && std::holds_alternative<Proven>(s.find(C.id)->verdict) &&
+                    running(s) && running(s)->build == C.id;
+         }});
     row({"staged downgrade on a chosen backup", staged(D, backup_v1, C), StartRequested{}, kV3,
          {"Commit", "RestoreSnapshot backup-v1 keep " + snap("pre-downgrade", D, 11), "Commit", "Spawn 0.9.0.0"},
          [](auto& s) {
