@@ -650,8 +650,9 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
             bool startup_failure = exit && run && !run->healthy && exit->kind != ExitKind::Clean &&
                                    exit->kind != ExitKind::DataUnavailable;
             const BuildRecord* fb = out.next.find(p->fallback);
-            const bool read_pre = !p->pre_snapshot || (fb && compatibility(fb->data_schema, p->pre_snapshot->data) !=
-                                                                 Compatibility::Incompatible);
+            const bool read_pre = !p->restore_on_rollback || !p->pre_snapshot ||
+                                  (fb && compatibility(fb->data_schema, p->pre_snapshot->data) !=
+                                             Compatibility::Incompatible);
             if (startup_failure || std::holds_alternative<UserRollback>(event))
                 w.check(starts_fallback(fx, p->fallback, read_pre), "a startup failure starts the fallback at once");
             const Context after{data_after, ctx.policy};

@@ -753,6 +753,49 @@ std::vector<Scenario> scenarios() {
                            fail(label, "recovery was shown after an automatic rollback");
                    }});
 
+    // An earlier B left data A cannot open, then A was installed over it and B staged again.
+    // B is trusted at once, since a rollback to A could only end in Recovery, so B's crash
+    // shows "failed to start" instead of a rollback onto data A cannot open.
+    out.push_back({"newer-data-then-crash", "migrate-then-crash", 3, 3, true,
+                   [](World& w) {
+                       run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "700"},
+                                        {"PARTIES_KILL_AT", "6"}});
+                       if (!w.state() || !staged(*w.state(), w.b)) fail(w.name, "B was not staged");
+                       std::error_code ec;
+                       for (const char* suffix : {"", "-wal", "-shm"})
+                           fs::remove(fs::path(w.db().wstring() + widen(suffix)), ec);
+                       fs::remove_all(w.backups(), ec);
+                       sqlite3* db = nullptr;
+                       auto u8 = w.db().u8string();
+                       sqlite3_open(std::string(u8.begin(), u8.end()).c_str(), &db);
+                       sqlite3_exec(db,
+                                    "CREATE TABLE identity (id INTEGER PRIMARY KEY CHECK (id = 1), public_key TEXT NOT NULL);"
+                                    "INSERT INTO identity VALUES (1, 'fake-identity-key');"
+                                    "CREATE TABLE markers (n INTEGER PRIMARY KEY, build TEXT NOT NULL, opened_at INTEGER NOT NULL);"
+                                    "INSERT INTO markers (build, opened_at) VALUES ('2.0.0.0', 3);"
+                                    "CREATE TABLE parties_schema (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL,"
+                                    " compat_floor INTEGER NOT NULL);"
+                                    "INSERT INTO parties_schema VALUES (1, 3, 3);",
+                                    nullptr, nullptr, nullptr);
+                       sqlite3_close(db);
+                   },
+                   [](const World& w) {
+                       auto s = w.state();
+                       return s && settled(*s) && std::holds_alternative<Steady>(s->activation);
+                   },
+                   [](const World& w, const std::string& label) {
+                       auto s = w.state();
+                       if (s->good != w.b.entry.id()) fail(label, "B is not good");
+                       if (s->previous_good != w.a.entry.id()) fail(label, "A is not kept as previous_good");
+                       if (record(*s, w.b)->quarantined()) fail(label, "B was rolled back");
+                       if (Db(w.db()).scalar("SELECT compat_floor FROM parties_schema") != 3)
+                           fail(label, "the live data was replaced");
+                       if (label.find("kill@") == std::string::npos && markers(w.db(), "2.0.0.0") < 2)
+                           fail(label, "B did not run on the live data");
+                       if (w.full_log().find("recovery shown: data_incompatible") != std::string::npos)
+                           fail(label, "Recovery said the data is from a newer version");
+                   }});
+
     // B (schema 3, floor 3) is proven, so A cannot read the live data. Recovery's "Start the
     // previous version" starts A on the newest backup A can open, keeping B's database.
     out.push_back({"recovery-start-previous", "", 3, 3, true,
