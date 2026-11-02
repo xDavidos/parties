@@ -246,11 +246,32 @@ Sent immediately after the user joins a channel. The key is generated on first j
 
 #### KEEPALIVE_PING (0x0004) -- C->S
 
-No payload. Client sends periodically to prevent idle timeout.
+Sent every 2 s (every 500 ms while the diagnostics overlay is open); the
+client times the PONG for the ping shown in the UI. Payload, optional:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| flags | u8 | Bit 0 (`KEEPALIVE_WANT_LINK_REPORT`): answer with the link report |
+
+Older clients send no payload.
 
 #### KEEPALIVE_PONG (0x0107) -- S->C
 
-No payload. Server echoes back immediately.
+Sent immediately. No payload, unless the ping asked for the link report: the
+server's view of its connection to this client, for the diagnostics overlay.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| version | u8 | `KEEPALIVE_LINK_REPORT_VERSION` (1) |
+| srtt_us | u32 | Smoothed RTT the server measures |
+| loss_permille | u16 | Packet loss server -> client over the last ~1 s sample, 1/1000 |
+| video_outstanding | u32 | Video bytes queued or in flight to this client |
+| video_threshold | u32 | Backlog budget those bytes are compared with (see the per-viewer backlog gate) |
+| video_dropped | u32 | Cumulative frames the backlog gate dropped for this client |
+| video_aborted | u32 | Cumulative queued frame streams aborted for this client |
+
+Older servers ignore the flag and answer with an empty PONG. No protocol
+version change: both directions stay compatible.
 
 ### 5.4 Screen Sharing Signaling
 
@@ -488,8 +509,8 @@ Both paths carry the same 14-byte frame header.
 | Field | Type | Description |
 |-------|------|-------------|
 | frame_seq | u32 | Sequential frame counter; stamped by the sharer after encode, reset only at share start and on disconnect. Comparisons are wrap-safe |
-| timestamp | u32 | Presentation timestamp (currently mirrors `frame_seq`; nothing consumes it) |
-| flags | u8 | Bitfield: bit 0 = keyframe |
+| timestamp | u32 | With `VIDEO_FLAG_CAPTURE_TIME`: the sender's capture time in ms (any monotonic clock, wrapping), used by the viewer's playout clock. Otherwise opaque (older senders put `frame_seq` there) |
+| flags | u8 | Bitfield: bit 0 = keyframe, bit 1 = `VIDEO_FLAG_CAPTURE_TIME` |
 | width | u16 | Frame width in pixels |
 | height | u16 | Frame height in pixels |
 | codec | u8 | Video codec ID |
@@ -552,7 +573,7 @@ How the reorder buffer resumes after a gap decides whether a PLI is sent:
 | Gap resumed at | Reported as loss | PLI |
 |----------------|------------------|-----|
 | A keyframe | No | No -- this is exactly how the server resumes a throttled viewer; the decoder simply re-anchors on the keyframe |
-| A delta frame (150 ms hold timeout, an aborted stream, or a buffer overflow) | Yes, once | Yes, through the client's PLI funnel |
+| A delta frame (hold timeout of `clamp(3 x RTT + 100 ms, 150 ms, 1.5 s)`, an aborted stream, or a buffer overflow) | Yes, once | Yes, paced by the viewer's `VideoReceiveRouter`, and not while a keyframe stream is already arriving |
 
 The server forwards to each viewer on the path that viewer supports: a 1.2+
 viewer gets a per-frame stream, a pre-1.2 viewer gets the frame on stream 1. A
@@ -648,8 +669,8 @@ encoded frame to be a keyframe.
 | Default bitrate | 2 Mbps |
 | Minimum bitrate (UI floor) | 200 kbps |
 | Adaptation floor | 800 kbps |
-| Max keyframe interval | 5 seconds |
-| PLI cooldown | 500 ms minimum between sends per target |
+| Max keyframe interval | 120 seconds (a safety net; keyframes are sent on request, see below) |
+| PLI pacing | Viewer: 500 ms, then backing off to 4 s while a stream stays broken; sharer: one forced keyframe per 1 s |
 
 ### Video control (PLI)
 
@@ -665,8 +686,8 @@ different transports:
   (the trailing stream id since 1.4 tells the sharer which encoder; older
   sharers read the first 6 bytes), so a keyframe request is never
   queued behind video. Delivery is best effort: a lost PLI is covered by the
-  viewer's 500 ms PLI retry while a keyframe is pending and by the sharer's 5 s
-  maximum keyframe interval.
+  viewer's paced retry while a keyframe is pending and by the server, which
+  keeps asking while a gated viewer waits for one.
 
 Both forms are accepted on receive. The body is:
 
@@ -689,9 +710,9 @@ PLI rate limits:
 
 | Where | Rule |
 |-------|------|
-| Client (sender of PLI) | One funnel with a 500 ms cooldown per target; while a watched stream is still waiting for a keyframe the PLI is retried every 500 ms. Escalation cap: after two consecutive stale-backlog flushes without a keyframe the viewer stops sending PLIs for that stream (logs "decoder too slow") and waits for the sharer's periodic keyframe. The self-preview stream never sends PLIs |
-| Client (receiver of PLI, sharer) | Incoming PLIs force a keyframe through a 500 ms cooldown |
-| Server | Per-session token bucket of 4 PLIs/s with a burst of 4, checked before any work; PLIs from a viewer that is currently over its backlog threshold are not forwarded (the viewer would drop the keyframe anyway); forwarded PLIs are coalesced per sharer |
+| Client (sender of PLI) | `VideoReceiveRouter`: a new gap is requested at once, then 500 ms, 1 s, 2 s, 4 s, 4 s ... while the stream stays broken; a delivered keyframe resets the backoff. No request while a keyframe stream is already arriving (its header was read). Opening a watch waits 500 ms (the server requests a keyframe on subscribe). Escalation cap: after two consecutive stale-backlog flushes without a keyframe the viewer asks for that stream at most every 5 s (logs "decoder too slow") until it has decoded cleanly for 4 s. The self-preview stream sends no PLIs: it asks the local encoder directly (same 1 s cooldown), once per resync |
+| Client (receiver of PLI, sharer) | Incoming PLIs force a keyframe through a 1 s cooldown (`VIDEO_KEYFRAME_REQUEST_COOLDOWN_MS`) |
+| Server | Per-session token bucket of 4 PLIs/s with a burst of 4, checked before any work. A viewer's own PLIs are paced by its backlog gate (1 s backing off to 4 s while it keeps dropping); PLIs from a viewer that is over its backlog threshold are not forwarded. Toward the sharer at most one keyframe request per 1 s per stream: a request inside the cooldown is deferred to its end, not dropped, and one is not sent while the sharer's keyframe for that stream is already arriving |
 
 ## 8. Screen Sharing Protocol
 
