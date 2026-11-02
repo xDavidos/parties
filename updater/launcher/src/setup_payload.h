@@ -24,7 +24,6 @@
 
 namespace parties::update::launcher {
 
-// What a payload directory holds besides Parties.exe and the build's files.
 inline constexpr std::string_view kPayloadManifest = "manifest.json";
 
 // Proven before setup writes anything: a pinned key signed the manifest, the
@@ -37,16 +36,12 @@ struct Payload {
     std::vector<std::span<const uint8_t>> files;  // in entry.files order
 };
 
-// nullopt when this executable carries no payload, which makes it a plain
-// launcher.
 std::optional<std::expected<Payload, std::string>> embedded_payload(Keyring keys);
 
-// Writes `out`: a copy of this executable carrying `dir` as its payload. The
-// bundled build is the manifest entry whose files `dir` holds. Refuses a
+// The bundled build is the manifest entry whose files `dir` holds. Refuses a
 // payload that embedded_payload would reject.
 bool pack_payload(const fs::path& dir, const fs::path& out, Keyring keys, std::string& error);
 
-// Serves the payload's files to BuildStore::seal.
 std::unique_ptr<UpdateSource> make_payload_source(const Payload& payload);
 
 } // namespace parties::update::launcher

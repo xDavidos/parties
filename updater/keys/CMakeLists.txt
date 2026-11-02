@@ -1,7 +1,3 @@
-# The production update-signing public keys, pinned at configure time into
-# parties/update/release_keys.h. Each production/*.pub file holds one Ed25519
-# public key as 64 lowercase hex characters; its key id is the first 16 of
-# them. Private keys never enter the repository (docs/releasing.md).
 if(NOT TARGET parties_update_core)
     return()
 endif()

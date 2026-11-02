@@ -1,6 +1,3 @@
-// parties_manifest_tool: builds, signs and checks the signed channel manifests
-// the release workflows publish. docs/releasing.md documents every command.
-
 #include "release_ops.h"
 
 #include <parties/crypto.h>
@@ -282,8 +279,6 @@ struct HttpHandle {
     }
 };
 
-// Downloads at most `limit` bytes; one more means the asset is larger than the
-// manifest says, which is enough to reject it.
 Result<std::string> https_get(const std::string& url, uint64_t limit) {
     std::wstring wide = widen(url);
     URL_COMPONENTS parts{sizeof(parts)};

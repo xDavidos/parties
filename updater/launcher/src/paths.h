@@ -6,7 +6,6 @@ namespace parties::update::launcher {
 
 namespace fs = std::filesystem;
 
-// %LOCALAPPDATA%\Programs\Parties, or --install-root.
 struct InstallPaths {
     fs::path root;
 
@@ -19,7 +18,6 @@ struct InstallPaths {
     fs::path session() const { return state() / "launcher-session.json"; }
 };
 
-// %LOCALAPPDATA%\Parties, or --data-root.
 struct DataPaths {
     fs::path root;
 

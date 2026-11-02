@@ -56,7 +56,6 @@
     background-color: var(--color-accent-hover);
 }
 
-/* Progress is information, not a call to action. */
 .titlebar-update.downloading,
 .titlebar-update.downloading:hover {
     background-color: var(--color-surface-raised);
@@ -68,8 +67,6 @@
 .update-pill-text {
     display: inline;
 }
-
-/* ── Rollback notice ────────────────────────────────── */
 
 .update-notice {
     display: flex;

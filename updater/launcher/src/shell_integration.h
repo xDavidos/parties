@@ -1,10 +1,5 @@
 #pragma once
 
-// What an install leaves outside its install root: the "Apps > Installed
-// apps" entry under HKCU and the Start menu shortcuts. Setup creates both and
-// the launcher keeps the entry pointing at the current good build. Testing
-// builds redirect every write (testing.h).
-
 #include "paths.h"
 
 #include <parties/update/version.h>
@@ -21,7 +16,6 @@ struct Shortcut {
     std::wstring description;
 };
 
-// "Parties" and "Parties Recovery", both starting the stub.
 std::vector<Shortcut> shortcuts(const InstallPaths& install);
 
 // The folders a portable copy may run from or keep its database in: the
@@ -36,12 +30,10 @@ std::vector<fs::path> portable_shortcut_dirs();
 bool write_shortcuts(const InstallPaths& install, std::string& error);
 void remove_shortcuts(const InstallPaths& install);
 
-// "<root>\builds\<good>\PartiesLauncher.exe" --uninstall "--install-root=<root>".
 // Good's directory exists for as long as it is good, and the launcher
 // rewrites the string whenever good changes, so it survives updates and GC.
 std::wstring uninstall_command(const InstallPaths& install, const BuildId& good);
 
-// Writes the whole entry for `good`.
 bool write_uninstall_entry(const InstallPaths& install, const BuildId& good, std::string& error);
 
 // Rewrites the entry for `good`, but only one that setup created for this

@@ -1,9 +1,7 @@
 #pragma once
 
-// The edits the release pipeline makes to channel payloads. Pure: the tool's
-// main reads files, the clock and the environment, and calls these. Every edit
-// starts from a payload that already passed verify_manifest (or from nothing)
-// and returns the next payload to sign.
+// Every edit starts from a payload that already passed verify_manifest (or from
+// nothing) and returns the next payload to sign.
 
 #include <parties/update/build_info.h>
 #include <parties/update/manifest.h>
@@ -22,18 +20,16 @@ namespace parties::update::release {
 template <class T>
 using Result = std::expected<T, std::string>;
 
-// Validates what --write-build-info wrote.
 Result<BuildInfo> parse_build_info(std::string_view json);
 
 struct StagedFile {
-    std::string name;        // file name inside the build directory
-    std::string asset_name;  // release asset the url points at
+    std::string name;
+    std::string asset_name;
     uint64_t size = 0;
     Sha256 sha256;
 };
 
-// url_base is an https prefix ending in '/'; each file's url is
-// url_base + asset_name. The result passes the same checks verify applies.
+// url_base is an https prefix ending in '/'; each file's url is url_base + asset_name.
 Result<BuildEntry> make_entry(const BuildInfo& info, std::span<const StagedFile> files, std::string_view url_base);
 
 // The header every edit rewrites. serial must exceed the base's serial, so a
@@ -55,7 +51,6 @@ std::vector<BuildEntry> retained(std::vector<BuildEntry> builds, size_t keep);
 Result<ManifestPayload> add_build(const ManifestPayload* base, Channel channel, const BuildEntry& entry,
                                   const Issue& issue, size_t keep);
 
-// Copies beta's entry for `version` into stable unchanged.
 Result<ManifestPayload> promote(const ManifestPayload& beta, const ManifestPayload* stable, const Version& version,
                                 const Issue& issue, size_t keep);
 
@@ -65,7 +60,6 @@ Result<ManifestPayload> promote(const ManifestPayload& beta, const ManifestPaylo
 Result<ManifestPayload> revoke(const ManifestPayload* base, Channel channel, const Version& version,
                                const Issue& issue);
 
-// Same builds and revocations, new serial and expiry.
 Result<ManifestPayload> reissue(const ManifestPayload& base, const Issue& issue);
 
 } // namespace parties::update::release

@@ -1,8 +1,5 @@
-# Fails when the boot stub (Parties.exe) outgrows its source budget, links or
-# imports anything beyond its allowlist, or keeps testing hooks in a build
-# configured without PARTIES_UPDATE_TESTING. Setup installs the stub once and
+# Setup installs the stub once and
 # automatic updates never replace it, so these limits keep it auditable.
-# Usage: pwsh tools/update/check_boot_stub.ps1 -BuildDir build
 param([Parameter(Mandatory)][string]$BuildDir)
 $ErrorActionPreference = 'Stop'
 

@@ -34,8 +34,6 @@ public:
 
     fs::path backup_path(const SnapshotId& id) const;
 
-    // nullopt: there is no database yet. An error means a database exists but
-    // cannot be read.
     std::expected<std::optional<DataInfo>, std::string> inspect() const;
 
     // A consistent copy of the live database at backups\<id>.db. Done when an
@@ -49,13 +47,11 @@ public:
     std::expected<void, RestoreError> restore(const std::optional<SnapshotId>& from,
                                               const SnapshotId& preserve_live_as) const;
 
-    // The backup exists and passes an integrity check.
     bool intact(const SnapshotId& id) const;
 
     // Intact backups, newest first.
     std::vector<Backup> list() const;
 
-    // Deletes the automatic snapshots retention allows, given the committed state.
     void prune(const SupervisorState& committed) const;
 
 private:

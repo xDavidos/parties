@@ -1,9 +1,3 @@
-// Drives the real parties_manifest_tool.exe through a release's life in a
-// temporary directory: keygen, entry, merge into an empty beta, sign, verify,
-// promote, revoke, resign, and the refusals that keep channels monotonic and
-// signed by pinned keys.
-// Usage: update_manifest_tool_test <path to parties_manifest_tool.exe>
-
 #include <parties/crypto.h>
 #include <parties/update/build_info.h>
 #include <parties/update/manifest.h>

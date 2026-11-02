@@ -29,8 +29,6 @@ struct VersionRead {
     std::string     error;
 };
 
-// A database without parties_schema is legacy when it has any table, and
-// brand new (version 0) when it has none.
 VersionRead read_version(sqlite3* db) {
     VersionRead out;
     sqlite3_stmt* stmt = nullptr;

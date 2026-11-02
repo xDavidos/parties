@@ -55,9 +55,7 @@ public:
     App();
     ~App();
 
-    // Must report Ready before init() runs.
     Settings::OpenResult open_data(const SettingsPaths& paths) { return core_.settings_.open(paths); }
-    // Before init(): the launcher link, or nullptr when the app is unmanaged.
     void attach_supervisor(std::unique_ptr<SupervisorLink> link);
     bool init(HWND hwnd);
     void shutdown();
@@ -413,7 +411,7 @@ private:
 
     void poll_supervisor();
     std::unique_ptr<SupervisorLink> supervisor_;
-    std::atomic<bool> first_frame_presented_{false};  // set by the render thread
+    std::atomic<bool> first_frame_presented_{false};
     bool exit_posted_ = false;
 };
 

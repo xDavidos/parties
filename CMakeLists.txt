@@ -66,7 +66,6 @@ if(BUILD_IN_RETAIL)
     set(ENABLE_TRACY OFF CACHE BOOL "" FORCE)
 endif()
 option(ENABLE_SENTRY "Enable Sentry crash reporting" OFF)
-# Testing hooks for the boot stub and the update launcher. Never in retail.
 option(PARTIES_UPDATE_TESTING "Compile update testing hooks" OFF)
 if(BUILD_IN_RETAIL AND PARTIES_UPDATE_TESTING)
     message(FATAL_ERROR "PARTIES_UPDATE_TESTING must be OFF in retail builds")

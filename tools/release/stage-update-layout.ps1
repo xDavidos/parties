@@ -1,9 +1,3 @@
-# Stages a signed retail build's update layout for its tag's release: the
-# versioned launcher, app and boot stub assets, the build's build-info.json,
-# and the manifest entry that publish-beta.yml signs into the Beta channel.
-# Writes staged=true|false and version=A.B.C.D to $GITHUB_OUTPUT when set.
-# Usage: pwsh tools/release/stage-update-layout.ps1 -Tag v1.2.3.4 -Repository owner/name
-#        [-BuildDir build-retail] [-OutDir dist-update] [-Launcher <exe>] [-Stub <exe>]
 param(
     [Parameter(Mandatory)][string]$Tag,
     [Parameter(Mandatory)][string]$Repository,

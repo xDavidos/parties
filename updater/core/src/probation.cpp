@@ -84,7 +84,6 @@ void begin_restore(Tx& tx, const std::optional<Snapshot>& from, SnapshotId prese
     tx.commit();
 }
 
-// Returns the build to delete. A retried previous_good keeps its record.
 std::optional<BuildId> unstage(Tx& tx) {
     auto* staged = std::get_if<Staged>(&tx.s.activation);
     if (!staged) return std::nullopt;
@@ -154,7 +153,6 @@ void confirm(Tx& tx) {
     for (const BuildId& id : dropped) tx.emit(DeleteBuild{id});
 }
 
-// A candidate run after health ended badly, or a run's outcome was never seen.
 void strike(Tx& tx, FailureReason reason) {
     Probation& p = std::get<Probation>(tx.s.activation);
     if (p.failed_runs < 255) ++p.failed_runs;
@@ -270,8 +268,6 @@ bool running_candidate(SupervisorState& s) {
     return p && r && r->build == p->candidate;
 }
 
-// --- Event handlers ---
-
 void handle(Tx& tx, const StartRequested&) {
     if (running(tx.s)) return;
     std::optional<DataInfo> data = tx.ctx.live_db;
@@ -332,7 +328,6 @@ void handle(Tx& tx, const ConfirmTimerElapsed& e) {
     tx.commit();
 }
 
-// Stages `rec` in place of whatever was staged, adding its record if it is new.
 void stage(Tx& tx, const BuildRecord& rec, const std::optional<Snapshot>& restore_first) {
     std::optional<BuildId> replaced = unstage(tx);
     if (!tx.s.find(rec.id)) {

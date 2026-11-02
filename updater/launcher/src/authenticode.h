@@ -1,8 +1,5 @@
 #pragma once
 
-// Authenticode publisher pinning, defense in depth behind the signed manifest:
-// a downloaded executable must also be signed by the expected publisher.
-
 #include "paths.h"
 
 #include <optional>

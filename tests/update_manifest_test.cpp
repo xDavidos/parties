@@ -1,5 +1,3 @@
-// Offline tests for signed channel manifests and the trust ratchet.
-
 #include <parties/update/manifest.h>
 
 #include <parties/crypto.h>
@@ -111,7 +109,6 @@ bool test_single_byte_flips_fail() {
     for (size_t i = 0; i < text.size(); ++i) {
         std::string tampered = text;
         tampered[i] = char(tampered[i] ^ 0x01);
-        // The tampered payload's envelope, carrying the original payload's signature.
         auto tampered_env = sign(tampered, {kA});
         std::string spliced = tampered_env.substr(0, tampered_env.find("\"signatures\"")) + original_signatures;
         if (verify(spliced, {pin(kA)})) return fail("payload byte flip at " + std::to_string(i) + " verified");
@@ -132,7 +129,6 @@ bool test_keys_and_rotation() {
         return false;
     if (!verify(sign(text, {kB}), {pin(kA), pin(kB)})) return fail("second keyring key does not verify");
     if (!verify(sign(text, {kA, kB}), {pin(kA)})) return fail("an extra signature by a future key broke verification");
-    // A pinned key id with someone else's signature is a forgery, not an unknown key.
     SigningKey impostor = kStranger;
     impostor.key_id = kA.key_id;
     if (!expect_error(verify(sign(text, {impostor}), {pin(kA)}), Kind::BadSignature, "forged key id"))
@@ -294,7 +290,6 @@ bool test_trust_ratchet() {
     if (!std::holds_alternative<Accepted>(accept(a->next, m, p.expires_at)))
         return fail("manifest rejected at exactly expires_at");
 
-    // Clock set back before the expiry, but we already saw a manifest issued later.
     TrustState seen_later = a->next;
     seen_later.last_issued_at = p.expires_at + days{1};
     if (!is_rejected(accept(seen_later, m, kIssued), TrustRejection::Stale))

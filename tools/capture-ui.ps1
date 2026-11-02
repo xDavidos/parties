@@ -33,7 +33,6 @@ $lobbyScenarios = @(
 if ($Profile -eq "iphone-17-pro") {
     # Sending a screen or application is unavailable on iOS, so those two
     # desktop-only picker fixtures intentionally do not belong in this profile.
-    # The update launcher exists only on Windows.
     $lobbyScenarios = $lobbyScenarios | Where-Object {
         $_ -ne "share" -and $_ -ne "audio-share" -and
         -not $_.StartsWith("update-") -and -not $_.StartsWith("settings-updates")

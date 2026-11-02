@@ -27,7 +27,7 @@ struct Url {
     bool https = false;
     std::wstring host;
     INTERNET_PORT port = 0;
-    std::wstring path;  // with the query
+    std::wstring path;
 };
 
 std::optional<Url> crack(const std::wstring& text) {
@@ -60,10 +60,6 @@ private:
     HINTERNET h_;
 };
 
-// Every request is a GET of a public, signed-elsewhere asset. TLS 1.2 or newer
-// only, certificate errors are never ignored, and WinHTTP follows redirects
-// only to https. A testing source with a loopback http base sends every URL to
-// that base instead, keeping each URL's path.
 class HttpsSource final : public UpdateSource {
 public:
     HttpsSource(std::string base, bool loopback) : base_(std::move(base)), loopback_(loopback) {
@@ -152,8 +148,6 @@ private:
         return {};
     }
 
-    // Streams the body of a 200 response into `sink`, failing as soon as it
-    // grows past `cap` bytes.
     std::expected<void, SourceError> get(const std::string& url_text, uint64_t cap, const Sink& sink,
                                          const std::atomic<bool>& cancel) {
         if (!session_) return std::unexpected(SourceError{"no HTTP session"});

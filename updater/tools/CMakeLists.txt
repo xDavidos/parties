@@ -1,5 +1,3 @@
-# The release pipeline's manifest tool. Windows-only like the rest of the
-# update core it links.
 if(NOT TARGET parties_update_core)
     return()
 endif()

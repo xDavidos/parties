@@ -21,7 +21,6 @@ inline bool Check(bool condition, const char* message) {
     return condition;
 }
 
-// A fresh directory per test case, removed when the case ends.
 class TempDir {
 public:
     TempDir() {
@@ -47,8 +46,6 @@ inline std::string utf8(const fs::path& p) {
     return {reinterpret_cast<const char*>(u8.data()), u8.size()};
 }
 
-// Raw SQLite access, standing in for builds that predate versioning and for
-// the launcher, which reads parties_schema directly.
 class RawDb {
 public:
     explicit RawDb(const fs::path& path) { sqlite3_open(utf8(path).c_str(), &db_); }
@@ -63,7 +60,6 @@ public:
         sqlite3_free(err);
         return ok;
     }
-    // First column of the first row, or -1.
     long long scalar(const std::string& sql) {
         sqlite3_stmt* stmt = nullptr;
         long long value = -1;
@@ -92,8 +88,6 @@ inline std::vector<fs::path> files_in(const fs::path& dir) {
     return out;
 }
 
-// The schema every build before data versioning created, optionally from
-// before saved_servers.password existed.
 inline std::string legacy_v1_schema(bool with_password) {
     return std::string(R"SQL(
         CREATE TABLE IF NOT EXISTS identity (
@@ -133,7 +127,6 @@ inline std::string legacy_v1_schema(bool with_password) {
     )SQL";
 }
 
-// SQL literal for a 32-byte blob whose bytes all equal `byte`.
 inline std::string key_blob(unsigned char byte) {
     static const char* hex = "0123456789ABCDEF";
     std::string out = "X'";

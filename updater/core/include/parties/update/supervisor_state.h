@@ -1,7 +1,6 @@
 #pragma once
 
-// Domain types for the build state machine. Persisted only by the launcher's
-// state store (state\supervisor.json) through state_codec.h.
+// Persisted only by the launcher's state store (state\supervisor.json) through state_codec.h.
 
 #include <parties/update/boot.h>
 #include <parties/update/data_compat.h>
@@ -64,11 +63,9 @@ struct SnapshotId {
 };
 struct Snapshot {
     SnapshotId id;
-    DataInfo data;  // what the copy says about itself
+    DataInfo data;
     friend bool operator==(const Snapshot&, const Snapshot&) = default;
 };
-
-// --- What the build selection is doing. Exactly one holds. ---
 
 // Running `good`. Free to stage an update.
 struct Steady { friend bool operator==(const Steady&, const Steady&) = default; };
@@ -93,8 +90,6 @@ struct Probation {
 };
 
 using Activation = std::variant<Steady, Staged, Probation>;
-
-// --- What the launcher is doing with a process or the data. Exactly one holds. ---
 
 struct Idle { friend bool operator==(const Idle&, const Idle&) = default; };
 

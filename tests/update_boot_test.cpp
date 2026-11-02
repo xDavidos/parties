@@ -1,5 +1,3 @@
-// Offline tests for the boot stub's launcher choice and its state files.
-
 #include <parties/update/boot.h>
 
 #include <iostream>
@@ -120,8 +118,6 @@ bool test_session_folding() {
         if (!h || h->failed_boots != 0) ok &= fail("a confirmed launcher is not blamed for an unclean session");
     }
     {
-        // Folding happens once: the next choose records a new attempt, so the
-        // same report no longer matches it.
         auto d = choose(contract(), pending(kNew, 5), SessionReport{5, kNew.sha256, true});
         auto again = choose(contract(), d.next_record, SessionReport{5, kNew.sha256, true});
         auto* h = find(again.next_record, kNew);
@@ -132,7 +128,6 @@ bool test_session_folding() {
 
 bool test_new_launcher_lifecycle() {
     bool ok = true;
-    // A broken launcher: two stub runs where it never signals boot_ok.
     BootRecord rec;
     auto d1 = choose(contract(), rec, std::nullopt);
     ok &= expect_runs(d1, kNew, "first boot tries the new launcher");
@@ -158,7 +153,6 @@ bool test_pruning() {
     return true;
 }
 
-// Every combination of small inputs; the properties hold for all of them.
 bool test_exhaustive_properties() {
     std::vector<std::optional<BootContract>> contracts = {std::nullopt, contract(false), contract(true)};
     BootContract same = contract(true);

@@ -128,7 +128,6 @@ std::optional<std::string> scripted_recovery() { return std::nullopt; }
 std::optional<std::string> identity_choice() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> exit_after_healthy() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> job_cap() { return std::nullopt; }
-// Empty until a production key is committed, so no manifest verifies.
 Keyring pinned_keys() { return production_keyring(); }
 std::optional<std::wstring> uninstall_key() { return std::nullopt; }
 std::optional<std::filesystem::path> start_menu() { return std::nullopt; }

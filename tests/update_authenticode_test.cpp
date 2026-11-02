@@ -1,6 +1,3 @@
-// Authenticode publisher pinning against real files: this unsigned test
-// executable, and an embedded-signed Microsoft binary when one is installed.
-
 #include "authenticode.h"
 
 #include <cstdlib>

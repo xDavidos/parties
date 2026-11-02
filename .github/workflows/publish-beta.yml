@@ -1,10 +1,5 @@
 name: Publish to Beta
 
-# Signs one release's build entry into beta.manifest.json on the channels
-# release. release.yml calls this for every vA.B.C.D tag. Run it by hand to
-# retry a tag whose Release run staged the update layout but did not publish
-# it; the run's artifacts must still exist (90 days).
-
 on:
   workflow_call:
     inputs:
@@ -81,7 +76,6 @@ jobs:
           bash tools/release/channels.sh publish-beta "$VERSION" update/entry.json
           if [ -f "$SIGNED_MANIFEST_OUT" ]; then echo "signed=true" >> "$GITHUB_OUTPUT"; else echo "signed=false" >> "$GITHUB_OUTPUT"; fi
 
-      # release.yml packs this manifest into PartiesSetup.exe.
       - name: Upload the signed manifest for setup
         if: steps.publish.outputs.signed == 'true'
         uses: actions/upload-artifact@v7

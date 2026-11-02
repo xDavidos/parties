@@ -1,6 +1,3 @@
-// Offline tests for the supervisor state machine: an explicit transition table,
-// then a seeded random walk that checks invariants over every reachable state.
-
 #include <parties/update/probation.h>
 #include <parties/update/state_codec.h>
 
@@ -34,9 +31,6 @@ BuildRecord rec(const char* version, uint32_t schema, uint32_t floor, char fill)
     return r;
 }
 
-// A: installed. B: additive migration (A still reads B's data). C: breaking
-// change (raises the floor, A and B can no longer read it). D: older than A.
-// E: newer than C, same schema.
 const BuildRecord A = rec("1.0.0.0", 1, 1, 'a');
 const BuildRecord B = rec("1.1.0.0", 2, 1, 'b');
 const BuildRecord C = rec("1.2.0.0", 3, 3, 'c');
@@ -471,10 +465,7 @@ bool test_table() {
     return ok;
 }
 
-// The world is what the shell would observe: the database (schema info plus a
-// content id, so two copies with equal schema are still told apart), the
-// backups directory, the app process, and the committed state on disk.
-
+// `content` tells apart two copies of the data with equal schema.
 struct Data {
     DataInfo info;
     uint64_t content = 0;
@@ -636,8 +627,6 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
         }
     }
 
-    // Leaving probation either confirms or returns to the fallback, and the
-    // next start runs the fallback or explains why it cannot.
     if (auto* p = std::get_if<Probation>(&before.activation); p && !std::get_if<Probation>(&out.next.activation)) {
         ++w.stats.probation_exits;
         if (std::ranges::any_of(fx, [](const Effect& e) { return std::holds_alternative<RestoreSnapshot>(e); }))
@@ -711,7 +700,6 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
                 converged = again == done;
             }
             w.check(converged, "kill at effect " + std::to_string(i) + " of " + describe(fx) + " did not converge");
-            // A restore that was committed but cut off is finished by Resumed.
             if (c && std::holds_alternative<Restoring>(c->state.operation))
                 w.check(!recovered.effects.empty() && std::holds_alternative<RestoreSnapshot>(recovered.effects[0]),
                         "Resumed finishes a committed restore first");
@@ -880,8 +868,6 @@ Event next_event(Walk& w, const World& world, const SupervisorState& s) {
     return other_event(w, world, s);
 }
 
-// Feeds one event, checks it, and executes its effects, possibly killing the
-// launcher partway through.
 void feed(Walk& w, World& world, SupervisorState& state, const Event& event, bool allow_kill) {
     ++w.stats.events;
     w.trace.push_back(event_name(event));

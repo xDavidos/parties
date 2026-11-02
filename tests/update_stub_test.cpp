@@ -1,7 +1,3 @@
-// Runs the real Parties.exe boot stub against temporary install roots whose
-// builds hold update_fake_launcher.exe copies, then asserts on processes and files.
-// Usage: update_stub_test <Parties.exe> <update_fake_launcher.exe>
-
 #include <parties/update/boot.h>
 
 #include <windows.h>
@@ -174,7 +170,6 @@ public:
         return out;
     }
 
-    // Starts the stub without waiting. Tests run it from the install root unless `exe` is given.
     HANDLE launch(std::vector<std::wstring> args, const fs::path& exe = {}) {
         if (std::ranges::none_of(args, [](auto& a) { return a.starts_with(L"--test-recovery="); }))
             args.push_back(L"--test-recovery=close");
@@ -192,8 +187,6 @@ public:
         return pi.hProcess;
     }
 
-    // Runs the stub to exit, lets `while_live` look at the fakes it left running,
-    // then settles the fakes and checks the stub wrote nothing but its record.
     int start(std::vector<std::wstring> args, const std::function<void()>& while_live = {},
               const fs::path& exe = {}) {
         Snapshot before = snapshot();
@@ -217,7 +210,6 @@ public:
         return int(code);
     }
 
-    // Clean fakes finish on their own; every other fake still alive is killed.
     void settle() {
         for (const auto& [dir, behavior] : behaviors_) {
             Build b{"", dir};

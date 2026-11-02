@@ -1,6 +1,3 @@
-// The launcher <-> app link codec: both directions round-trip, unknown types
-// and fields are ignored, and version negotiation follows contracts.md.
-
 #include <parties/update/link.h>
 
 #include <iostream>

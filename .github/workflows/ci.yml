@@ -82,11 +82,9 @@ jobs:
       - name: Run data safety tests
         run: ctest --test-dir ${{ matrix.preset == 'release' && 'build-release' || 'build' }} -R "^parties_data_" --output-on-failure --no-tests=error
 
-      # Tests labelled gpu are left out because the real client needs a GPU.
       - name: Run update core tests
         run: ctest --test-dir ${{ matrix.preset == 'release' && 'build-release' || 'build' }} -R "^update_" -E "^update_e2e$" -LE gpu --output-on-failure --no-tests=error
 
-      # About six and a half minutes: most scenarios replayed with a kill at each effect.
       - name: Run update launcher e2e
         if: matrix.preset == 'default'
         run: ctest --test-dir build -R "^update_e2e$" --output-on-failure --no-tests=error

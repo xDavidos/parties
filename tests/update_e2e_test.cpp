@@ -52,7 +52,6 @@ namespace {
 // Matches the harness key pinned in testing launchers (updater/launcher/src/testing.cpp).
 constexpr std::string_view kTestSeed = "f769e71268cc70210831656bcc920641326a5bd43fe4a015881f3515a8f908a8";
 constexpr DWORD kKilled = 0xDEAD;
-// One policy second is 10 ms: health deadline 2 s, confirm 6 s, clean exit after 0.3 s.
 constexpr const char* kTiming = "10,200,600,30";
 
 fs::path g_launcher, g_fake_app, g_manifest_tool;
@@ -75,8 +74,6 @@ SigningKey test_key() {
     return k;
 }
 
-// Serves a folder over HTTP/1.1 on 127.0.0.1, one thread per connection, and
-// can corrupt chosen paths or stall one halfway until released.
 class FeedServer {
 public:
     explicit FeedServer(fs::path root) : root_(std::move(root)) {
@@ -218,7 +215,7 @@ private:
 
 struct Release {
     BuildEntry entry;
-    fs::path dir;  // the files as published
+    fs::path dir;
 };
 
 FileEntry file_entry(const fs::path& file) {
@@ -247,7 +244,6 @@ Release make_release(const fs::path& root, const fs::path& app_exe, const std::s
     return r;
 }
 
-// What setup does: copy a release into builds\ with its build.json.
 fs::path install(const fs::path& install_root, const Release& r) {
     fs::path dir = install_root / "builds" / r.entry.id().dir_name();
     fs::create_directories(dir);
@@ -323,8 +319,8 @@ struct World {
     fs::path install_root, data_root, source, counter;
     Release a, b;
     bool with_b = true;
-    size_t log_mark = 0;  // launcher.log size before the latest run
-    std::unique_ptr<FeedServer> server;  // set: the launcher reads the feed over HTTP
+    size_t log_mark = 0;
+    std::unique_ptr<FeedServer> server;
 
     World(std::string n, const std::string& b_version, uint32_t b_schema, uint32_t b_floor, bool publish_b)
         : name(std::move(n)), root(name) {
@@ -469,8 +465,6 @@ RunResult run_launcher(World& w, const std::map<std::string, std::string>& extra
     return result;
 }
 
-// What Windows sends at logoff or shutdown, delivered to the launcher running
-// from w's install root.
 bool end_session(const World& w) {
     struct Search {
         std::wstring root;
@@ -500,9 +494,6 @@ bool end_session(const World& w) {
 
 std::string stalled_app_file(const World& w) { return "files/" + w.b.entry.file(kAppFile)->sha256.to_hex(); }
 
-// One launcher run whose app exits right after healthy while B's executable
-// stalls on the feed. `headless` is polled while the launcher lives, from the
-// moment the app has exited with the download still stalled.
 RunResult run_short_session(World& w, const std::function<void()>& headless) {
     w.server->stall(stalled_app_file(w));
     const size_t mark = w.full_log().size();
@@ -539,8 +530,6 @@ bool rolled_back_to_a(const World& w, const SupervisorState& s, FailureReason re
            b->verdict == Verdict{Quarantined{reason}} && s.notice && s.notice->kind == Notice::Kind::RolledBack;
 }
 
-// Holds in every scenario: the identity survives in the live database and
-// in every copy the launcher or the app ever wrote.
 void check_identity_everywhere(const World& w, const std::string& label) {
     Db live(w.db());
     if (live.scalar("SELECT count(*) FROM identity") != 1) fail(label, "the live database lost its identity row");
@@ -571,13 +560,13 @@ struct Scenario {
     uint32_t b_schema = 1;
     uint32_t b_floor = 1;
     bool publish_b = true;
-    std::function<void(World&)> prepare;           // runs without kill points
-    std::function<bool(const World&)> done;        // the outcome has settled
+    std::function<void(World&)> prepare;
+    std::function<bool(const World&)> done;
     std::function<void(const World&, const std::string&)> verify;
-    bool http = false;                             // the feed comes from FeedServer
+    bool http = false;
     bool kill_points = true;
-    std::map<std::string, std::string> env{};      // overrides the launcher's environment
-    std::wstring launcher_flags{};                 // before "--", e.g. " --recover"
+    std::map<std::string, std::string> env{};
+    std::wstring launcher_flags{}; // before "--", e.g. " --recover"
 };
 
 enum class Outcome { Converged, KillNotReached, Failed };
@@ -915,7 +904,6 @@ std::vector<Scenario> scenarios() {
                    },
                    true, false, {{"PARTIES_FAKE_FAULT", "1.0.0.0:run-until-checked"}}});
 
-    // B cannot talk to this launcher, so the newest build A can leave its revoked self for is the older D.
     out.push_back({"good-revoked", "", 1, 1, true,
                    [](World& w) {
                        Release d = make_release(w.root.path(), g_fake_app, "0.9.0.0", 1, 1, true);

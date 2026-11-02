@@ -25,7 +25,6 @@ enum class ExitKind : uint8_t {
     KilledHung,       // the shell killed it after TerminateApp
 };
 
-// --- Events ---
 // The shell feeds Resumed once at launcher start, before anything else.
 struct StartRequested { friend bool operator==(const StartRequested&, const StartRequested&) = default; };
 struct Resumed { friend bool operator==(const Resumed&, const Resumed&) = default; };
@@ -46,7 +45,6 @@ struct BuildSealed {
     std::optional<Snapshot> restore_first;
     friend bool operator==(const BuildSealed&, const BuildSealed&) = default;
 };
-// Recovery: "start previous version", optionally on a chosen backup.
 struct UserRollback {
     BuildId target;
     std::optional<Snapshot> restore;
@@ -60,7 +58,6 @@ struct UserDowngrade {
     std::optional<Snapshot> restore_first;
     friend bool operator==(const UserDowngrade&, const UserDowngrade&) = default;
 };
-// Recovery: "try the failed build again".
 struct UserRetry {
     BuildId target;
     friend bool operator==(const UserRetry&, const UserRetry&) = default;
@@ -120,7 +117,7 @@ struct Context {
     Policy policy{};
 };
 
-// --- Effects: ordered, each idempotent. ---
+// Effects are ordered, and each is idempotent.
 // Write a fresh copy of the live database to backups\<id>.db (tmp + rename).
 struct TakeSnapshot {
     SnapshotId id;

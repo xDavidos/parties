@@ -25,8 +25,6 @@ Pill pill_for(const Status& s) {
     }
 }
 
-// Outside a download or a staged build, the launcher reports a newer version
-// only when it cannot stage it: that build needs a newer launcher.
 bool blocked(const Status& s) { return pill_for(s) == Pill::None && s.available && *s.available > s.current; }
 
 std::tm local_time(std::chrono::system_clock::time_point at) {
@@ -48,8 +46,6 @@ std::string short_date_time(std::chrono::sys_seconds at, std::chrono::system_clo
     return std::format("{} {}{}, {:02}:{:02}", kMonths[when.tm_mon], when.tm_mday, year, when.tm_hour, when.tm_min);
 }
 
-// Parties keeps the installed version because the chosen channel has nothing
-// as new yet: the launcher pinned it, or offers only an older build.
 bool held(const Status& s) {
     if (s.phase == Phase::Downloading || s.phase == Phase::ReadyToRestart) return false;
     return s.pinned_until || s.downgrade;

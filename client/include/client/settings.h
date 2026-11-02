@@ -24,7 +24,6 @@ struct SavedServer {
     std::string password;
 };
 
-// An empty seed_phrase is a raw-key identity, imported from a private key.
 struct Identity {
     std::string seed_phrase;
     SecretKey   secret_key{};
@@ -33,13 +32,13 @@ struct Identity {
 
 struct ArchivedIdentity {
     Identity    identity;
-    std::string archived_at;   // UTC, SQLite datetime format
-    std::string reason;        // "replaced" or "deleted"
+    std::string archived_at;
+    std::string reason;
 };
 
 struct SettingsPaths {
     std::filesystem::path db;
-    std::filesystem::path backups_dir;   // receives pre-migration snapshots
+    std::filesystem::path backups_dir;
 };
 
 class Settings {
@@ -50,7 +49,7 @@ public:
     enum class OpenStatus { Ready, TooNew, Unavailable };
     struct OpenResult {
         OpenStatus  status = OpenStatus::Unavailable;
-        std::string reason;   // empty when Ready
+        std::string reason;
     };
 
     OpenResult open(const SettingsPaths& paths);

@@ -47,12 +47,10 @@ struct SetupOptions {
     bool remove_data = false;
     std::wstring object_prefix = L"Parties";
     fs::path pack_dir, pack_out;
-    HANDLE wait_for = nullptr;  // set in the temporary uninstaller copy
+    HANDLE wait_for = nullptr;
     std::vector<std::wstring> args;
-    // Started as the zip's parties_client.exe: installs without asking, and
-    // a double-click while Parties runs only brings it forward.
     bool carrier = false;
-    bool handed_over = false;  // the legacy updater started this run and is exiting
+    bool handed_over = false;
     LegacyHints legacy;
     std::chrono::milliseconds portable_exit_timeout = kPortableExitTimeout;
 };
@@ -60,7 +58,7 @@ struct SetupOptions {
 struct Outcome {
     int code = kDone;
     std::string message;
-    std::string note;  // shown after Parties starts
+    std::string note;
 };
 
 Outcome failed(std::string message) { return {kFailed, std::move(message)}; }
@@ -73,7 +71,6 @@ bool inside(const fs::path& path, const fs::path& dir) {
     return p.size() > d.size() && _wcsnicmp(p.c_str(), d.c_str(), d.size()) == 0;
 }
 
-// Silent runs report through stderr when the caller redirected it.
 void report(const std::string& text) {
     log("{}", text);
     HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
@@ -178,7 +175,7 @@ public:
         CloseHandle(h_);
     }
 
-    // Another setup or uninstall of this install is running.
+    // nullopt: another setup or uninstall of this install is running.
     static std::optional<Mutex> setup(const SetupOptions& o) {
         Mutex m;
         m.h_ = CreateMutexW(nullptr, TRUE, (L"Local\\" + o.object_prefix + L".Setup").c_str());
@@ -343,7 +340,6 @@ bool launcher_running(const SetupOptions& o) {
     return true;
 }
 
-// Starts the installed app the way the Start menu shortcut does.
 void launch_installed(const SetupOptions& o) {
     std::vector<std::wstring> args{L"--install-root=" + o.install.root.wstring()};
     if (testing::enabled()) {
@@ -455,8 +451,6 @@ void remove_temporary_copy() {
         CloseHandle(pi.hProcess);
     }
 }
-
-// --- Native UI ---
 
 int show(const wchar_t* instruction, const std::wstring& content, PCWSTR icon,
          const std::vector<TASKDIALOG_BUTTON>& buttons = {}, const wchar_t* checkbox = nullptr,
@@ -591,8 +585,6 @@ int run_install(const SetupOptions& o, const std::expected<Payload, std::string>
     return kDone;
 }
 
-// The legacy updater swapped this carrier in for the portable app and
-// started it, or a user or old shortcut started the carrier again.
 int run_carrier(const SetupOptions& o, const std::expected<Payload, std::string>& payload) {
     if (!payload) {
         report("setup refused its payload: " + payload.error());
@@ -665,7 +657,6 @@ int run_pack(const SetupOptions& o) {
     return kDone;
 }
 
-// Only options before "--": what follows belongs to the app.
 bool asks_for(const std::vector<std::wstring>& args, std::wstring_view flag) {
     for (const std::wstring& a : args) {
         if (a == L"--") return false;

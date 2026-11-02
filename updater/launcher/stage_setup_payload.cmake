@@ -2,7 +2,6 @@
 # e2e harness key that testing launchers pin. Never used for a release: CI
 # packs the signed release executables with the channel manifest instead
 # (docs/releasing.md).
-# cmake -DSTUB= -DLAUNCHER= -DCLIENT= -DTOOL= -DKEY_HEX= -DOUT= -P stage_setup_payload.cmake
 foreach(input STUB LAUNCHER CLIENT TOOL KEY_HEX OUT)
     if(NOT DEFINED ${input})
         message(FATAL_ERROR "stage_setup_payload.cmake needs -D${input}=")

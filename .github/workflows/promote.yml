@@ -1,9 +1,5 @@
 name: Promote to Stable
 
-# Copies a version's signed Beta entry into stable.manifest.json byte for
-# byte, then makes its GitHub release a full, latest release, which is what
-# the legacy in-app updater and macOS Sparkle read.
-
 on:
   workflow_dispatch:
     inputs:

@@ -1,5 +1,3 @@
-# Parties.exe, the boot stub. Automatic updates never replace it, so it links
-# only what tools/update/check_boot_stub.ps1 allows.
 if(NOT WIN32)
     return()
 endif()

@@ -1,10 +1,8 @@
 #pragma once
 
-// Runs one feed job at a time off the supervisor thread: fetch a channel
-// manifest from an UpdateSource, verify it against the pinned keyring, ratchet
-// update\trust.json (sole writer), decide with update_policy, and seal what the
-// decision needs. The results come back as state machine events, so every
-// decision about what runs stays in step().
+// Runs one feed job at a time off the supervisor thread and is the sole writer of
+// update\trust.json. Results come back as state machine events, so every decision
+// about what runs stays in step().
 
 #include "build_store.h"
 #include "data_guard.h"
@@ -22,11 +20,9 @@
 
 namespace parties::update::launcher {
 
-// Look for an update on the current channel.
 struct CheckJob {
     friend bool operator==(const CheckJob&, const CheckJob&) = default;
 };
-// The Redownload effect: fetch `build` again from the current channel's manifest.
 struct RepairJob {
     BuildId build;
     friend bool operator==(const RepairJob&, const RepairJob&) = default;
@@ -45,10 +41,9 @@ struct JobRequest {
     Job job;
     SupervisorState state;
     std::optional<DataInfo> live_db;
-    std::vector<Backup> backups;  // newest first: where a downgrade's restore comes from
+    std::vector<Backup> backups;
 };
 
-// What the last check found, for the status line.
 struct FeedView {
     link::Phase phase = link::Phase::Idle;
     std::optional<Version> available;  // a newer build this launcher cannot stage yet
@@ -58,7 +53,7 @@ struct FeedView {
 
 struct JobOutcome {
     Job job;
-    Channel channel;  // whose manifest the job read
+    Channel channel;
     bool ok = false;
     std::vector<Event> events;
     FeedView view;
@@ -71,15 +66,12 @@ struct Download {
 
 class UpdateWorker {
 public:
-    // source may be null: this build has no update feed.
     UpdateWorker(std::unique_ptr<UpdateSource> source, Keyring keys, fs::path trust_file, BuildStore builds);
     ~UpdateWorker();
 
     bool available() const { return source_ != nullptr; }
     bool busy() const;
-    // Starts a job unless one is running.
     bool start(JobRequest request);
-    // Signalled when a job finished or its download progressed.
     void* event() const { return event_; }
     std::optional<JobOutcome> take();
     std::optional<Download> download() const;

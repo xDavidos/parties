@@ -19,11 +19,10 @@
 
 namespace parties::update::launcher {
 
-// The binary the legacy updater left behind.
 struct OldBinary {
     enum class Kind {
-        Cleanup,  // --update-cleanup: parties_client.old.exe, deleted once the move is done
-        Replace,  // --update-replace: the old parties_client.exe, overwritten with the carrier
+        Cleanup,
+        Replace,
     };
     fs::path path;
     Kind kind = Kind::Cleanup;
@@ -42,8 +41,6 @@ struct LegacyHints {
 // menu shortcut. Needs COM on the calling thread.
 std::vector<fs::path> legacy_dirs(const LegacyHints& hints);
 
-// Waits until no portable copy holds Local\<prefix>.Client.Instance. False
-// when one still does after `timeout`.
 bool wait_for_portable_exit(const std::wstring& object_prefix, std::chrono::milliseconds timeout);
 
 struct LegacyData {
