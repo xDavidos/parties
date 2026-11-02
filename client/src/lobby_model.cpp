@@ -162,6 +162,9 @@ void LobbyModel::build(rml::Builder& b) {
      .bind("vad_enabled",       vad_enabled)
      .bind("vad_threshold",     vad_threshold)
      .bind("voice_level",       voice_level)
+     .bind("network_compat_enabled", network_compat_enabled)
+     .bind("network_compat_restart", network_compat_restart)
+     .bind("diag_overlay_enabled", diag_overlay_enabled)
      .bind("voice_volume",      voice_volume)
      .bind("secondary_volume",  secondary_volume)
      .bind("music_send_volume", music_send_volume)
@@ -341,6 +344,15 @@ void LobbyModel::build(rml::Builder& b) {
     b.on("toggle_aec", [this] {
         aec_enabled = !aec_enabled.get();
         if (on_aec_changed) on_aec_changed(aec_enabled.get());
+    });
+
+    b.on("toggle_diag_overlay", [this] {
+        if (on_diag_overlay_changed) on_diag_overlay_changed(!diag_overlay_enabled.get());
+    });
+
+    b.on("toggle_network_compat", [this] {
+        network_compat_enabled = !network_compat_enabled.get();
+        if (on_network_compat_changed) on_network_compat_changed(network_compat_enabled.get());
     });
 
     b.on("toggle_normalize", [this] {

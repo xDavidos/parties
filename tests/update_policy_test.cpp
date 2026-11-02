@@ -1,3 +1,4 @@
+#include <parties/update/probation.h>
 #include <parties/update/update_policy.h>
 
 #include <parties/crypto.h>
@@ -140,6 +141,24 @@ bool test_switch_to_older_channel_pins() {
     return ok;
 }
 
+bool test_wait_during_a_trial() {
+    // Trying Beta's 1.6.1 over 1.6.0, the user picks Stable, which lists only 1.6.0.
+    SupervisorState s = installed(k160, Channel::Beta);
+    s.builds.push_back(BuildRecord::from_entry(k161));
+    s.activation = Probation{k161.id(), k160.id(), std::nullopt, 0, false};
+    s.operation = Running{k161.id(), true, 0};
+    const Context ctx{kData3, Policy{}};
+    s = step(s, ChannelIntentSet{Channel::Stable, wait_intent(s)}, ctx).next;
+    s = step(s, ConfirmTimerElapsed{Policy{}.confirm_uptime_s}, ctx).next;
+    if (s.good != k161.id()) return fail("the trial still passes after the pick");
+    auto* report = as<ReportPinned>(plan_update(s, manifest(Channel::Stable, {k160}), kProtocol, kData3));
+    if (!report || report->until != k161.version)
+        return fail("picking a channel during a trial waits on the version under trial");
+    if (!report->downgrade || report->downgrade->entry.version != k160.version)
+        return fail("switch now still offers the channel's build");
+    return true;
+}
+
 bool test_downgrade_offers() {
     bool ok = true;
     auto s = installed(k170, Channel::Beta);
@@ -242,6 +261,7 @@ int main() {
     bool ok = true;
     ok &= test_follow();
     ok &= test_switch_to_older_channel_pins();
+    ok &= test_wait_during_a_trial();
     ok &= test_downgrade_offers();
     ok &= test_revoked_good_moves();
     ok &= test_launcher_protocol_gate();

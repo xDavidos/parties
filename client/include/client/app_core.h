@@ -6,6 +6,8 @@
 #include <client/settings.h>
 #include <client/lobby_model.h>
 #include <client/chat_model.h>
+#include <client/diagnostics.h>
+#include <client/diagnostics_model.h>
 #include <client/idle_sleep_inhibitor.h>
 #include <client/server_list_model.h>
 #include <client/server_query_wake.h>
@@ -13,7 +15,7 @@
 #include <client/stream_audio_player.h>
 #include <parties/types.h>
 #include <parties/video_common.h>
-#include <parties/video_frame_reorder.h>
+#include <parties/video_receive_router.h>
 #include <parties/video_send_controller.h>
 #ifdef _WIN32
 #include <parties/update/link.h>
@@ -67,7 +69,7 @@ struct PlatformBridge {
     std::function<void()>                                      request_keyframe;
     // True while the decode pipeline for this watched sharer is still waiting
     // for a keyframe (Windows: VideoDecodeGate; Apple: awaiting_keyframe_).
-    // AppCore::tick() re-sends a PLI every VIDEO_PLI_RETRY_MS while this holds.
+    // AppCore::tick() re-sends a PLI (paced, with backoff) while this holds.
     std::function<bool(UserId)>                                stream_awaiting_keyframe;
     std::function<void()>                                      clear_video_element;
     // Per-sharer video decode (set only on platforms with a multi-stream decode
@@ -122,7 +124,14 @@ public:
     LobbyModel        model_;
     ChatModel         chat_model_;
     ServerListModel   server_model_;
+    DiagnosticsModel  diag_model_;
     StreamAudioPlayer stream_audio_player_;
+
+    // On-screen diagnostics overlay (Ctrl+Shift+D / Cmd+Shift+D, or Settings).
+    void set_diagnostics_visible(bool visible);
+    // Render thread, once per render-loop iteration; drawing = false while
+    // rendering is suspended (DiagnosticsRecorder::on_render_tick).
+    void note_render_tick(bool drawing);
 
     // Shared state. authenticated_ and server_protocol_version_ are also read
     // by the encoder threads (send_video_frame), hence atomic.
@@ -265,9 +274,9 @@ public:
     // single hardware decoder) rather than going through add_watch/remove_watch.
     void set_single_watched(UserId id);
     void send_voice_state();
-    // Single PLI funnel: every keyframe request toward a sharer (decode-gate
-    // discontinuity, reorder-buffer loss, tick() retry) goes through here and
-    // is rate-limited per target to VIDEO_PLI_COOLDOWN_MS. Thread-safe.
+    // Keyframe request toward a sharer from a consumer (decode-gate
+    // discontinuity). Paced per stream together with video_rx_'s own
+    // requests (500 ms doubling to 4 s while broken). Thread-safe.
     void send_pli(UserId target);
     void clear_all_sharers();
     void refresh_server_list();
@@ -309,25 +318,31 @@ private:
     std::unordered_map<UserId, SharerInfo> active_sharers_;
 
     // ── Screen-share receive (per-frame streams) ────────────────────────────
-    // One reorder buffer per watched sharer. Fed on the MsQuic worker thread
-    // (net_.on_video_stream_frame / on_video_stream_aborted) and polled from
-    // tick(); guarded by reorder_mutex_. Delivered frames go to
-    // on_video_frame_received with the same [header][encoded] layout the
-    // stream-1 path produces. Erased in remove_watch / stop_watching /
-    // clear_all_sharers / on_disconnect_cleanup.
-    std::mutex reorder_mutex_;
-    std::unordered_map<UserId, VideoFrameReorderBuffer> reorder_buffers_;
+    // Reorder buffers and keyframe-request pacing for every watched stream.
+    // A stream is opened when its watch starts (watch_sharer / add_watch /
+    // set_single_watched) and closed when it ends, so frames of streams we do
+    // not watch are dropped. Fed on the MsQuic worker thread, ticked from
+    // tick(). Delivered frames go to on_video_frame_received with the same
+    // [header][encoded] layout the stream-1 path produces.
+    // Declared before video_rx_: its playout thread reports into it.
+    DiagnosticsRecorder diag_;
+    VideoReceiveRouter video_rx_{
+        [this](uint32_t stream, const VideoFrameHeader& hdr, std::vector<uint8_t>&& frame) {
+            deliver_video_frame(stream, hdr, std::move(frame));
+        },
+        [this](uint32_t stream) { send_pli_packet(stream); }};
+    void deliver_video_frame(uint32_t stream, const VideoFrameHeader& hdr, std::vector<uint8_t>&& frame);
+    void send_pli_packet(UserId target);   // unpaced: video_rx_ paces
+    int64_t video_rx_rtt_sampled_us_ = 0;   // main thread
     void route_video_stream_frame(uint32_t sender_id, std::vector<uint8_t>&& frame);
     void route_video_stream_aborted(uint32_t sender_id, uint32_t frame_seq, bool have_seq);
-    void poll_video_reorder_buffers();
-    void erase_reorder_buffer(UserId sharer_id);
+    void open_video_rx(UserId stream);
 
-    // PLI cooldown per target (send_pli) and keyframe-request cooldown for
-    // incoming PLIs per source (bridge_.request_keyframe /
-    // request_camera_keyframe). Both touched from the MsQuic thread and the
-    // main thread; guarded by pli_mutex_.
+    // Keyframe-request cooldown for incoming PLIs per source
+    // (bridge_.request_keyframe / request_camera_keyframe). Touched from the
+    // MsQuic thread and the main thread; guarded by pli_mutex_. Outgoing PLIs
+    // are paced by video_rx_.
     std::mutex pli_mutex_;
-    std::unordered_map<UserId, std::chrono::steady_clock::time_point> pli_last_sent_;
     std::chrono::steady_clock::time_point keyframe_request_last_{};
     std::chrono::steady_clock::time_point camera_keyframe_request_last_{};
     void on_keyframe_request(protocol::VideoSource source);   // incoming PLI (MsQuic thread)
@@ -346,7 +361,6 @@ private:
     // focus. Read on the MsQuic worker thread.
     std::atomic<UserId> audio_sharer_{0};
     void refocus_stream_audio();           // after a removal: any watched screen, else none
-    void retry_pending_plis();          // tick(): re-send while a stream awaits a keyframe
     void feed_video_sender_stats();     // tick(): QUIC stats -> video_sender_
 
     void on_screen_share_viewer(const uint8_t* data, size_t len);   // SCREEN_SHARE_VIEWER (sound)
@@ -382,6 +396,17 @@ private:
     std::chrono::steady_clock::time_point ping_sent_at_{};
     std::chrono::steady_clock::time_point ping_last_send_{};
     bool ping_pending_ = false;
+
+    // ── Diagnostics overlay (main thread) ───────────────────────────────────
+    void tick_diagnostics(int64_t now_us);
+    void update_diagnostics_model(int64_t now_us);
+    void on_link_report(const uint8_t* data, size_t len);
+    int64_t  diag_sampled_us_ = 0;
+    DiagServerReport diag_server_;
+    int      diag_empty_pongs_ = 0;      // answered pings without a link report (older server)
+    uint64_t diag_log_seq_ = 0;
+    uint64_t diag_logged_freeze_id_ = 0; // newest freeze already written to the log
+    Rml::Vector<DiagLogRow> diag_log_rows_;
     // Last NetClient::datagram_backlog().dropped value written to the log.
     std::chrono::steady_clock::time_point datagram_drop_log_last_{};
     uint64_t datagram_drops_logged_ = 0;

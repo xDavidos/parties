@@ -170,6 +170,11 @@ std::vector<Row> table() {
     row({"staged build that cannot open the data is dropped", staged(D, std::nullopt, C), StartRequested{}, kV3,
          {"Commit", "DeleteBuild 0.9.0.0", "Commit", "Spawn 1.2.0.0"},
          [](auto& s) { return steady_on(s, C) && !s.find(D.id); }});
+    row({"staged build is trusted at once when good cannot open the data", staged(C), StartRequested{}, kV3,
+         {"Commit", "Commit", "Spawn 1.2.0.0"}, [](auto& s) {
+             return steady_on(s, C) && s.previous_good == A.id && std::holds_alternative<Proven>(s.find(C.id)->verdict) &&
+                    running(s) && running(s)->build == C.id;
+         }});
     row({"staged downgrade on a chosen backup", staged(D, backup_v1, C), StartRequested{}, kV3,
          {"Commit", "RestoreSnapshot backup-v1 keep " + snap("pre-downgrade", D, 11), "Commit", "Spawn 0.9.0.0"},
          [](auto& s) {
@@ -286,6 +291,13 @@ std::vector<Row> table() {
          BuildSealed{B, std::nullopt}, kV1, {}});
     row({"no staging during probation", probation(B), BuildSealed{C, std::nullopt}, kV1, {}});
     row({"sealing good again (repair) changes nothing", steady(), BuildSealed{A, std::nullopt}, kV1, {}});
+    row({"a seal stages a newer previous good again", with_previous(steady(), B), BuildSealed{B, std::nullopt}, kV1,
+         {"Commit"}, [](auto& s) {
+             auto* st = std::get_if<Staged>(&s.activation);
+             return st && st->build == B.id && s.previous_good == B.id && s.builds.size() == 2;
+         }});
+    row({"sealing an older previous good again (repair) changes nothing", with_previous(steady(B), A),
+         BuildSealed{A, std::nullopt}, kV1, {}});
     row({"a downgrade stages a new older build", steady(C), UserDowngrade{D, backup_v1}, kV3, {"Commit"},
          [](auto& s) {
              auto* st = std::get_if<Staged>(&s.activation);
@@ -634,8 +646,9 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
             bool startup_failure = exit && run && !run->healthy && exit->kind != ExitKind::Clean &&
                                    exit->kind != ExitKind::DataUnavailable;
             const BuildRecord* fb = out.next.find(p->fallback);
-            const bool read_pre = !p->pre_snapshot || (fb && compatibility(fb->data_schema, p->pre_snapshot->data) !=
-                                                                 Compatibility::Incompatible);
+            const bool read_pre = !p->restore_on_rollback || !p->pre_snapshot ||
+                                  (fb && compatibility(fb->data_schema, p->pre_snapshot->data) !=
+                                             Compatibility::Incompatible);
             if (startup_failure || std::holds_alternative<UserRollback>(event))
                 w.check(starts_fallback(fx, p->fallback, read_pre), "a startup failure starts the fallback at once");
             const Context after{data_after, ctx.policy};
