@@ -50,7 +50,7 @@
         </div>
     </div>
 
-    <!-- The launcher rolled back a build that did not start -->
+    <!-- A launcher notice: a rollback, a data restore, a withdrawn version, or a failed restore -->
     <div class="update-notice" id="update-notice" data-model="lobby" data-if="update_notice != ''">
         <div class="update-notice-copy">
             <span class="update-notice-text ui-body">{{ update_notice }}</span>
@@ -1178,6 +1178,7 @@
                         </div>
                     </div>
                     <div class="recovery-warning"><span class="recovery-warning-icon ui-symbol">!</span><p class="ui-body">Anyone with these words can use your identity. Parties support cannot recover them.</p></div>
+                    <div class="error-text" id="onboarding-save-error" data-if="login_error != ''">{{ login_error }}</div>
                     <div class="btn onboarding-primary ui-button" data-event-click="save_identity"><span class="ui-button-label ui-control">I saved my recovery phrase</span></div>
                 </div>
             </div>

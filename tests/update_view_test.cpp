@@ -206,6 +206,37 @@ void notice() {
               "backups\\rolled-back-1.3.0.0-9f3c2a1b-g12.db.",
           "a data restore names the preserved backup file inside the data folder");
 
+    Status withdrawn = base();
+    withdrawn.notice = StatusNotice{StatusNotice::Kind::Withdrawn, v("1.2.0.0"), v("1.2.0.0"), std::nullopt};
+    withdrawn.downgrade = DowngradeOffer{v("1.1.0.0"), DowngradeEffect::RestoresBackup, kBackupTaken};
+    show_update_status(model, withdrawn);
+    check(model.update_notice.get() == "Parties 1.2.0.0 was withdrawn because of a problem.",
+          "a withdrawn version is named in the notice");
+    check(model.update_notice_detail.get() ==
+              "Going back to 1.1.0.0 restores a backup of your data, so Parties waits for you to choose it in "
+              "Settings, under Updates.",
+          "a withdrawal that needs a restore waits for the user");
+    check(model.update_can_switch.get(), "the restore is offered in Settings");
+    check(sends(withdrawn, UpdateAction::DismissNotice, AcknowledgeNotice{}), "dismissing acknowledges the withdrawal");
+    Status moving = withdrawn;
+    moving.downgrade.reset();
+    moving.phase = Phase::ReadyToRestart;
+    moving.available = v("1.1.0.0");
+    show_update_status(model, moving);
+    check(model.update_notice_detail.get() == "Restart Parties to move to 1.1.0.0.", "a staged move asks for a restart");
+    Status stuck = withdrawn;
+    stuck.downgrade.reset();
+    show_update_status(model, stuck);
+    check(model.update_notice_detail.get() == "Parties moves to a fixed version as soon as one is out.",
+          "with nothing to move to, Parties says it will move later");
+
+    Status failed = base();
+    failed.notice = StatusNotice{StatusNotice::Kind::RestoreFailed, v("1.2.0.0"), v("1.2.0.0"), std::nullopt};
+    show_update_status(model, failed);
+    check(model.update_notice.get() == "Parties could not restore the backup, so your data was not changed.",
+          "a restore that could not start says the data is unchanged");
+    check(model.update_notice_detail.get().empty(), "a failed restore has nothing more to point at");
+
     show_update_status(model, base());
     check(model.update_notice.get().empty(), "the notice disappears once the launcher clears it");
     check(!update_request(base(), UpdateAction::DismissNotice), "nothing to acknowledge without a notice");

@@ -27,6 +27,8 @@ struct DataPaths {
     fs::path db() const { return data() / "parties_client.db"; }
     fs::path backups() const { return root / "backups"; }
     fs::path trust() const { return root / "update" / "trust.json"; }
+    // Public keys (hex, one per line) of portable identities the user chose against.
+    fs::path declined_identities() const { return root / "update" / "declined-identities.txt"; }
     fs::path logs() const { return root / "logs"; }
 };
 

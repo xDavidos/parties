@@ -38,27 +38,41 @@ struct Com {
 
 std::wstring uninstall_key() { return testing::uninstall_key().value_or(kUninstallKey); }
 
-fs::path programs_folder() {
-    if (auto folder = testing::start_menu()) return *folder;
+// Empty when Windows cannot name the folder.
+fs::path known_folder(REFKNOWNFOLDERID id, DWORD flags = 0) {
     PWSTR path = nullptr;
     fs::path out;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Programs, KF_FLAG_CREATE, nullptr, &path))) out = path;
+    if (SUCCEEDED(SHGetKnownFolderPath(id, flags, nullptr, &path))) out = path;
     CoTaskMemFree(path);
     return out;
+}
+
+fs::path programs_folder() {
+    if (auto folder = testing::start_menu()) return *folder;
+    return known_folder(FOLDERID_Programs, KF_FLAG_CREATE);
 }
 
 // Testing builds read a Desktop only when the harness names one.
-std::optional<fs::path> desktop_folder() {
+fs::path desktop_folder() {
     if (auto folder = testing::desktop()) return *folder;
-    if (testing::enabled()) return std::nullopt;
-    PWSTR path = nullptr;
-    std::optional<fs::path> out;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &path))) out = path;
-    CoTaskMemFree(path);
-    return out;
+    if (testing::enabled()) return {};
+    return known_folder(FOLDERID_Desktop);
 }
 
-std::wstring widen(std::string_view s) { return fs::path(std::u8string(s.begin(), s.end())).wstring(); }
+// Where the taskbar keeps pins. Testing builds read it only when the harness names one.
+fs::path taskbar_pins_folder() {
+    if (auto folder = testing::taskbar()) return *folder;
+    if (testing::enabled()) return {};
+    const fs::path appdata = known_folder(FOLDERID_RoamingAppData);
+    if (appdata.empty()) return {};
+    return appdata / L"Microsoft" / L"Internet Explorer" / L"Quick Launch" / L"User Pinned" / L"TaskBar";
+}
+
+fs::path expand(const std::wstring& text) {
+    wchar_t expanded[32768]{};
+    DWORD n = ExpandEnvironmentStringsW(text.c_str(), expanded, 32768);
+    return n > 0 && n <= 32768 ? fs::path(std::wstring(expanded)) : fs::path(text);
+}
 
 // A shortcut reads back the long spelling of a target saved under its 8.3 name.
 bool same_path(const fs::path& a, const fs::path& b) {
@@ -120,7 +134,7 @@ HKEY open_own_entry(const InstallPaths& install, REGSAM access) {
 }
 
 struct LinkInfo {
-    std::wstring target, arguments, aumid;
+    std::wstring target, arguments, aumid, working_dir;
 };
 
 std::optional<LinkInfo> read_link(const fs::path& file) {
@@ -134,6 +148,7 @@ std::optional<LinkInfo> read_link(const fs::path& file) {
     wchar_t buffer[32768]{};
     if (SUCCEEDED(link->GetPath(buffer, 32768, nullptr, SLGP_RAWPATH))) info.target = buffer;
     if (SUCCEEDED(link->GetArguments(buffer, 32768))) info.arguments = buffer;
+    if (SUCCEEDED(link->GetWorkingDirectory(buffer, 32768))) info.working_dir = buffer;
     Com<IPropertyStore> props;
     if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&props.p)))) {
         PROPVARIANT v;
@@ -247,18 +262,36 @@ bool write_shortcuts(const InstallPaths& install, std::string& error) {
     return true;
 }
 
-std::vector<fs::path> parties_shortcut_targets() {
-    std::vector<fs::path> folders{programs_folder()};
-    if (auto desktop = desktop_folder()) folders.push_back(*desktop);
-    std::vector<fs::path> targets;
-    for (const fs::path& folder : folders) {
-        auto link = folder.empty() ? std::nullopt : read_link(folder / L"Parties.lnk");
+std::vector<fs::path> portable_shortcut_dirs() {
+    std::vector<fs::path> links;
+    std::error_code ec;
+    auto collect = [&](const fs::path& folder, bool recursive) {
+        if (folder.empty()) return;
+        auto add = [&](const fs::directory_entry& e) {
+            if (e.is_regular_file(ec) && _wcsicmp(e.path().extension().c_str(), L".lnk") == 0) links.push_back(e.path());
+        };
+        constexpr auto options = fs::directory_options::skip_permission_denied;
+        if (recursive)
+            for (const auto& e : fs::recursive_directory_iterator(folder, options, ec)) add(e);
+        else
+            for (const auto& e : fs::directory_iterator(folder, options, ec)) add(e);
+    };
+    collect(programs_folder(), true);
+    collect(desktop_folder(), false);
+    collect(taskbar_pins_folder(), false);
+
+    std::vector<fs::path> dirs;
+    for (const fs::path& file : links) {
+        auto link = read_link(file);
         if (!link || link->target.empty()) continue;
-        wchar_t expanded[32768]{};
-        DWORD n = ExpandEnvironmentStringsW(link->target.c_str(), expanded, 32768);
-        targets.emplace_back(n > 0 && n <= 32768 ? std::wstring(expanded) : link->target);
+        const fs::path target = expand(link->target);
+        const bool portable = _wcsicmp(target.filename().c_str(), L"parties_client.exe") == 0 ||
+                              _wcsicmp(file.filename().c_str(), L"Parties.lnk") == 0;
+        if (!portable) continue;
+        dirs.push_back(target.parent_path());
+        if (!link->working_dir.empty()) dirs.push_back(expand(link->working_dir));
     }
-    return targets;
+    return dirs;
 }
 
 void remove_shortcuts(const InstallPaths& install) {

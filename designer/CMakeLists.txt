@@ -87,6 +87,16 @@ if(BUILD_TESTING)
             --screenshot "${CMAKE_BINARY_DIR}/ui-designer-recovery.bmp"
     )
     add_test(
+        NAME parties_ui_designer_recovery_save_failed
+        COMMAND rmlui_designer
+            "${CMAKE_SOURCE_DIR}/client/ui/lobby.rml"
+            --asset-dir "${CMAKE_SOURCE_DIR}/client/ui"
+            --fixture recovery-save-failed
+            --size 1440x900
+            --frames 5
+            --screenshot "${CMAKE_BINARY_DIR}/ui-designer-recovery-save-failed.bmp"
+    )
+    add_test(
         NAME parties_ui_designer_member
         COMMAND rmlui_designer
             "${CMAKE_SOURCE_DIR}/client/ui/lobby.rml"
@@ -269,7 +279,7 @@ if(BUILD_TESTING)
     # Launcher-managed update UI: each fixture also clicks its controls and
     # checks the request that would reach the launcher.
     foreach(scenario update-downloading update-ready update-rolled-back
-            update-data-restored settings-updates settings-updates-pinned settings-updates-restore
+            update-data-restored update-withdrawn update-restore-failed settings-updates settings-updates-pinned settings-updates-restore
             settings-updates-impossible settings-updates-feed-stale settings-updates-blocked
             settings-updates-downloading)
         add_test(

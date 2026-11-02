@@ -35,6 +35,19 @@ std::optional<uint64_t> number(std::string_view text) {
     return value;
 }
 
+std::optional<std::chrono::milliseconds> milliseconds_env(const char* name) {
+    auto text = env(name);
+    auto n = text ? number(*text) : std::nullopt;
+    if (!n) return std::nullopt;
+    return std::chrono::milliseconds(*n);
+}
+
+std::optional<std::wstring> wide_env(const char* name) {
+    auto value = env(name);
+    if (!value) return std::nullopt;
+    return fs::path(std::u8string(value->begin(), value->end())).wstring();
+}
+
 // The harness's own key, generated for it. Never a production key. Pinned
 // twice: under the id the harnesses sign with, and under the id
 // parties_manifest_tool gives it (the public key's first 16 hex digits),
@@ -92,37 +105,18 @@ void before_effect() {
 }
 
 std::optional<std::string> scripted_recovery() { return env("PARTIES_TEST_RECOVERY"); }
+std::optional<std::string> identity_choice() { return env("PARTIES_TEST_IDENTITY_CHOICE"); }
 
-std::optional<std::chrono::milliseconds> exit_after_healthy() {
-    auto text = env("PARTIES_TEST_EXIT_AFTER_HEALTHY_MS");
-    auto n = text ? number(*text) : std::nullopt;
-    if (!n) return std::nullopt;
-    return std::chrono::milliseconds(*n);
-}
-
-std::optional<std::chrono::milliseconds> job_cap() {
-    auto text = env("PARTIES_TEST_JOB_CAP_MS");
-    auto n = text ? number(*text) : std::nullopt;
-    if (!n) return std::nullopt;
-    return std::chrono::milliseconds(*n);
-}
+std::optional<std::chrono::milliseconds> exit_after_healthy() { return milliseconds_env("PARTIES_TEST_EXIT_AFTER_HEALTHY_MS"); }
+std::optional<std::chrono::milliseconds> job_cap() { return milliseconds_env("PARTIES_TEST_JOB_CAP_MS"); }
 
 Keyring pinned_keys() { return kKeys; }
-
-namespace {
-
-std::optional<std::wstring> wide_env(const char* name) {
-    auto value = env(name);
-    if (!value) return std::nullopt;
-    return fs::path(std::u8string(value->begin(), value->end())).wstring();
-}
-
-} // namespace
 
 std::optional<std::wstring> uninstall_key() { return wide_env("PARTIES_TEST_UNINSTALL_KEY"); }
 std::optional<fs::path> start_menu() { return wide_env("PARTIES_TEST_START_MENU"); }
 std::optional<fs::path> recycle_log() { return wide_env("PARTIES_TEST_RECYCLE_LOG"); }
 std::optional<fs::path> desktop() { return wide_env("PARTIES_TEST_DESKTOP"); }
+std::optional<fs::path> taskbar() { return wide_env("PARTIES_TEST_TASKBAR"); }
 std::optional<std::wstring> legacy_image() { return wide_env("PARTIES_TEST_LEGACY_IMAGE"); }
 
 #else
@@ -131,6 +125,7 @@ bool enabled() { return false; }
 Timing timing() { return {}; }
 void before_effect() {}
 std::optional<std::string> scripted_recovery() { return std::nullopt; }
+std::optional<std::string> identity_choice() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> exit_after_healthy() { return std::nullopt; }
 std::optional<std::chrono::milliseconds> job_cap() { return std::nullopt; }
 // Empty until a production key is committed, so no manifest verifies.
@@ -139,6 +134,7 @@ std::optional<std::wstring> uninstall_key() { return std::nullopt; }
 std::optional<std::filesystem::path> start_menu() { return std::nullopt; }
 std::optional<std::filesystem::path> recycle_log() { return std::nullopt; }
 std::optional<std::filesystem::path> desktop() { return std::nullopt; }
+std::optional<std::filesystem::path> taskbar() { return std::nullopt; }
 std::optional<std::wstring> legacy_image() { return std::nullopt; }
 
 #endif

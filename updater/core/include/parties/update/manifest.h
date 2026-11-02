@@ -69,6 +69,8 @@ struct BuildEntry {
     friend bool operator==(const BuildEntry&, const BuildEntry&) = default;
 };
 
+Sha256 sha256_of(std::span<const uint8_t> bytes);
+
 // SHA-256 over the sorted (name, size, sha256) list. URLs are excluded, so a
 // mirror change never changes the build's identity.
 Sha256 build_digest(std::span<const FileEntry> files);

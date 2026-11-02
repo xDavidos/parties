@@ -16,6 +16,10 @@ BuildRecord BuildRecord::from_entry(const BuildEntry& entry) {
     return r;
 }
 
+bool Revocations::contains(const Version& version) const {
+    return std::ranges::find(stable, version) != stable.end() || std::ranges::find(beta, version) != beta.end();
+}
+
 const BuildRecord* SupervisorState::find(const BuildId& id) const {
     auto it = std::ranges::find(builds, id, &BuildRecord::id);
     return it == builds.end() ? nullptr : &*it;

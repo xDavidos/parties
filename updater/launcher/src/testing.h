@@ -31,6 +31,10 @@ void before_effect();
 // PARTIES_TEST_RECOVERY=<choice>: answer the recovery dialog without showing it.
 std::optional<std::string> scripted_recovery();
 
+// PARTIES_TEST_IDENTITY_CHOICE=live|legacy: answer setup's identity question
+// without showing it, even with --silent.
+std::optional<std::string> identity_choice();
+
 // PARTIES_TEST_EXIT_AFTER_HEALTHY_MS=<n>: ask the app to exit n ms after it
 // reports healthy, so a harness can end a real client through its normal path.
 std::optional<std::chrono::milliseconds> exit_after_healthy();
@@ -51,11 +55,13 @@ std::optional<std::filesystem::path> start_menu();
 std::optional<std::filesystem::path> recycle_log();
 
 // Where setup looks for a portable copy beyond the folders it was given:
-// PARTIES_TEST_DESKTOP=<dir> replaces the Desktop, and
+// PARTIES_TEST_DESKTOP=<dir> replaces the Desktop, PARTIES_TEST_TASKBAR=<dir>
+// replaces the taskbar's pinned links, and
 // PARTIES_TEST_LEGACY_IMAGE=<file name> replaces parties_client.exe as the
 // name of running portable copies. A testing build without them looks at
 // neither, so a harness never reads the real ones.
 std::optional<std::filesystem::path> desktop();
+std::optional<std::filesystem::path> taskbar();
 std::optional<std::wstring> legacy_image();
 
 bool enabled();

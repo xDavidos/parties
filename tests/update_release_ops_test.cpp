@@ -86,7 +86,7 @@ bool test_add_build() {
     if (add_build(&*replaced, Channel::Beta, build("1.5.0.0"), issue(6), 3)) return fail("an equal serial must be refused");
     if (add_build(&*replaced, Channel::Beta, build("1.5.0.0"), issue(2), 3)) return fail("a lower serial must be refused");
     if (add_build(&*replaced, Channel::Stable, build("1.5.0.0"), issue(7), 3)) return fail("a base of another channel must be refused");
-    auto revoked = revoke(*replaced, *Version::parse("1.4.0.0"), issue(7));
+    auto revoked = revoke(&*replaced, Channel::Beta, *Version::parse("1.4.0.0"), issue(7));
     if (add_build(&*revoked, Channel::Beta, build("1.4.0.0"), issue(8), 3)) return fail("a revoked version must not come back");
     auto two = add_build(&*revoked, Channel::Beta, build("1.6.0.0"), issue(8), 1);
     if (add_build(&*two, Channel::Beta, build("1.5.0.0"), issue(9), 1))
@@ -101,7 +101,7 @@ bool test_promote() {
     if (!stable || stable->channel != Channel::Stable || stable->builds.size() != 1 || stable->builds[0] != beta->builds[0])
         return fail("promotion copies beta's entry unchanged");
     if (promote(*beta, &*stable, *Version::parse("1.7.0.0"), issue(2), 3)) return fail("a version not in beta must be refused");
-    auto beta_revoked = revoke(*beta, *Version::parse("1.5.0.0"), issue(7));
+    auto beta_revoked = revoke(&*beta, Channel::Beta, *Version::parse("1.5.0.0"), issue(7));
     if (promote(*beta_revoked, &*stable, *Version::parse("1.5.0.0"), issue(2), 3))
         return fail("a version revoked in beta must not be promoted");
     return true;
@@ -110,11 +110,16 @@ bool test_promote() {
 bool test_revoke_and_reissue() {
     auto base = add_build(nullptr, Channel::Stable, build("1.5.0.0"), issue(5), 3);
     base = add_build(&*base, Channel::Stable, build("1.6.0.0"), issue(6), 3);
-    auto once = revoke(*base, *Version::parse("1.6.0.0"), issue(7));
+    auto once = revoke(&*base, Channel::Stable, *Version::parse("1.6.0.0"), issue(7));
     if (!once || versions(once->builds) != "1.5.0.0 " || once->revoked != std::vector{*Version::parse("1.6.0.0")})
         return fail("revoke drops the build and lists it");
-    auto twice = revoke(*once, *Version::parse("1.6.0.0"), issue(8));
+    auto twice = revoke(&*once, Channel::Stable, *Version::parse("1.6.0.0"), issue(8));
     if (!twice || twice->revoked.size() != 1 || twice->builds != once->builds) return fail("revoking again only reissues");
+    if (revoke(&*once, Channel::Beta, *Version::parse("1.6.0.0"), issue(9))) return fail("a base of another channel must be refused");
+    auto fresh = revoke(nullptr, Channel::Stable, *Version::parse("1.6.0.0"), issue(1));
+    if (!fresh || fresh->channel != Channel::Stable || !fresh->builds.empty() ||
+        fresh->revoked != std::vector{*Version::parse("1.6.0.0")})
+        return fail("revoking from a channel with no manifest lists the version in a new one");
     auto resigned = reissue(*twice, {9, kNow + days{7}, days{45}});
     if (!resigned || resigned->serial != 9 || resigned->builds != twice->builds || resigned->revoked != twice->revoked ||
         resigned->expires_at != kNow + days{52})

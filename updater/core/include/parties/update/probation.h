@@ -76,21 +76,36 @@ struct BuildCorrupt {
     BuildId build;
     friend bool operator==(const BuildCorrupt&, const BuildCorrupt&) = default;
 };
-// An accepted manifest for the current channel.
+// An accepted manifest of `channel`. Its revoked[] replaces the list kept for
+// that channel.
 struct ManifestSeen {
+    Channel channel = Channel::Stable;
     std::vector<Version> revoked;
     friend bool operator==(const ManifestSeen&, const ManifestSeen&) = default;
+};
+// good is revoked and `record` is the newest build that can run on the live
+// data as it is: a newer fix, or an older build such as previous_good that
+// may already be on disk. Never carries a restore; leaving a revoked build by
+// restoring a backup is the user's choice (UserDowngrade).
+struct LeaveRevoked {
+    BuildRecord record;
+    friend bool operator==(const LeaveRevoked&, const LeaveRevoked&) = default;
 };
 struct ChannelIntentSet {
     Channel channel;
     ChannelIntent intent;
     friend bool operator==(const ChannelIntentSet&, const ChannelIntentSet&) = default;
 };
+// The RestoreSnapshot of the committed Restoring failed and left the live
+// database as it was: the backup is unreadable, or the live data could not be
+// preserved first. The shell starts good afterwards unless recovery is open.
+struct RestoreFailed { friend bool operator==(const RestoreFailed&, const RestoreFailed&) = default; };
 struct NoticeAcknowledged { friend bool operator==(const NoticeAcknowledged&, const NoticeAcknowledged&) = default; };
 
 using Event = std::variant<StartRequested, Resumed, AppHealthy, AppExited, HealthDeadlinePassed,
                            ConfirmTimerElapsed, BuildSealed, UserDowngrade, UserRollback, UserRetry,
-                           UserRestore, BuildCorrupt, ManifestSeen, ChannelIntentSet, NoticeAcknowledged>;
+                           UserRestore, BuildCorrupt, ManifestSeen, LeaveRevoked, ChannelIntentSet,
+                           RestoreFailed, NoticeAcknowledged>;
 
 struct Policy {
     uint32_t health_deadline_s = 120;
@@ -124,9 +139,10 @@ struct Spawn {
 // Kill the app, wait for it, and report its exit as ExitKind::KilledHung.
 struct TerminateApp { friend bool operator==(const TerminateApp&, const TerminateApp&) = default; };
 // Keep the live database as backups\<preserve_live_as>.db, then put `from` in
-// place. Done when the live database already has from's content.
+// place, or leave no database when `from` is nullopt. Done when the live
+// database already has from's content, or is gone.
 struct RestoreSnapshot {
-    SnapshotId from;
+    std::optional<SnapshotId> from;
     SnapshotId preserve_live_as;
     friend bool operator==(const RestoreSnapshot&, const RestoreSnapshot&) = default;
 };

@@ -22,8 +22,6 @@ jobs:
     env:
       VCPKG_DOWNLOADS: ${{ github.workspace }}/.vcpkg-downloads
       VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/emcifuntik/index.json,readwrite"
-      # The update layout ships these next to parties_client.exe once their
-      # targets exist; until then the release goes out without it.
       LAUNCHER_EXE: build-retail/updater/launcher/PartiesLauncher.exe
       STUB_EXE: build-retail/updater/boot/Parties.exe
     steps:

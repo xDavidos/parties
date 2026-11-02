@@ -171,14 +171,34 @@ bool test_release_life() {
     auto stable = load(g_dir / "stable.manifest.json", ring, Channel::Stable);
     if (!stable || stable->builds().size() != 1 || stable->builds()[0] != *entry) return fail("stable holds the beta entry");
 
-    if (!ok(run({"revoke", "--base", "beta.manifest.json", "--channel", "beta", "--version", "1.2.3.4", "--serial", "101",
-                 "--expires-days", "45", "--out", "beta-revoked.payload.json", "--keyring", "ring"}),
+    fs::create_directories(g_dir / "revoked");
+    if (!ok(run({"revoke", "--beta", "beta.manifest.json", "--stable", "stable.manifest.json", "--version", "1.2.3.4",
+                 "--serial", "101", "--expires-days", "45", "--out-dir", "revoked", "--keyring", "ring"}),
             "revoke") ||
-        !sign_and_verify("beta-revoked.payload.json", "beta-revoked.manifest.json", "beta"))
+        !sign_and_verify("revoked/beta.payload.json", "revoked/beta.manifest.json", "beta") ||
+        !sign_and_verify("revoked/stable.payload.json", "revoked/stable.manifest.json", "stable"))
         return false;
-    auto revoked = load(g_dir / "beta-revoked.manifest.json", ring, Channel::Beta);
-    if (!revoked || !revoked->builds().empty() || !revoked->is_revoked(entry->version) || revoked->serial() != 101)
-        return fail("revoke drops the build and lists it as revoked");
+    for (Channel c : {Channel::Beta, Channel::Stable}) {
+        auto revoked = load(g_dir / "revoked" / (std::string(channel_name(c)) + ".manifest.json"), ring, c);
+        if (!revoked || !revoked->builds().empty() || !revoked->is_revoked(entry->version) || revoked->serial() != 101)
+            return fail("revoke drops the build from both channels and lists it as revoked in each");
+    }
+
+    // Setup installs follow Stable before anything is promoted, so a revocation
+    // must reach Stable even when it has no manifest yet.
+    fs::create_directories(g_dir / "revoked-first");
+    if (!ok(run({"revoke", "--beta", "beta.manifest.json", "--stable", "none", "--version", "1.2.3.4", "--serial", "102",
+                 "--expires-days", "45", "--out-dir", "revoked-first", "--keyring", "ring"}),
+            "revoke with no stable manifest") ||
+        !sign_and_verify("revoked-first/stable.payload.json", "revoked-first/stable.manifest.json", "stable"))
+        return false;
+    auto first = load(g_dir / "revoked-first" / "stable.manifest.json", ring, Channel::Stable);
+    if (!first || !first->builds().empty() || !first->is_revoked(entry->version))
+        return fail("revoke writes a stable manifest that lists the version as revoked");
+    if (!refused(run({"revoke", "--beta", "beta.manifest.json", "--stable", "stable.manifest.json", "--version", "1.2.3.4",
+                      "--serial", "100", "--expires-days", "45", "--out-dir", "revoked", "--keyring", "ring"}),
+                 "a revoke whose serial does not exceed a channel's", "does not exceed the published serial 100"))
+        return false;
 
     if (!ok(run({"resign", "--base", "stable.manifest.json", "--channel", "stable", "--serial", "now", "--expires-days",
                  "45", "--out", "stable-resigned.payload.json", "--keyring", "ring"}),

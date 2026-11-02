@@ -207,27 +207,40 @@ bool preserve_all(const DataLocation& location, const std::vector<LegacyCandidat
     return true;
 }
 
-bool import_copy(const LegacyCandidate& candidate, const fs::path& db_path, std::string& error) {
-    Db source = open_read_only(candidate.path);
+// A verified copy of `source` at partial_path(db_path), not yet in place.
+bool prepare_copy(const fs::path& source_path, const fs::path& db_path, std::string& error) {
+    Db source = open_read_only(source_path);
     if (!source) {
-        error = "cannot open " + utf8_path(candidate.path) + " read-only";
+        error = "cannot open " + utf8_path(source_path) + " read-only";
         return false;
     }
     const fs::path partial = partial_path(db_path);
     if (!vacuum_into(source.get(), partial, error)) return false;
-
-    {
-        Db copy = open_read_only(partial);
-        if (!copy || !integrity_ok(copy.get())) {
-            error = "the copy failed its integrity check";
-            return false;
-        }
-        if (identity_key(copy.get()) != identity_key(source.get())) {
-            error = "the copied identity does not match the source";
-            return false;
-        }
+    Db copy = open_read_only(partial);
+    if (!copy || !integrity_ok(copy.get())) {
+        error = "the copy failed its integrity check";
+        return false;
     }
-    return commit_file(partial, db_path, error);
+    if (identity_key(copy.get()) != identity_key(source.get())) {
+        error = "the copied identity does not match the source";
+        return false;
+    }
+    return true;
+}
+
+bool import_copy(const LegacyCandidate& candidate, const fs::path& db_path, std::string& error) {
+    return prepare_copy(candidate.path, db_path, error) && commit_file(partial_path(db_path), db_path, error);
+}
+
+bool archived(sqlite3* db, const PublicKey& key) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "SELECT count(*) FROM identity_archive WHERE public_key = ?", -1, &stmt, nullptr) !=
+        SQLITE_OK)
+        return false;
+    sqlite3_bind_blob(stmt, 1, key.data(), static_cast<int>(key.size()), SQLITE_STATIC);
+    const bool found = sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int64(stmt, 0) > 0;
+    sqlite3_finalize(stmt);
+    return found;
 }
 
 void remove_partial(const fs::path& db_path) {
@@ -283,6 +296,57 @@ LegacyImportResult preserve_legacy_data(const DataLocation& location,
     for (std::size_t i = 0; i < all.size(); ++i) all[i] = i;
     preserve_all(location, candidates, all, result);
     return result;
+}
+
+std::optional<IdentityConflict> find_identity_conflict(const DataLocation& location,
+                                                       std::span<const fs::path> search_dirs,
+                                                       std::span<const PublicKey> settled) {
+    Db live = open_read_only(location.db_path());
+    if (!live) return std::nullopt;
+    const std::optional<PublicKey> live_key = identity_key(live.get());
+    std::vector<LegacyCandidate> candidates = find_candidates(location, search_dirs);
+    std::erase_if(candidates, [&](const LegacyCandidate& c) {
+        return !c.readable || !c.identity || c.identity == live_key || archived(live.get(), *c.identity) ||
+               std::ranges::find(settled, *c.identity) != settled.end();
+    });
+    const LegacyImportPlan plan = plan_legacy_import(candidates);
+    if (!plan.import) return std::nullopt;
+    const LegacyCandidate& best = candidates[*plan.import];
+    return IdentityConflict{best.path, *best.identity, live_key};
+}
+
+bool adopt_legacy_database(const DataLocation& location, const fs::path& legacy_db, fs::path& kept,
+                           std::string& error) {
+    const fs::path db_path = location.db_path();
+    std::error_code ec;
+    fs::create_directories(location.backups_dir, ec);
+    kept = unique_backup_path(location.backups_dir, "pre-identity-switch-" + utc_file_stamp());
+    {
+        Db live = open_read_only(db_path);
+        if (!live || !write_snapshot(live.get(), kept, error)) {
+            if (error.empty()) error = "cannot open " + utf8_path(db_path);
+            return false;
+        }
+    }
+    remove_partial(db_path);
+    if (!prepare_copy(legacy_db, db_path, error)) {
+        remove_partial(db_path);
+        return false;
+    }
+    // The live data is safe in `kept`. A crash before the rename leaves no
+    // database, and the next start imports the legacy one anyway.
+    for (const char* suffix : {"", "-wal", "-shm"}) {
+        const fs::path file = sidecar(db_path, suffix);
+        if (fs::exists(file, ec) && !fs::remove(file, ec)) {
+            error = "cannot replace " + utf8_path(file) + ": " + ec.message();
+            remove_partial(db_path);
+            return false;
+        }
+    }
+    if (!commit_file(partial_path(db_path), db_path, error)) return false;
+    LOG_INFO("Legacy import: {} replaced the live database, which is kept as {}", utf8_path(legacy_db),
+             utf8_path(kept));
+    return true;
 }
 
 } // namespace parties::client

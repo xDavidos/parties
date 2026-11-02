@@ -14,6 +14,7 @@
 
 #include <parties/update/link.h>
 #include <parties/update/probation.h>
+#include <parties/update/update_policy.h>
 
 #include <algorithm>
 #include <charconv>
@@ -35,21 +36,6 @@ constexpr auto kCheckInterval = std::chrono::hours(6);
 // exits: a full build over a slow link, but not a hidden process all day.
 constexpr auto kJobCapAfterExit = std::chrono::minutes(15);
 
-std::wstring widen(std::string_view s) {
-    if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
-
-fs::path self_exe() {
-    std::wstring buffer(32768, L'\0');
-    DWORD n = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    buffer.resize(n);
-    return fs::path(buffer);
-}
-
 std::string random_hex(size_t bytes) {
     std::vector<unsigned char> raw(bytes);
     BCryptGenRandom(nullptr, raw.data(), static_cast<ULONG>(raw.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
@@ -70,8 +56,12 @@ void tell_user(const std::string& text) {
 
 link::StatusNotice wire_notice(const Notice& n) {
     link::StatusNotice out;
-    out.kind = n.kind == Notice::Kind::RolledBack ? link::StatusNotice::Kind::RolledBack
-                                                  : link::StatusNotice::Kind::DataRestored;
+    switch (n.kind) {
+    case Notice::Kind::RolledBack: out.kind = link::StatusNotice::Kind::RolledBack; break;
+    case Notice::Kind::DataRestored: out.kind = link::StatusNotice::Kind::DataRestored; break;
+    case Notice::Kind::Withdrawn: out.kind = link::StatusNotice::Kind::Withdrawn; break;
+    case Notice::Kind::RestoreFailed: out.kind = link::StatusNotice::Kind::RestoreFailed; break;
+    }
     out.from = n.from;
     out.to = n.to;
     if (n.preserved) out.preserved = "backups\\" + n.preserved->stem + ".db";
@@ -261,7 +251,16 @@ bool Supervisor::execute(const Effect& effect) {
                 return true;
             } else if constexpr (std::is_same_v<T, RestoreSnapshot>) {
                 if (app_) return (error = "the app is running", false);
-                return data_.restore(e.from, e.preserve_live_as, error);
+                auto restored = data_.restore(e.from, e.preserve_live_as);
+                if (restored) return true;
+                error = restored.error().why;
+                // A restore that cannot even start would otherwise stop every
+                // launch here; one that changed the live data is resumed instead.
+                if (!restored.error().live_changed) {
+                    queue_.push_back(RestoreFailed{});
+                    if (!recovery_) queue_.push_back(StartRequested{});
+                }
+                return false;
             } else if constexpr (std::is_same_v<T, DeleteBuild>) {
                 // A leftover directory is untracked, so the next start collects it.
                 if (!builds_.remove(e.build, state_, error)) log("cannot delete {}: {}", e.build.dir_name(), error);
@@ -380,12 +379,11 @@ void Supervisor::on_request(const link::Request& request) {
                 dispatch(NoticeAcknowledged{});
             } else {
                 if (r.choice == link::ChannelChoice::DowngradeNow) {
-                    submit(DowngradeJob{r.channel});
+                    submit(DowngradeJob{r.channel, state_.channel, state_.intent});
                     return;
                 }
-                ChannelIntent intent = r.choice == link::ChannelChoice::Wait
-                                           ? ChannelIntent{PinnedUntilAtLeast{state_.good.version}}
-                                           : ChannelIntent{Follow{}};
+                ChannelIntent intent =
+                    r.choice == link::ChannelChoice::Wait ? wait_intent(state_) : ChannelIntent{Follow{}};
                 dispatch(ChannelIntentSet{r.channel, intent});
                 start_check();
             }
@@ -422,8 +420,12 @@ void Supervisor::on_worker() {
         return;
     }
     running_job_.reset();
+    auto* downgrade = std::get_if<DowngradeJob>(&outcome->job);
     if (std::holds_alternative<CheckJob>(outcome->job) && outcome->channel != state_.channel) {
         log("dropping a check of the channel the user just left");
+        if (app_) submit(CheckJob{});
+    } else if (downgrade && (downgrade->asked_on != state_.channel || downgrade->asked_with != state_.intent)) {
+        log("dropping a switch to {} the user withdrew", channel_name(downgrade->channel));
         if (app_) submit(CheckJob{});
     } else if (std::holds_alternative<RepairJob>(outcome->job)) {
         for (Event& e : outcome->events) dispatch(std::move(e));
@@ -454,7 +456,6 @@ void Supervisor::submit(Job job) {
     pump();
 }
 
-// Setup and uninstall end the launcher through here as well.
 void Supervisor::cancel_jobs() {
     jobs_.clear();
     worker_.cancel();
@@ -569,7 +570,7 @@ void Supervisor::show_pending_recovery() {
     PendingRecovery pending = *recovery_;
     recovery_.reset();
     RecoveryChoice choice = show_recovery(
-        {pending.why, state_, data_.list(), options_.data.data(), [this] { signal_boot_ok(); }});
+        {pending.why, state_, live_db(), data_.list(), options_.data.data(), [this] { signal_boot_ok(); }});
     if (std::holds_alternative<Quit>(choice)) {
         quit_ = true;
         return;
@@ -646,9 +647,9 @@ int Supervisor::run() {
     data_.prune(state_);
     refresh_uninstall_entry(options_.install, state_.good);
 
-    dispatch(Resumed{});
     if (options_.recover) recovery_ = PendingRecovery{std::nullopt};
-    else dispatch(StartRequested{});
+    dispatch(Resumed{});
+    if (!options_.recover) dispatch(StartRequested{});
 
     while (!quit_) {
         // A repair in flight may make the recovery dialog unnecessary.

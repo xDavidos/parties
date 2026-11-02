@@ -19,14 +19,6 @@ std::optional<uint32_t> u32(const rapidjson::Document& doc, const char* name) {
     return it->value.GetUint();
 }
 
-std::string describe(const ManifestError& e) {
-    return e.detail.empty() ? std::string("invalid entry") : e.detail;
-}
-
-void sort_newest_first(std::vector<BuildEntry>& builds) {
-    std::ranges::sort(builds, std::greater{}, &BuildEntry::version);
-}
-
 } // namespace
 
 Result<BuildInfo> parse_build_info(std::string_view json) {
@@ -62,12 +54,12 @@ Result<BuildEntry> make_entry(const BuildInfo& info, std::span<const StagedFile>
     // The same parser the launcher runs, so an entry the tool emits is one
     // verify_manifest accepts.
     auto checked = parse_build_entry(write_build_entry(entry));
-    if (!checked) return fail(describe(checked.error()));
+    if (!checked) return fail(checked.error().detail);
     return *checked;
 }
 
 std::vector<BuildEntry> retained(std::vector<BuildEntry> builds, size_t keep) {
-    sort_newest_first(builds);
+    std::ranges::sort(builds, std::greater{}, &BuildEntry::version);
     std::vector<bool> kept(builds.size(), false);
     for (size_t i = 0; i < builds.size() && i < keep; ++i) kept[i] = true;
     uint32_t newest_protocol = 0;
@@ -123,8 +115,13 @@ Result<ManifestPayload> promote(const ManifestPayload& beta, const ManifestPaylo
     return add_build(stable, Channel::Stable, *entry, issue, keep);
 }
 
-Result<ManifestPayload> revoke(const ManifestPayload& base, const Version& version, const Issue& issue) {
-    auto next = reissue(base, issue);
+Result<ManifestPayload> revoke(const ManifestPayload* base, Channel channel, const Version& version,
+                               const Issue& issue) {
+    ManifestPayload empty;
+    empty.channel = channel;
+    const ManifestPayload& from = base ? *base : empty;
+    if (from.channel != channel) return fail("the base manifest is not for channel " + std::string(channel_name(channel)));
+    auto next = reissue(from, issue);
     if (!next) return next;
     std::erase_if(next->builds, [&](const BuildEntry& b) { return b.version == version; });
     if (std::ranges::find(next->revoked, version) == next->revoked.end()) next->revoked.push_back(version);

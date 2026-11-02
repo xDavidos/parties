@@ -38,10 +38,8 @@ inline constexpr ColumnAddition kSavedServersPassword[] = {
     {"saved_servers", "password", "TEXT NOT NULL DEFAULT ''"},
 };
 
-// Ordered and forward-only. Each step runs in one transaction together with
-// the parties_schema update. Never edit a released step; append a new one.
-inline constexpr Migration kMigrations[] = {
-    {1, 1, R"SQL(
+// Every table of data version 1, each created only if missing.
+inline constexpr const char* kVersion1Tables = R"SQL(
         CREATE TABLE IF NOT EXISTS identity (
             id          INTEGER PRIMARY KEY CHECK (id = 1),
             seed_phrase TEXT NOT NULL,
@@ -80,7 +78,12 @@ inline constexpr Migration kMigrations[] = {
             saved_at TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (host, port)
         );
-    )SQL"},
+    )SQL";
+
+// Ordered and forward-only. Each step runs in one transaction together with
+// the parties_schema update. Never edit a released step; append a new one.
+inline constexpr Migration kMigrations[] = {
+    {1, 1, kVersion1Tables},
     {2, 0, R"SQL(
         CREATE TABLE identity_archive (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,6 +94,10 @@ inline constexpr Migration kMigrations[] = {
             reason      TEXT NOT NULL
         );
     )SQL", kSavedServersPassword},
+    // Builds before the identity table wrote only tofu_certs, saved_servers
+    // and preferences. Such a database counts as legacy version 1, so step 1
+    // never ran on it.
+    {3, 0, kVersion1Tables},
 };
 
 // The version a database reaches after every step in `migrations` ran.

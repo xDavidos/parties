@@ -229,15 +229,18 @@ bool Settings::apply_migration(const schema::Migration& migration, std::string& 
 
     // Re-read under the write lock so a step another process already applied is skipped.
     const VersionRead current = read_version(db_);
-    bool ok = current.ok;
-    if (!ok) error = current.error;
     std::string ignored;
-    if (ok && current.version.version >= migration.to_version) {
+    if (!current.ok) {
+        error = current.error;
+        exec("ROLLBACK", ignored);
+        return false;
+    }
+    if (current.version.version >= migration.to_version) {
         exec("ROLLBACK", ignored);
         return true;
     }
 
-    ok = ok && exec(migration.sql, error);
+    bool ok = exec(migration.sql, error);
     for (const schema::ColumnAddition& add : migration.add_columns)
         ok = ok && add_column_if_missing(db_, add, error);
     const schema::Version next{migration.to_version,

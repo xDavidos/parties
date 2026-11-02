@@ -11,11 +11,11 @@ namespace parties::update {
 
 namespace {
 
+using json::Names;
+using json::name_of;
+using json::value_of;
 using json::Value;
 using json::Writer;
-
-template <class E, size_t N>
-using Names = std::array<std::pair<E, std::string_view>, N>;
 
 constexpr Names<FailureReason, 10> kReasons{{
     {FailureReason::CrashedBeforeHealthy, "crashed_before_healthy"},
@@ -30,23 +30,12 @@ constexpr Names<FailureReason, 10> kReasons{{
     {FailureReason::UserRolledBack, "user_rolled_back"},
 }};
 
-constexpr Names<Notice::Kind, 2> kNoticeKinds{{
+constexpr Names<Notice::Kind, 4> kNoticeKinds{{
     {Notice::Kind::RolledBack, "rolled_back"},
     {Notice::Kind::DataRestored, "data_restored"},
+    {Notice::Kind::Withdrawn, "withdrawn"},
+    {Notice::Kind::RestoreFailed, "restore_failed"},
 }};
-
-template <class E, size_t N>
-std::string_view name_of(const Names<E, N>& names, E value) {
-    return std::ranges::find(names, value, &std::pair<E, std::string_view>::first)->second;
-}
-
-template <class E, size_t N>
-std::optional<E> value_of(const Names<E, N>& names, std::optional<std::string_view> text) {
-    if (!text) return std::nullopt;
-    auto it = std::ranges::find(names, *text, &std::pair<E, std::string_view>::second);
-    if (it == names.end()) return std::nullopt;
-    return it->first;
-}
 
 bool is_safe_stem(std::string_view stem) {
     if (stem.empty() || stem.size() > 200 || stem.front() == '.' || stem.find("..") != std::string_view::npos)
@@ -154,7 +143,7 @@ void write_operation(Writer& w, const Operation& o) {
                 json::key(w, "healthy_uptime_s"); w.Uint(v.healthy_uptime_s);
             } else {
                 write_kind(w, "restoring");
-                write_snapshot(w, "from", v.from);
+                if (v.from) write_snapshot(w, "from", *v.from);
                 json::key(w, "preserve_live_as"); json::str(w, v.preserve_live_as.stem);
             }
         },
@@ -221,7 +210,6 @@ std::optional<Verdict> parse_verdict(const Value* v) {
 }
 
 std::optional<BuildRecord> parse_record(const Value& v) {
-    BuildRecord r;
     auto id = id_at(v, "id");
     auto schema = json::u32(v, "data_schema");
     auto floor = json::u32(v, "data_compat_floor");
@@ -271,12 +259,28 @@ std::optional<Operation> parse_operation(const Value* v) {
         return Running{*build, *healthy, *uptime};
     }
     if (kind == "restoring") {
-        auto from = parse_snapshot(json::object(*v, "from"));
+        auto from = optional_member<Snapshot>(*v, "from", parse_snapshot);
         auto keep = parse_stem(json::string(*v, "preserve_live_as"));
         if (!from || !keep) return std::nullopt;
         return Restoring{*from, *keep};
     }
     return std::nullopt;
+}
+
+// Absent in states written before revocations were kept: none known.
+std::optional<Revocations> parse_revocations(const Value* v) {
+    Revocations r;
+    if (!v) return r;
+    for (Channel c : {Channel::Stable, Channel::Beta}) {
+        const Value* list = json::array(*v, std::string(channel_name(c)).c_str());
+        if (!list) continue;
+        for (const auto& item : list->GetArray()) {
+            auto version = item.IsString() ? Version::parse({item.GetString(), item.GetStringLength()}) : std::nullopt;
+            if (!version) return std::nullopt;
+            r.of(c).push_back(*version);
+        }
+    }
+    return r;
 }
 
 std::optional<ChannelIntent> parse_intent(const Value* v) {
@@ -381,6 +385,15 @@ std::string write_state(const SupervisorState& s) {
         }
         w.EndObject();
     }
+    json::key(w, "revoked");
+    w.StartObject();
+    for (Channel c : {Channel::Stable, Channel::Beta}) {
+        json::key(w, channel_name(c));
+        w.StartArray();
+        for (const Version& v : (c == Channel::Beta ? s.revoked.beta : s.revoked.stable)) json::str(w, v.to_string());
+        w.EndArray();
+    }
+    w.EndObject();
     write_activation(w, s.activation);
     write_operation(w, s.operation);
     w.EndObject();
@@ -400,10 +413,12 @@ std::expected<SupervisorState, StateParseError> parse_state(std::string_view tex
     auto good = id_at(doc, "good");
     auto previous = optional_member<BuildId>(doc, "previous_good", parse_id);
     auto notice = optional_member<Notice>(doc, "notice", parse_notice);
+    auto revoked = parse_revocations(json::object(doc, "revoked"));
     auto activation = parse_activation(json::object(doc, "activation"));
     auto operation = parse_operation(json::object(doc, "operation"));
     const Value* builds = json::array(doc, "builds");
-    if (!generation || !channel || !intent || !good || !previous || !notice || !activation || !operation || !builds)
+    if (!generation || !channel || !intent || !good || !previous || !notice || !revoked || !activation || !operation ||
+        !builds)
         return std::unexpected(StateParseError::Malformed);
     s.generation = *generation;
     s.channel = *channel;
@@ -411,6 +426,7 @@ std::expected<SupervisorState, StateParseError> parse_state(std::string_view tex
     s.good = *good;
     s.previous_good = *previous;
     s.notice = *notice;
+    s.revoked = std::move(*revoked);
     s.activation = *activation;
     s.operation = *operation;
     for (const auto& b : builds->GetArray()) {

@@ -60,8 +60,10 @@ Result<ManifestPayload> promote(const ManifestPayload& beta, const ManifestPaylo
                                 const Issue& issue, size_t keep);
 
 // Drops the build and lists its version as revoked, so launchers running it
-// move off it. Repeating a revocation only reissues.
-Result<ManifestPayload> revoke(const ManifestPayload& base, const Version& version, const Issue& issue);
+// move off it. A null base is a channel with no manifest yet. Repeating a
+// revocation only reissues. The tool revokes from every channel at once.
+Result<ManifestPayload> revoke(const ManifestPayload* base, Channel channel, const Version& version,
+                               const Issue& issue);
 
 // Same builds and revocations, new serial and expiry.
 Result<ManifestPayload> reissue(const ManifestPayload& base, const Issue& issue);

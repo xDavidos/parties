@@ -16,9 +16,23 @@ std::string utf8(const fs::path& path) {
     return {reinterpret_cast<const char*>(u8.data()), u8.size()};
 }
 
+std::wstring widen(std::string_view s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
 std::string last_error_text() {
     DWORD code = GetLastError();
     return std::system_category().message(static_cast<int>(code)) + " (" + std::to_string(code) + ")";
+}
+
+fs::path self_exe() {
+    std::wstring buffer(32768, L'\0');
+    buffer.resize(GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size())));
+    return buffer;
 }
 
 namespace {
@@ -40,33 +54,27 @@ bool write_all(HANDLE h, std::string_view bytes) {
     return true;
 }
 
-class Sha256Hasher {
-public:
-    Sha256Hasher() {
-        if (BCryptOpenAlgorithmProvider(&alg_, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) return;
-        if (BCryptCreateHash(alg_, &hash_, nullptr, 0, nullptr, 0, 0) != 0) hash_ = nullptr;
-    }
-    ~Sha256Hasher() {
-        if (hash_) BCryptDestroyHash(hash_);
-        if (alg_) BCryptCloseAlgorithmProvider(alg_, 0);
-    }
-    bool ok() const { return hash_ != nullptr; }
-    bool update(const void* data, ULONG size) {
-        return BCryptHashData(hash_, static_cast<PUCHAR>(const_cast<void*>(data)), size, 0) == 0;
-    }
-    std::optional<Sha256> finish() {
-        Sha256 out;
-        if (BCryptFinishHash(hash_, out.bytes.data(), static_cast<ULONG>(out.bytes.size()), 0) != 0)
-            return std::nullopt;
-        return out;
-    }
-
-private:
-    BCRYPT_ALG_HANDLE alg_ = nullptr;
-    BCRYPT_HASH_HANDLE hash_ = nullptr;
-};
-
 } // namespace
+
+Sha256Hasher::Sha256Hasher() {
+    if (BCryptOpenAlgorithmProvider(&alg_, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) return;
+    if (BCryptCreateHash(alg_, &hash_, nullptr, 0, nullptr, 0, 0) != 0) hash_ = nullptr;
+}
+
+Sha256Hasher::~Sha256Hasher() {
+    if (hash_) BCryptDestroyHash(hash_);
+    if (alg_) BCryptCloseAlgorithmProvider(alg_, 0);
+}
+
+bool Sha256Hasher::update(const void* data, unsigned long size) {
+    return BCryptHashData(hash_, static_cast<PUCHAR>(const_cast<void*>(data)), size, 0) == 0;
+}
+
+std::optional<Sha256> Sha256Hasher::finish() {
+    Sha256 out;
+    if (BCryptFinishHash(hash_, out.bytes.data(), static_cast<ULONG>(out.bytes.size()), 0) != 0) return std::nullopt;
+    return out;
+}
 
 std::optional<std::string> read_file(const fs::path& path) {
     Handle f{CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,

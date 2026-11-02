@@ -54,7 +54,6 @@ BuildRecord with_verdict(BuildRecord r, Verdict v) {
     return r;
 }
 
-
 SupervisorState steady(const BuildRecord& good = A) {
     SupervisorState s = initial_state(good, Channel::Stable);
     s.generation = 10;
@@ -93,6 +92,10 @@ SupervisorState with_op(SupervisorState s, Operation op) {
 
 Running run(const BuildRecord& b, bool healthy = false, uint32_t uptime = 0) { return {b.id, healthy, uptime}; }
 
+SupervisorState revoked(SupervisorState s, const BuildRecord& b, Channel channel = Channel::Stable) {
+    s.revoked.of(channel).push_back(b.id.version);
+    return s;
+}
 
 std::string describe(const Effect& e) {
     return std::visit(
@@ -103,7 +106,7 @@ std::string describe(const Effect& e) {
             else if constexpr (std::is_same_v<T, Spawn>) return "Spawn " + x.build.version.to_string();
             else if constexpr (std::is_same_v<T, TerminateApp>) return "TerminateApp";
             else if constexpr (std::is_same_v<T, RestoreSnapshot>)
-                return "RestoreSnapshot " + x.from.stem + " keep " + x.preserve_live_as.stem;
+                return "RestoreSnapshot " + (x.from ? x.from->stem : "nothing") + " keep " + x.preserve_live_as.stem;
             else if constexpr (std::is_same_v<T, DeleteBuild>) return "DeleteBuild " + x.build.version.to_string();
             else if constexpr (std::is_same_v<T, Redownload>) return "Redownload " + x.build.version.to_string();
             else if constexpr (std::is_same_v<T, ShowRecovery>) {
@@ -173,6 +176,11 @@ std::vector<Row> table() {
     row({"staged build that cannot open the data is dropped", staged(D, std::nullopt, C), StartRequested{}, kV3,
          {"Commit", "DeleteBuild 0.9.0.0", "Commit", "Spawn 1.2.0.0"},
          [](auto& s) { return steady_on(s, C) && !s.find(D.id); }});
+    row({"staged build is trusted at once when good cannot open the data", staged(C), StartRequested{}, kV3,
+         {"Commit", "Commit", "Spawn 1.2.0.0"}, [](auto& s) {
+             return steady_on(s, C) && s.previous_good == A.id && std::holds_alternative<Proven>(s.find(C.id)->verdict) &&
+                    running(s) && running(s)->build == C.id;
+         }});
     row({"staged downgrade on a chosen backup", staged(D, backup_v1, C), StartRequested{}, kV3,
          {"Commit", "RestoreSnapshot backup-v1 keep " + snap("pre-downgrade", D, 11), "Commit", "Spawn 0.9.0.0"},
          [](auto& s) {
@@ -214,9 +222,19 @@ std::vector<Row> table() {
              return steady_on(s, A) && s.notice && s.notice->preserved &&
                     s.notice->preserved->stem == snap("rolled-back", C, 11);
          }});
-    row({"crash before health, breaking migration, no snapshot", with_op(probation(C), run(C)),
-         AppExited{ExitKind::Abnormal}, kV3, {"Commit", "ShowRecovery DataIncompatible", "SignalBootOk"},
-         [](auto& s) { return steady_on(s, A) && quarantined_for(s, C, FailureReason::CrashedBeforeHealthy); }});
+    row({"crash before health on data the candidate created sets it aside", with_op(probation(C), run(C)),
+         AppExited{ExitKind::Abnormal}, kV3,
+         {"Commit", "RestoreSnapshot nothing keep " + snap("rolled-back", C, 11), "Commit", "Spawn 1.0.0.0"},
+         [](auto& s) {
+             return steady_on(s, A) && quarantined_for(s, C, FailureReason::CrashedBeforeHealthy) && s.notice &&
+                    s.notice->preserved && s.notice->preserved->stem == snap("rolled-back", C, 11);
+         }});
+    row({"second crash after health on data the candidate created sets it aside",
+         with_op(probation(C, std::nullopt, 1), run(C, true)), AppExited{ExitKind::Abnormal}, kV3,
+         {"Commit", "RestoreSnapshot nothing keep " + snap("rolled-back", C, 11), "Commit"},
+         [](auto& s) { return steady_on(s, A) && std::holds_alternative<Idle>(s.operation); }});
+    row({"start after setting the candidate's data aside", with_op(steady(), Restoring{std::nullopt, {"keep"}}),
+         StartRequested{}, kV3, {"RestoreSnapshot nothing keep keep", "Commit", "Commit", "Spawn 1.0.0.0"}});
     row({"init failure", with_op(probation(B, pre_b), run(B)), AppExited{ExitKind::InitFailed}, kV1,
          {"Commit", "Spawn 1.0.0.0"}, [](auto& s) { return quarantined_for(s, B, FailureReason::InitFailed); }});
     row({"hang killed by the deadline", with_op(probation(B, pre_b), run(B)), AppExited{ExitKind::KilledHung}, kV1,
@@ -279,6 +297,13 @@ std::vector<Row> table() {
          BuildSealed{B, std::nullopt}, kV1, {}});
     row({"no staging during probation", probation(B), BuildSealed{C, std::nullopt}, kV1, {}});
     row({"sealing good again (repair) changes nothing", steady(), BuildSealed{A, std::nullopt}, kV1, {}});
+    row({"a seal stages a newer previous good again", with_previous(steady(), B), BuildSealed{B, std::nullopt}, kV1,
+         {"Commit"}, [](auto& s) {
+             auto* st = std::get_if<Staged>(&s.activation);
+             return st && st->build == B.id && s.previous_good == B.id && s.builds.size() == 2;
+         }});
+    row({"sealing an older previous good again (repair) changes nothing", with_previous(steady(B), A),
+         BuildSealed{A, std::nullopt}, kV1, {}});
     row({"a downgrade stages a new older build", steady(C), UserDowngrade{D, backup_v1}, kV3, {"Commit"},
          [](auto& s) {
              auto* st = std::get_if<Staged>(&s.activation);
@@ -330,10 +355,73 @@ std::vector<Row> table() {
          {"Redownload 1.0.0.0", "Commit", "ShowRecovery Repairing", "SignalBootOk"}});
     row({"previous good corrupt", with_previous(steady(), D), BuildCorrupt{D.id}, kV1, {"Redownload 0.9.0.0"}});
     row({"staged corrupt", staged(B), BuildCorrupt{B.id}, kV1, {"Commit", "DeleteBuild 1.1.0.0"}});
-    row({"revoked staged build", staged(B), ManifestSeen{{B.id.version}}, kV1, {"Commit", "DeleteBuild 1.1.0.0"}});
-    row({"revoked candidate between runs", probation(B, pre_b), ManifestSeen{{B.id.version}}, kV2, {"Commit"},
-         [](auto& s) { return quarantined_for(s, B, FailureReason::Revoked); }});
-    row({"revoked candidate while it runs waits", with_op(probation(B), run(B)), ManifestSeen{{B.id.version}}, kV2, {}});
+    row({"revoked staged build", staged(B), ManifestSeen{Channel::Stable, {B.id.version}}, kV1,
+         {"Commit", "DeleteBuild 1.1.0.0"}, [](auto& s) { return s.revoked.stable == std::vector{B.id.version}; }});
+    row({"revoked candidate between runs", probation(B, pre_b), ManifestSeen{Channel::Stable, {B.id.version}}, kV2,
+         {"Commit"}, [](auto& s) { return quarantined_for(s, B, FailureReason::Revoked); }});
+    row({"revoked candidate while it runs is kept until it exits", with_op(probation(B), run(B, true)),
+         ManifestSeen{Channel::Beta, {B.id.version}}, kV2, {"Commit"},
+         [](auto& s) { return prob(s) && s.revoked.beta == std::vector{B.id.version} && s.revoked.stable.empty(); }});
+    row({"a manifest replaces its channel's revocations", revoked(steady(), B), ManifestSeen{Channel::Stable, {}}, kV1,
+         {"Commit"}, [](auto& s) { return !s.revoked.contains(B.id.version); }});
+    row({"the same revocations change nothing", revoked(steady(), B), ManifestSeen{Channel::Stable, {B.id.version}},
+         kV1, {}});
+    row({"a revoked candidate is never confirmed", revoked(with_op(probation(B), run(B, true, 60)), B),
+         ConfirmTimerElapsed{600}, kV2, {}});
+    row({"a revoked candidate's clean exit rolls back", revoked(with_op(probation(B, pre_b), run(B, true, 60)), B),
+         AppExited{ExitKind::Clean}, kV2, {"Commit"},
+         [](auto& s) { return steady_on(s, A) && quarantined_for(s, B, FailureReason::Revoked) && !running(s); }});
+    row({"a revoked candidate's crash before health starts good", revoked(with_op(probation(B, pre_b), run(B)), B),
+         AppExited{ExitKind::Abnormal}, kV2, {"Commit", "Spawn 1.0.0.0"},
+         [](auto& s) { return steady_on(s, A) && quarantined_for(s, B, FailureReason::Revoked); }});
+    row({"an unobserved run of a revoked candidate rolls back", revoked(with_op(probation(B, pre_b), run(B, true)), B),
+         Resumed{}, kV2, {"Commit"},
+         [](auto& s) { return steady_on(s, A) && quarantined_for(s, B, FailureReason::Revoked); }});
+    row({"a revoked candidate is not restarted", revoked(probation(B, pre_b), B), StartRequested{}, kV2,
+         {"Commit", "Spawn 1.0.0.0"},
+         [](auto& s) { return steady_on(s, A) && quarantined_for(s, B, FailureReason::Revoked); }});
+    row({"a revoked staged build is not started", revoked(staged(B), B, Channel::Beta), StartRequested{}, kV1,
+         {"Commit", "DeleteBuild 1.1.0.0", "Commit", "Spawn 1.0.0.0"}});
+    row({"a revoked build is not staged", revoked(steady(), B), BuildSealed{B, std::nullopt}, kV1, {}});
+    row({"a revoked build is not retried", revoked(add(steady(), B, Quarantined{FailureReason::Revoked}), B),
+         UserRetry{B.id}, kV1, {}});
+    row({"no rollback to a revoked previous good", revoked(with_previous(steady(), D), D),
+         UserRollback{D.id, std::nullopt}, kV1, {}});
+    row({"no downgrade to a revoked build", revoked(with_previous(steady(), D), D), UserDowngrade{D, std::nullopt},
+         kV1, {}});
+
+    row({"a revoked good gets a withdrawn notice", with_previous(steady(B), A), ManifestSeen{Channel::Stable, {B.id.version}},
+         kV2, {"Commit"}, [](auto& s) {
+             return steady_on(s, B) && s.notice && s.notice->kind == Notice::Kind::Withdrawn &&
+                    s.notice->from == B.id.version;
+         }});
+    {
+        SupervisorState s = with_previous(steady(B), A);
+        s.notice = Notice{Notice::Kind::RolledBack, C.id.version, B.id.version, SnapshotId{"rolled-back-c"}};
+        row({"a withdrawn notice never replaces a pending one", s, ManifestSeen{Channel::Stable, {B.id.version}}, kV2,
+             {"Commit"}, [](auto& n) { return n.notice && n.notice->kind == Notice::Kind::RolledBack; }});
+    }
+    {
+        SupervisorState s = revoked(with_previous(steady(B), A), B);
+        row({"a revocation already known gives no second notice", s, ManifestSeen{Channel::Beta, {B.id.version}}, kV2,
+             {"Commit"}, [](auto& n) { return !n.notice; }});
+    }
+    row({"leave a revoked good for previous good", revoked(with_previous(steady(B), A), B), LeaveRevoked{A}, kV2,
+         {"Commit"}, [](auto& s) {
+             auto* st = std::get_if<Staged>(&s.activation);
+             return st && st->build == A.id && !st->restore_first && s.previous_good == A.id;
+         }});
+    row({"leave a revoked good for a newer fix", revoked(steady(), A), LeaveRevoked{B}, kV1, {"Commit"},
+         [](auto& s) { return std::get_if<Staged>(&s.activation) && s.find(B.id); }});
+    row({"no leaving a good that is not revoked", with_previous(steady(B), A), LeaveRevoked{A}, kV2, {}});
+    row({"no leaving for a revoked build", revoked(revoked(with_previous(steady(B), A), B), A), LeaveRevoked{A}, kV2, {}});
+    row({"no leaving for a quarantined build", revoked(add(steady(), B, Quarantined{FailureReason::InitFailed}), A),
+         LeaveRevoked{B}, kV1, {}});
+    row({"no leaving during probation", revoked(probation(B), A), LeaveRevoked{D}, kV1, {}});
+    row({"confirming off a revoked good quarantines it", revoked(with_op(probation(B), run(B, true, 60)), A),
+         ConfirmTimerElapsed{600}, kV2, {"Commit"}, [](auto& s) {
+             return s.good == B.id && s.previous_good == A.id && quarantined_for(s, A, FailureReason::Revoked);
+         }});
     row({"channel switch drops the staged build", staged(B), ChannelIntentSet{Channel::Beta, Follow{}}, kV1,
          {"Commit", "DeleteBuild 1.1.0.0"}, [](auto& s) { return s.channel == Channel::Beta && !s.find(B.id); }});
     row({"pin lift keeps the staged build", staged(B), ChannelIntentSet{Channel::Stable, PinnedUntilAtLeast{B.id.version}},
@@ -345,6 +433,19 @@ std::vector<Row> table() {
         row({"acknowledge notice", s, NoticeAcknowledged{}, kV1, {"Commit"}, [](auto& n) { return !n.notice; }});
     }
     row({"acknowledge with no notice", steady(), NoticeAcknowledged{}, kV1, {}});
+    row({"a restore that cannot start is given up", with_op(steady(), Restoring{backup_v1, SnapshotId{"pre-restore-x"}}),
+         RestoreFailed{}, kV1, {"Commit"}, [](auto& s) {
+             return steady_on(s, A) && std::holds_alternative<Idle>(s.operation) && s.notice &&
+                    s.notice->kind == Notice::Kind::RestoreFailed;
+         }});
+    {
+        SupervisorState s = with_op(probation(D, Snapshot{{"pre-downgrade-d"}, kV1}), Restoring{backup_v1, SnapshotId{"pre-downgrade-d"}});
+        std::get<Probation>(s.activation).restore_on_rollback = true;
+        row({"a downgrade whose restore cannot start drops the candidate", s, RestoreFailed{}, kV1,
+             {"Commit", "DeleteBuild 0.9.0.0"},
+             [](auto& n) { return steady_on(n, A) && !n.find(D.id) && std::holds_alternative<Idle>(n.operation); }});
+    }
+    row({"no restore to give up", steady(), RestoreFailed{}, kV1, {}});
     return rows;
 }
 
@@ -389,6 +490,7 @@ struct World {
     bool app_healthy = false;
     bool app_killed = false;
     std::optional<BuildId> lease_failed;
+    bool restore_failed = false;  // the backup could not be read; nothing changed
     uint64_t next_content = 1;
 };
 
@@ -433,10 +535,13 @@ const Commit* last_commit(const std::vector<Effect>& effects, size_t end) {
     return last;
 }
 
-bool has_spawn_or_recovery(const std::vector<Effect>& effects, const BuildId& build) {
+// When the fallback could open the data from before the candidate, a rollback
+// hands that data back, so the fallback never meets data it cannot open.
+bool starts_fallback(const std::vector<Effect>& effects, const BuildId& build, bool fallback_read_pre_data) {
     return std::ranges::any_of(effects, [&](const Effect& e) {
         auto* s = std::get_if<Spawn>(&e);
-        return (s && s->build == build) || std::holds_alternative<ShowRecovery>(e);
+        auto* r = std::get_if<ShowRecovery>(&e);
+        return (s && s->build == build) || (r && (r->why != RecoveryReason::DataIncompatible || !fallback_read_pre_data));
     });
 }
 
@@ -457,7 +562,9 @@ std::string event_name(const Event& e) {
             else if constexpr (std::is_same_v<T, UserRestore>) return "UserRestore " + x.from.id.stem;
             else if constexpr (std::is_same_v<T, BuildCorrupt>) return "BuildCorrupt " + x.build.version.to_string();
             else if constexpr (std::is_same_v<T, ManifestSeen>) return "ManifestSeen";
+            else if constexpr (std::is_same_v<T, LeaveRevoked>) return "LeaveRevoked " + x.record.id.version.to_string();
             else if constexpr (std::is_same_v<T, ChannelIntentSet>) return "ChannelIntentSet";
+            else if constexpr (std::is_same_v<T, RestoreFailed>) return "RestoreFailed";
             else return "NoticeAcknowledged";
         },
         e);
@@ -470,7 +577,6 @@ bool retriable(const Event& e) {
            !std::holds_alternative<ConfirmTimerElapsed>(e);
 }
 
-
 void check_state(Walk& w, const SupervisorState& s) {
     const BuildRecord* good = s.find(s.good);
     w.check(good && std::holds_alternative<Proven>(good->verdict), "good is a proven record");
@@ -481,16 +587,19 @@ void check_state(Walk& w, const SupervisorState& s) {
     if (auto* st = std::get_if<Staged>(&s.activation)) {
         const BuildRecord* r = s.find(st->build);
         w.check(r && st->build != s.good && !r->quarantined(), "staged is a distinct, eligible record");
+        w.check(!s.revoked.contains(st->build.version), "a revoked build is never staged");
     }
     if (auto* p = std::get_if<Probation>(&s.activation)) {
         w.check(p->candidate != s.good, "good is never the candidate");
         w.check(p->fallback == s.good, "fallback is good during probation");
         const BuildRecord* r = s.find(p->candidate);
         w.check(r && !r->quarantined(), "the candidate is an eligible record");
+        auto* run = std::get_if<Running>(&s.operation);
+        w.check(!s.revoked.contains(p->candidate.version) || (run && run->build == p->candidate),
+                "a revoked candidate is only the app that ran when the revocation arrived");
     }
     if (auto* r = std::get_if<Running>(&s.operation)) w.check(s.find(r->build) != nullptr, "running build has a record");
 }
-
 
 void check_step(Walk& w, const SupervisorState& before, const Event& event, const Context& ctx, const Step& out) {
     const auto& fx = out.effects;
@@ -498,6 +607,7 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
     w.check(last ? last->state == out.next : out.next == before, "next is the last committed state");
     uint64_t gen = before.generation;
     const SupervisorState* committed = &before;
+    std::optional<DataInfo> data_after = ctx.live_db;
     for (const Effect& e : fx) {
         if (auto* c = std::get_if<Commit>(&e)) {
             w.check(c->state.generation == ++gen, "each commit advances the generation by one");
@@ -506,12 +616,16 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
         } else if (auto* sp = std::get_if<Spawn>(&e)) {
             auto* r = std::get_if<Running>(&committed->operation);
             w.check(r && r->build == sp->build && !r->healthy, "every spawn is committed as Running first");
+            w.check(sp->build == committed->good || !committed->revoked.contains(sp->build.version),
+                    "a revoked build is never spawned as a candidate");
         } else if (auto* rs = std::get_if<RestoreSnapshot>(&e)) {
             w.check(!rs->preserve_live_as.stem.empty() && rs->preserve_live_as != rs->from,
                     "every restore preserves the live data under its own name");
             auto* r = std::get_if<Restoring>(&committed->operation);
-            w.check(r && r->from.id == rs->from && r->preserve_live_as == rs->preserve_live_as,
+            auto committed_from = r && r->from ? std::optional(r->from->id) : std::nullopt;
+            w.check(r && committed_from == rs->from && r->preserve_live_as == rs->preserve_live_as,
                     "every restore is committed as Restoring first");
+            if (r) data_after = r->from ? std::optional(r->from->data) : std::nullopt;
         } else if (auto* d = std::get_if<DeleteBuild>(&e)) {
             const SupervisorState& s = *committed;
             bool protected_build = d->build == s.good || (s.previous_good && d->build == *s.previous_good);
@@ -529,7 +643,11 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
         if (std::ranges::any_of(fx, [](const Effect& e) { return std::holds_alternative<RestoreSnapshot>(e); }))
             ++w.stats.rollbacks_with_restore;
         bool confirmed = out.next.good == p->candidate;
-        if (confirmed) {
+        if (std::holds_alternative<RestoreFailed>(event)) {
+            const BuildRecord* c = out.next.find(p->candidate);
+            w.check(out.next.good == p->fallback && (!c || out.next.previous_good == p->candidate),
+                    "a candidate whose restore could not start is dropped");
+        } else if (confirmed) {
             w.check(out.next.previous_good == p->fallback, "confirm keeps the old good as previous_good");
         } else {
             const BuildRecord* c = out.next.find(p->candidate);
@@ -538,14 +656,34 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
             auto* exit = std::get_if<AppExited>(&event);
             bool startup_failure = exit && run && !run->healthy && exit->kind != ExitKind::Clean &&
                                    exit->kind != ExitKind::DataUnavailable;
+            const BuildRecord* fb = out.next.find(p->fallback);
+            const bool read_pre = !p->restore_on_rollback || !p->pre_snapshot ||
+                                  (fb && compatibility(fb->data_schema, p->pre_snapshot->data) !=
+                                             Compatibility::Incompatible);
             if (startup_failure || std::holds_alternative<UserRollback>(event))
-                w.check(has_spawn_or_recovery(fx, p->fallback), "a startup failure starts the fallback at once");
-            Step resumed = step(out.next, Resumed{}, ctx);
-            Step start = step(resumed.next, StartRequested{}, ctx);
+                w.check(starts_fallback(fx, p->fallback, read_pre), "a startup failure starts the fallback at once");
+            const Context after{data_after, ctx.policy};
+            Step resumed = step(out.next, Resumed{}, after);
+            Step start = step(resumed.next, StartRequested{}, after);
             if (!std::holds_alternative<Running>(resumed.next.operation))
-                w.check(has_spawn_or_recovery(start.effects, p->fallback), "after a rollback the next start runs the fallback");
+                w.check(starts_fallback(start.effects, p->fallback, read_pre), "after a rollback the next start runs the fallback");
         }
     }
+
+    if (out.next.good != before.good)
+        w.check(!out.next.revoked.contains(out.next.good.version), "a revoked build never becomes good");
+    const bool restores = std::ranges::any_of(fx, [](const Effect& e) { return std::holds_alternative<RestoreSnapshot>(e); });
+    if (std::holds_alternative<LeaveRevoked>(event)) {
+        auto* st = std::get_if<Staged>(&out.next.activation);
+        w.check(!restores && (!st || !st->restore_first || out.next.activation == before.activation),
+                "leaving a revoked good never restores data");
+    }
+    if (std::holds_alternative<ManifestSeen>(event))
+        w.check(!restores || std::holds_alternative<Probation>(before.activation),
+                "a revocation restores data only to roll a candidate back");
+    if (std::holds_alternative<RestoreFailed>(event))
+        w.check(!restores && !std::holds_alternative<Restoring>(out.next.operation),
+                "a restore that could not start is given up, not retried");
 
     Step r1 = step(out.next, Resumed{}, ctx);
     Step r2 = step(r1.next, Resumed{}, ctx);
@@ -581,7 +719,6 @@ void check_step(Walk& w, const SupervisorState& before, const Event& event, cons
     }
 }
 
-
 void open_db(World& world, const BuildRecord& build) {
     world.app_opened_db = true;
     Compatibility c = world.live ? compatibility(build.data_schema, world.live->info) : Compatibility::MigratesForward;
@@ -595,9 +732,10 @@ void open_db(World& world, const BuildRecord& build) {
     world.live = Data{info, world.next_content++};
 }
 
-void apply(Walk& w, World& world, const Effect& e) {
+// False: the effect failed, so the shell runs none after it.
+bool apply(Walk& w, World& world, const Effect& e) {
     if (auto* t = std::get_if<TakeSnapshot>(&e)) {
-        if (!w.check(world.live.has_value(), "snapshot only when there is data")) return;
+        if (!w.check(world.live.has_value(), "snapshot only when there is data")) return true;
         auto it = world.snapshots.find(t->id.stem);
         w.check(it == world.snapshots.end() || it->second.content == world.live->content,
                 "a snapshot name is never reused for different data");
@@ -608,7 +746,7 @@ void apply(Walk& w, World& world, const Effect& e) {
     } else if (auto* sp = std::get_if<Spawn>(&e)) {
         w.check(!world.app, "never two app processes");
         const BuildRecord* r = world.disk.find(sp->build);
-        if (!w.check(r != nullptr, "spawned build has a record")) return;
+        if (!w.check(r != nullptr, "spawned build has a record")) return true;
         if (world.live) {
             Compatibility c = compatibility(r->data_schema, world.live->info);
             w.check(c != Compatibility::Incompatible, "never spawn a build onto data it cannot open");
@@ -621,7 +759,7 @@ void apply(Walk& w, World& world, const Effect& e) {
         }
         if (w.chance(0.03)) {
             world.lease_failed = sp->build;
-            return;
+            return true;
         }
         world.app = sp->build;
         world.app_opened_db = world.app_refused_db = world.app_healthy = world.app_killed = false;
@@ -631,17 +769,26 @@ void apply(Walk& w, World& world, const Effect& e) {
         world.app_killed = true;
     } else if (auto* rs = std::get_if<RestoreSnapshot>(&e)) {
         w.check(!world.app, "restore only while the app is not running");
-        auto from = world.snapshots.find(rs->from.stem);
-        if (!w.check(from != world.snapshots.end(), "restore from a snapshot that exists")) return;
-        bool replay = world.live && world.live->content == from->second.content &&
-                      world.snapshots.contains(rs->preserve_live_as.stem);
-        if (replay) return;
+        std::optional<Data> target;
+        if (rs->from) {
+            auto from = world.snapshots.find(rs->from->stem);
+            if (!w.check(from != world.snapshots.end(), "restore from a snapshot that exists")) return true;
+            target = from->second;
+        }
+        bool replay = target ? world.live && world.live->content == target->content &&
+                                   world.snapshots.contains(rs->preserve_live_as.stem)
+                             : !world.live;
+        if (replay) return true;
+        if (w.chance(0.05)) {
+            world.restore_failed = true;
+            return false;
+        }
         w.check(!world.snapshots.contains(rs->preserve_live_as.stem), "a restore never overwrites a preserved copy");
         if (world.live) world.snapshots[rs->preserve_live_as.stem] = *world.live;
-        world.live = from->second;
+        world.live = target;
     }
+    return true;
 }
-
 
 std::optional<Snapshot> random_snapshot(Walk& w, const World& world) {
     if (world.snapshots.empty() || w.chance(0.3)) return std::nullopt;
@@ -687,6 +834,10 @@ Event other_event(Walk& w, const World& world, const SupervisorState& s) {
             if (s.previous_good && w.chance(0.5)) return UserDowngrade{*s.find(*s.previous_good), restore};
             return UserDowngrade{r, restore};
         }
+        if (w.chance(0.3)) {
+            if (s.previous_good && w.chance(0.5)) return LeaveRevoked{*s.find(*s.previous_good)};
+            return LeaveRevoked{r};
+        }
         return BuildSealed{r, restore};
     }
     case 7: {
@@ -706,7 +857,7 @@ Event other_event(Walk& w, const World& world, const SupervisorState& s) {
         return BuildCorrupt{id};
     }
     case 11: {
-        ManifestSeen m;
+        ManifestSeen m{w.chance(0.5) ? Channel::Stable : Channel::Beta, {}};
         for (const BuildRecord* r : universe)
             if (w.chance(0.2)) m.revoked.push_back(r->id.version);
         return m;
@@ -724,6 +875,7 @@ Event other_event(Walk& w, const World& world, const SupervisorState& s) {
 
 Event next_event(Walk& w, const World& world, const SupervisorState& s) {
     if (world.lease_failed) return BuildCorrupt{*world.lease_failed};
+    if (world.restore_failed) return RestoreFailed{};
     if (world.app && w.chance(0.75)) return app_event(w, world);
     return other_event(w, world, s);
 }
@@ -739,6 +891,7 @@ void feed(Walk& w, World& world, SupervisorState& state, const Event& event, boo
     // kill-on-close job, so an app never outlives the launcher that spawned it.
     if (std::holds_alternative<Resumed>(event)) world.app.reset();
     if (std::holds_alternative<BuildCorrupt>(event)) world.lease_failed.reset();
+    if (std::holds_alternative<RestoreFailed>(event)) world.restore_failed = false;
     if (std::holds_alternative<AppExited>(event) && world.app) {
         if (!world.app_opened_db && w.chance(0.5)) {
             if (const BuildRecord* r = world.disk.find(*world.app)) open_db(world, *r);
@@ -758,7 +911,12 @@ void feed(Walk& w, World& world, SupervisorState& state, const Event& event, boo
     size_t limit = out.effects.size();
     bool kill = allow_kill && limit > 0 && w.chance(0.08);
     if (kill) limit = w.pick(out.effects.size());
-    for (size_t i = 0; i < limit && w.violation.empty(); ++i) apply(w, world, out.effects[i]);
+    bool failed = false;
+    for (size_t i = 0; i < limit && w.violation.empty() && !failed; ++i) failed = !apply(w, world, out.effects[i]);
+    if (failed) {
+        state = world.disk;
+        return;
+    }
     if (!kill) {
         state = out.next;
         w.check(normalized(state) == normalized(world.disk) || !last_commit(out.effects, out.effects.size()),

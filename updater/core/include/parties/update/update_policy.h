@@ -45,7 +45,7 @@ struct ReportPinned {
 enum class BlockReason : uint8_t {
     Busy,               // a candidate is on probation or data is being restored
     LauncherTooOld,     // the newer build cannot talk to the running launcher
-    NoCompatibleBuild,  // good is revoked and nothing else can run on this data
+    NoCompatibleBuild,  // good is revoked and no other build can run here
 };
 struct Blocked {
     BlockReason reason;
@@ -79,8 +79,14 @@ ChannelSwitchPlan plan_channel_switch(const SupervisorState& state, const Verifi
 // without taking the downgrade.
 ChannelIntent intent_for(const ChannelSwitchPlan& plan);
 
-// The backup an accepted DataEffect::NeedsRestore downgrade puts in place:
-// the newest one `entry` can open, so the least recent data is set aside.
-std::optional<Snapshot> restore_point(const BuildEntry& entry, std::span<const Snapshot> newest_first);
+// The intent to commit when the user picks a channel and chooses to wait: stay
+// on the version you run, the candidate during a trial, until the channel
+// reaches it.
+ChannelIntent wait_intent(const SupervisorState& state);
+
+// The backup an accepted DataEffect::NeedsRestore downgrade, or Recovery's
+// "Start the previous version", puts in place: the newest one a build of
+// `data_schema` can open, so the least recent data is set aside.
+std::optional<Snapshot> restore_point(uint32_t data_schema, std::span<const Snapshot> newest_first);
 
 } // namespace parties::update

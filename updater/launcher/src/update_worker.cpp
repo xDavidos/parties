@@ -34,7 +34,7 @@ std::vector<Snapshot> snapshots(const std::vector<Backup>& backups) {
 link::DowngradeOffer wire_offer(const DowngradeOffer& offer, const std::vector<Backup>& backups) {
     link::DowngradeOffer out{offer.entry.version, wire_effect(offer.data_effect), std::nullopt};
     if (offer.data_effect != DataEffect::NeedsRestore) return out;
-    auto point = restore_point(offer.entry, snapshots(backups));
+    auto point = restore_point(offer.entry.data_schema, snapshots(backups));
     auto it = point ? std::ranges::find(backups, point->id, &Backup::id) : backups.end();
     if (it == backups.end()) {
         out.data_effect = link::DowngradeEffect::Impossible;
@@ -168,8 +168,8 @@ std::expected<BuildRecord, std::string> UpdateWorker::seal(const BuildEntry& ent
 
 JobOutcome UpdateWorker::run(const JobRequest& request) {
     const SupervisorState& state = request.state;
-    const Channel channel = std::holds_alternative<DowngradeJob>(request.job) ? std::get<DowngradeJob>(request.job).channel
-                                                                              : state.channel;
+    const auto* downgrade = std::get_if<DowngradeJob>(&request.job);
+    const Channel channel = downgrade ? downgrade->channel : state.channel;
     JobOutcome out{request.job, channel};
     auto manifest = accepted(channel);
     if (!manifest) {
@@ -192,13 +192,14 @@ JobOutcome UpdateWorker::run(const JobRequest& request) {
         return out;
     }
 
-    if (std::holds_alternative<DowngradeJob>(request.job)) {
+    if (downgrade) {
         ChannelSwitchPlan plan = plan_channel_switch(state, *manifest, kLinkProtocol, request.live_db);
         auto* pinned = std::get_if<StayPinned>(&plan);
         if (pinned && pinned->downgrade) {
             const DowngradeOffer& offer = *pinned->downgrade;
             std::optional<Snapshot> restore;
-            if (offer.data_effect == DataEffect::NeedsRestore) restore = restore_point(offer.entry, snapshots(request.backups));
+            if (offer.data_effect == DataEffect::NeedsRestore)
+                restore = restore_point(offer.entry.data_schema, snapshots(request.backups));
             if (offer.data_effect != DataEffect::NeedsRestore || restore) {
                 if (auto sealed = seal(offer.entry)) {
                     log("downgrading to {}{}", offer.entry.version.to_string(),
@@ -220,7 +221,7 @@ JobOutcome UpdateWorker::run(const JobRequest& request) {
         return out;
     }
 
-    out.events.push_back(ManifestSeen{manifest->payload().revoked});
+    out.events.push_back(ManifestSeen{channel, manifest->payload().revoked});
     UpdateDecision decision = plan_update(state, *manifest, kLinkProtocol, request.live_db);
     if (decision.new_intent) out.events.push_back(ChannelIntentSet{channel, *decision.new_intent});
     out.ok = true;
@@ -231,7 +232,8 @@ JobOutcome UpdateWorker::run(const JobRequest& request) {
             out.view.phase = link::Phase::Error;
             return out;
         }
-        out.events.push_back(BuildSealed{*sealed, std::nullopt});
+        if (stage->reason == StageReason::LeaveRevoked) out.events.push_back(LeaveRevoked{*sealed});
+        else out.events.push_back(BuildSealed{*sealed, std::nullopt});
     } else if (auto* report = std::get_if<ReportPinned>(&decision.plan)) {
         out.view.phase = link::Phase::Pinned;
         out.view.pinned_until = report->until;

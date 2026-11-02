@@ -269,6 +269,12 @@ struct DesignerApp::PartiesFixture {
 				notice.preserved = "backups\\rolled-back-1.3.0.0-9f3c2a1b-g12.db";
 			}
 			status.notice = notice;
+		} else if (scenario == "update-restore-failed") {
+			status.notice = StatusNotice{StatusNotice::Kind::RestoreFailed, status.current, status.current, std::nullopt};
+		} else if (scenario == "update-withdrawn") {
+			status.notice = StatusNotice{StatusNotice::Kind::Withdrawn, status.current, status.current, std::nullopt};
+			status.downgrade = DowngradeOffer{version("1.1.0.0"), DowngradeEffect::RestoresBackup,
+				std::chrono::sys_days{std::chrono::year{2026} / 10 / 30} + std::chrono::hours{12}};
 		} else if (scenario == "settings-updates-feed-stale") {
 			status.phase = Phase::FeedStale;
 		} else if (scenario == "settings-updates-pinned" || scenario == "settings-updates-restore" ||
@@ -296,7 +302,9 @@ struct DesignerApp::PartiesFixture {
 		using namespace parties::update;
 		using namespace parties::update::link;
 		if (scenario == "update-ready") return {RestartToUpdate{}};
-		if (scenario == "update-rolled-back" || scenario == "update-data-restored") return {AcknowledgeNotice{}};
+		if (scenario == "update-rolled-back" || scenario == "update-data-restored" || scenario == "update-withdrawn" ||
+			scenario == "update-restore-failed")
+			return {AcknowledgeNotice{}};
 		if (scenario == "settings-updates" || scenario == "settings-updates-feed-stale" ||
 			scenario == "settings-updates-blocked" || scenario == "settings-updates-downloading")
 			return {SetChannel{Channel::Beta, ChannelChoice::Wait}};
@@ -404,7 +412,7 @@ struct DesignerApp::PartiesFixture {
 		}
 
 		lobby.is_connected = scenario != "launcher" && scenario != "party-modal" &&
-			scenario != "onboarding" && scenario != "recovery" && scenario.rfind("update-", 0) != 0;
+			scenario != "onboarding" && scenario.rfind("recovery", 0) != 0 && scenario.rfind("update-", 0) != 0;
 		lobby.server_name = "Night Shift";
 		lobby.server_initials = "NS";
 		lobby.username = "tuxick";
@@ -545,8 +553,11 @@ struct DesignerApp::PartiesFixture {
 			};
 			lobby.on_apply_update = [this] { lobby.on_update_action(parties::client::UpdateAction::ClickPill); };
 		}
-		server_list.show_onboarding = scenario == "onboarding" || scenario == "recovery";
-		server_list.onboarding_step = scenario == "recovery" ? 1 : 0;
+		const bool recovery = scenario == "recovery" || scenario == "recovery-save-failed";
+		server_list.show_onboarding = scenario == "onboarding" || recovery;
+		server_list.onboarding_step = recovery ? 1 : 0;
+		if (scenario == "recovery-save-failed")
+			server_list.login_error = "Parties could not save your identity. Try again, or restart Parties.";
 		if (server_list.show_onboarding.get())
 			server_list.has_identity = false;
 		server_list.show_add_form = scenario == "party-modal";
@@ -667,7 +678,7 @@ struct DesignerApp::PartiesFixture {
 
 	bool Init(Rml::Context* context, const std::string& scenario) {
 		if (scenario != "launcher" && scenario != "party-modal" && scenario != "onboarding" &&
-			scenario != "recovery" && scenario != "room" && scenario != "settings" &&
+			scenario != "recovery" && scenario != "recovery-save-failed" && scenario != "room" && scenario != "settings" &&
 			scenario != "settings-select-open" && scenario != "settings-screen-share" &&
 			scenario != "settings-hotkeys" &&
 			scenario != "settings-account" &&
@@ -934,14 +945,21 @@ struct DesignerApp::PartiesFixture {
 		const char* pill_text =
 			scenario == "update-downloading" || scenario == "settings-updates-downloading" ? "Downloading 42%"
 			: scenario == "update-ready" ? "Restart to update" : nullptr;
-		const bool notice = scenario == "update-rolled-back" || scenario == "update-data-restored";
+		const bool withdrawn = scenario == "update-withdrawn";
+		const bool restore_failed = scenario == "update-restore-failed";
+		const bool notice = scenario == "update-rolled-back" || scenario == "update-data-restored" || withdrawn ||
+			restore_failed;
 		const bool offers_switch = scenario == "settings-updates-pinned" || scenario == "settings-updates-restore";
 		const bool held = offers_switch || scenario == "settings-updates-impossible";
 
 		bool valid = visible("titlebar-update") == (pill_text != nullptr) &&
 			(!pill_text || shown_text("titlebar-update") == pill_text) &&
 			visible("update-notice") == notice &&
-			(!notice || contains(shown_text("update-notice"), "didn't start correctly, so you're back on 1.2.0.0")) &&
+			(!notice || withdrawn || restore_failed ||
+				contains(shown_text("update-notice"), "didn't start correctly, so you're back on 1.2.0.0")) &&
+			(!restore_failed || contains(shown_text("update-notice"), "could not restore the backup, so your data was not changed")) &&
+			(!withdrawn || (contains(shown_text("update-notice"), "Parties 1.2.0.0 was withdrawn because of a problem.") &&
+				contains(shown_text("update-notice"), "Going back to 1.1.0.0 restores a backup of your data"))) &&
 			(scenario != "update-data-restored" ||
 				contains(shown_text("update-notice"), "data folder as backups\\rolled-back-1.3.0.0-9f3c2a1b-g12.db."));
 		if (IsUpdateSettings(scenario)) {
@@ -1045,6 +1063,14 @@ struct DesignerApp::PartiesFixture {
 			}
 		}
 
+		if (scenario == "recovery-save-failed") {
+			Rml::Element* error = document->GetElementById("onboarding-save-error");
+			const bool valid = error && error->IsVisible(true) &&
+				error->GetInnerRML().find("could not save your identity") != Rml::String::npos;
+			if (!valid)
+				std::fprintf(stderr, "[Designer] The failed identity save is not shown\n");
+			return valid;
+		}
 		if (update_status && !ValidateUpdateFixture(document, scenario))
 			return false;
 		if (update_status && !IsUpdateSettings(scenario))

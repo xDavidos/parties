@@ -86,7 +86,7 @@ struct Staged {
 struct Probation {
     BuildId candidate;
     BuildId fallback;
-    std::optional<Snapshot> pre_snapshot;  // live data before the candidate first ran
+    std::optional<Snapshot> pre_snapshot;  // live data before the candidate first ran; nullopt: there was no database
     uint8_t failed_runs = 0;               // runs after health that ended badly or unobserved
     bool restore_on_rollback = false;      // the candidate started on restored data
     friend bool operator==(const Probation&, const Probation&) = default;
@@ -110,7 +110,7 @@ struct Running {
 // Committed before a data restore, so a crash mid-restore resumes the restore
 // and nothing runs on half-restored data.
 struct Restoring {
-    Snapshot from;
+    std::optional<Snapshot> from;  // nullopt: leave no database
     SnapshotId preserve_live_as;
     friend bool operator==(const Restoring&, const Restoring&) = default;
 };
@@ -125,13 +125,27 @@ struct PinnedUntilAtLeast {
 };
 using ChannelIntent = std::variant<Follow, PinnedUntilAtLeast>;
 
-// Shown once by the app, then acknowledged.
+// Shown once by the app, then acknowledged. Withdrawn: good was revoked.
+// RestoreFailed: a restore could not start and the data was left as it was.
+// For both, from == to == good.
 struct Notice {
-    enum class Kind : uint8_t { RolledBack, DataRestored } kind;
+    enum class Kind : uint8_t { RolledBack, DataRestored, Withdrawn, RestoreFailed } kind;
     Version from;
     Version to;
     std::optional<SnapshotId> preserved;  // where the replaced live data was kept
     friend bool operator==(const Notice&, const Notice&) = default;
+};
+
+// revoked[] of the last verified manifest of each channel, so a revocation
+// holds while the feed is unreachable. A version listed in either is never
+// started as a candidate and never becomes good.
+struct Revocations {
+    std::vector<Version> stable;
+    std::vector<Version> beta;
+
+    std::vector<Version>& of(Channel channel) { return channel == Channel::Beta ? beta : stable; }
+    bool contains(const Version& version) const;
+    friend bool operator==(const Revocations&, const Revocations&) = default;
 };
 
 struct SupervisorState {
@@ -142,6 +156,7 @@ struct SupervisorState {
     std::optional<BuildId> previous_good;
     std::vector<BuildRecord> builds;  // good, previous_good, staged, candidate, kept quarantines
     std::optional<Notice> notice;
+    Revocations revoked;
     Activation activation = Steady{};
     Operation operation = Idle{};
 

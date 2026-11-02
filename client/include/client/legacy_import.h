@@ -56,4 +56,21 @@ LegacyImportResult import_legacy_data(const DataLocation& location,
 LegacyImportResult preserve_legacy_data(const DataLocation& location,
                                         std::span<const std::filesystem::path> search_dirs);
 
+// A readable legacy database whose identity the live database neither holds
+// nor keeps in identity_archive, and that is not in `settled` (identities the
+// user already chose against). The best such candidate by the import order.
+struct IdentityConflict {
+    std::filesystem::path legacy_db;
+    PublicKey legacy;
+    std::optional<PublicKey> live;  // nullopt: the live database has no identity
+};
+std::optional<IdentityConflict> find_identity_conflict(const DataLocation& location,
+                                                       std::span<const std::filesystem::path> search_dirs,
+                                                       std::span<const PublicKey> settled);
+
+// Makes `legacy_db` the live database, copy-first. The live database is kept
+// first under backups\pre-identity-switch-<utc>.db; `kept` names that copy.
+bool adopt_legacy_database(const DataLocation& location, const std::filesystem::path& legacy_db,
+                           std::filesystem::path& kept, std::string& error);
+
 } // namespace parties::client

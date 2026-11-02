@@ -8,7 +8,10 @@
 
 #include "paths.h"
 
+#include <client/legacy_import.h>
+
 #include <chrono>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -34,7 +37,7 @@ struct LegacyHints {
 
 // Every folder a portable copy may keep parties_client.db in, in search
 // order: the working directory, the old binary's folder, this exe's folder,
-// the folders the Start menu and Desktop Parties.lnk start from, and the
+// the folders of links to a portable copy (portable_shortcut_dirs), and the
 // folders of running portable copies. Read before setup rewrites the Start
 // menu shortcut. Needs COM on the calling thread.
 std::vector<fs::path> legacy_dirs(const LegacyHints& hints);
@@ -45,13 +48,21 @@ bool wait_for_portable_exit(const std::wstring& object_prefix, std::chrono::mill
 
 struct LegacyData {
     std::string error;  // empty: the data root holds every legacy database it should
-    std::string note;   // one sentence for the user, or empty
+    std::string note;   // for the user, or empty
 };
+
+enum class IdentityChoice { KeepLive, UseLegacy };
+// Asks the user which identity to keep. Empty: nobody can be asked (--silent).
+using ChooseIdentity = std::function<IdentityChoice(const client::IdentityConflict&)>;
 
 // Imports the best legacy database when the data root has none, and keeps a
 // copy of every legacy database found under backups\legacy-*. Sources are
-// opened read-only and never changed. Repeating it writes nothing new.
-LegacyData move_legacy_data(const DataPaths& data, std::span<const fs::path> dirs);
+// opened read-only and never changed. When the live database has another
+// identity (or none) than a portable one it never held, `choose` decides
+// which stays live; the other stays a backup. Unasked, the live database
+// stays and the note says so.
+// Repeating it writes nothing new.
+LegacyData move_legacy_data(const DataPaths& data, std::span<const fs::path> dirs, const ChooseIdentity& choose);
 
 // Deletes parties_client.old.exe, or puts the carrier in place of the old
 // parties_client.exe. Only names the legacy updater uses are touched.

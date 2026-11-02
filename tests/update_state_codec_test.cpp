@@ -76,6 +76,11 @@ std::vector<SupervisorState> samples() {
         s.operation = Restoring{Snapshot{{"pre-x"}, {1, 1}}, SnapshotId{"rolled-back-x-g44"}};
         out.push_back(s);
     }
+    {
+        SupervisorState s = base();
+        s.revoked = {{kGood.id.version, kCand.id.version}, {kCand.id.version}};
+        out.push_back(s);
+    }
     for (FailureReason reason :
          {FailureReason::CrashedBeforeHealthy, FailureReason::InitFailed, FailureReason::HungBeforeHealthy,
           FailureReason::TerminatedBeforeHealthy, FailureReason::DataTooNew,
@@ -114,6 +119,20 @@ bool test_unknown_fields_ignored() {
     text = replace(text, "\"data_schema\":3", "\"data_schema\":3,\"notes_url\":\"https://x\"");
     auto parsed = parse_state(text);
     if (!parsed || *parsed != samples()[3]) return fail("unknown fields broke parsing");
+    return true;
+}
+
+// Launchers before revocations were kept wrote no "revoked" member; schema 1
+// stays, because older launchers ignore the member they do not know.
+bool test_written_before_revocations() {
+    SupervisorState s = base();
+    std::string text = replace(write_state(s), "\"revoked\":{\"stable\":[],\"beta\":[]},", "");
+    auto parsed = parse_state(text);
+    if (!parsed || *parsed != s) return fail("a state without revocations must parse with none");
+    SupervisorState listed = base();
+    listed.revoked.beta = {kCand.id.version};
+    if (parse_state(replace(write_state(listed), "\"1.6.0.0\"]", "\"not-a-version\"]")))
+        return fail("a malformed revoked version accepted");
     return true;
 }
 
@@ -201,6 +220,7 @@ bool test_boot_contract_projection() {
 int main() {
     bool ok = true;
     ok &= test_round_trip();
+    ok &= test_written_before_revocations();
     ok &= test_unknown_fields_ignored();
     ok &= test_schema_versions();
     ok &= test_malformed_and_inconsistent();

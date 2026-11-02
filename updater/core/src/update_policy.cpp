@@ -66,12 +66,15 @@ UpdateDecision plan_update(const SupervisorState& state, const VerifiedManifest&
     const BuildEntry* newest_runnable = f.newest([&](const BuildEntry& e) { return f.runnable(e); });
 
     // Moving off a revoked build overrides a pin: the pin only guards against
-    // downgrading a working build.
+    // downgrading a working build. A move that would restore a backup is only
+    // offered, because it sets aside the user's newest data.
     if (manifest.is_revoked(installed)) {
-        const BuildEntry* target =
-            f.newest([&](const BuildEntry& e) { return f.runnable(e) && e.id() != state.good; });
-        if (!target) return {Blocked{BlockReason::NoCompatibleBuild, std::nullopt}};
-        return {f.stage(*target, StageReason::LeaveRevoked)};
+        auto other = [&](const BuildEntry& e) { return f.offerable(e) && e.id() != state.good; };
+        if (const BuildEntry* target = f.newest([&](const BuildEntry& e) { return other(e) && f.reads_data(e); }))
+            return {f.stage(*target, StageReason::LeaveRevoked)};
+        if (const BuildEntry* restoring = f.newest(other); restoring && !f.already_staged(*restoring))
+            return {OfferDowngrade{{*restoring, f.data_effect(*restoring)}}};
+        return {Blocked{BlockReason::NoCompatibleBuild, std::nullopt}};
     }
 
     std::optional<ChannelIntent> new_intent;
@@ -117,9 +120,14 @@ ChannelIntent intent_for(const ChannelSwitchPlan& plan) {
     return Follow{};
 }
 
-std::optional<Snapshot> restore_point(const BuildEntry& entry, std::span<const Snapshot> newest_first) {
+ChannelIntent wait_intent(const SupervisorState& state) {
+    if (auto* p = std::get_if<Probation>(&state.activation)) return PinnedUntilAtLeast{p->candidate.version};
+    return PinnedUntilAtLeast{state.good.version};
+}
+
+std::optional<Snapshot> restore_point(uint32_t data_schema, std::span<const Snapshot> newest_first) {
     auto it = std::ranges::find_if(newest_first, [&](const Snapshot& s) {
-        return compatibility(entry.data_schema, s.data) != Compatibility::Incompatible;
+        return compatibility(data_schema, s.data) != Compatibility::Incompatible;
     });
     if (it == newest_first.end()) return std::nullopt;
     return *it;

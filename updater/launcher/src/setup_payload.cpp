@@ -176,9 +176,7 @@ bool pack_payload(const fs::path& dir, const fs::path& out, Keyring keys, std::s
     }
     const std::string index = write_index({chosen->version, stub_digest->size, stub_digest->sha256});
 
-    std::wstring self(32768, L'\0');
-    self.resize(GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size())));
-    if (!CopyFileW(self.c_str(), out.c_str(), FALSE)) {
+    if (!CopyFileW(self_exe().c_str(), out.c_str(), FALSE)) {
         error = "cannot write " + utf8(out) + ": " + last_error_text();
         return false;
     }

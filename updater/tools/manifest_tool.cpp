@@ -39,8 +39,8 @@ constexpr const char* kUsage = R"(usage: parties_manifest_tool <command> [option
           --serial <n|now> --expires-days <d> --keep <n> --out <payload>
   promote --from <beta envelope> --to <stable envelope|none> --version <v>
           --serial <n|now> --expires-days <d> --keep <n> --out <payload>
-  revoke  --base <envelope> --channel <c> --version <v>
-          --serial <n|now> --expires-days <d> --out <payload>
+  revoke  --beta <envelope|none> --stable <envelope|none> --version <v>
+          --serial <n|now> --expires-days <d> --out-dir <dir>
   resign  --base <envelope> --channel <c> --serial <n|now> --expires-days <d> --out <payload>
   sign    --payload <file> --key-env <VAR>... --out <envelope>
   verify  --envelope <file> --channel <c> [--check-assets]
@@ -139,12 +139,6 @@ std::span<const uint8_t> bytes_of(std::string_view s) {
     return {reinterpret_cast<const uint8_t*>(s.data()), s.size()};
 }
 
-Sha256 sha256_of(std::string_view data) {
-    std::string hex = parties::sha256_hex(bytes_of(data).data(), data.size());
-    std::erase(hex, ':');
-    return *Sha256::from_hex(hex);
-}
-
 std::string to_hex(std::span<const uint8_t> bytes) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string out;
@@ -197,15 +191,15 @@ Keyring pinned_keyring(const Args& args) {
     return production_keyring();
 }
 
-Channel channel_arg(const Args& args, const std::string& flag = "--channel") {
-    auto c = parse_channel(args.one(flag));
-    if (!c) throw UsageError{flag + " must be stable or beta"};
+Channel channel_arg(const Args& args) {
+    auto c = parse_channel(args.one("--channel"));
+    if (!c) throw UsageError{"--channel must be stable or beta"};
     return *c;
 }
 
-Version version_arg(const Args& args, const std::string& flag = "--version") {
-    auto v = Version::parse(args.one(flag));
-    if (!v) throw UsageError{flag + " must be A.B.C.D"};
+Version version_arg(const Args& args) {
+    auto v = Version::parse(args.one("--version"));
+    if (!v) throw UsageError{"--version must be A.B.C.D"};
     return *v;
 }
 
@@ -335,7 +329,7 @@ bool check_assets(const ManifestPayload& p) {
                 if (!body) {
                     std::cerr << "asset check failed: " << body.error() << "\n";
                     ok = false;
-                } else if (body->size() != f.size || sha256_of(*body) != f.sha256) {
+                } else if (body->size() != f.size || sha256_of(bytes_of(*body)) != f.sha256) {
                     std::cerr << "asset check failed: " << url << " does not match the manifest's size and sha256 for "
                               << b.version.to_string() << " " << f.name << "\n";
                     ok = false;
@@ -367,7 +361,7 @@ int cmd_entry(const Args& args) {
         if (eq == std::string::npos) throw UsageError{"--file takes <name>=<path>"};
         fs::path path = spec.substr(eq + 1);
         std::string data = read_file(path);
-        files.push_back({spec.substr(0, eq), path.filename().string(), data.size(), sha256_of(data)});
+        files.push_back({spec.substr(0, eq), path.filename().string(), data.size(), sha256_of(bytes_of(data))});
     }
     BuildEntry entry = must(release::make_entry(info, files, args.one("--url-base")));
     std::string text = write_build_entry(entry);
@@ -396,9 +390,21 @@ int cmd_promote(const Args& args) {
     return 0;
 }
 
+// Every channel at once: setup installs follow Stable even when their build
+// is only on Beta, so a revocation from one channel would miss them.
 int cmd_revoke(const Args& args) {
-    VerifiedManifest base = verified_envelope(args, args.one("--base"), channel_arg(args));
-    emit_payload(args, must(release::revoke(base.payload(), version_arg(args), issue_arg(args))));
+    const Version version = version_arg(args);
+    const release::Issue issue = issue_arg(args);
+    std::vector<std::pair<Channel, ManifestPayload>> next;
+    for (Channel channel : {Channel::Beta, Channel::Stable}) {
+        auto base = optional_envelope(args, "--" + std::string(channel_name(channel)), channel);
+        next.emplace_back(channel, must(release::revoke(base ? &base->payload() : nullptr, channel, version, issue)));
+    }
+    const fs::path dir = args.one("--out-dir");
+    for (const auto& [channel, payload] : next) {
+        write_file(dir / (std::string(channel_name(channel)) + ".payload.json"), write_payload(payload));
+        print_summary(payload);
+    }
     return 0;
 }
 
@@ -460,7 +466,8 @@ int run(int argc, char** argv) {
         return cmd_merge(Args(argc, argv, with({"--base", "--entry", "--channel", "--keep"}, issue_flags), {}));
     if (command == "promote")
         return cmd_promote(Args(argc, argv, with({"--from", "--to", "--version", "--keep"}, issue_flags), {}));
-    if (command == "revoke") return cmd_revoke(Args(argc, argv, with({"--base", "--channel", "--version"}, issue_flags), {}));
+    if (command == "revoke")
+        return cmd_revoke(Args(argc, argv, {"--beta", "--stable", "--version", "--serial", "--expires-days", "--out-dir"}, {}));
     if (command == "resign") return cmd_resign(Args(argc, argv, with({"--base", "--channel"}, issue_flags), {}));
     if (command == "sign") return cmd_sign(Args(argc, argv, {"--payload", "--key-env", "--out"}, {}));
     if (command == "verify") return cmd_verify(Args(argc, argv, {"--envelope", "--channel"}, {"--check-assets"}));

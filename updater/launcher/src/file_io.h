@@ -14,7 +14,11 @@ namespace parties::update::launcher {
 namespace fs = std::filesystem;
 
 std::string utf8(const fs::path& path);
+// Invalid UTF-8 becomes U+FFFD instead of throwing: last_error_text() is in the ANSI code page.
+std::wstring widen(std::string_view s);
 std::string last_error_text();
+
+fs::path self_exe();
 
 std::optional<std::string> read_file(const fs::path& path);
 
@@ -29,6 +33,22 @@ struct FileDigest {
     uint64_t size = 0;
     Sha256 sha256;
     friend bool operator==(const FileDigest&, const FileDigest&) = default;
+};
+
+class Sha256Hasher {
+public:
+    Sha256Hasher();
+    ~Sha256Hasher();
+    Sha256Hasher(const Sha256Hasher&) = delete;
+    Sha256Hasher& operator=(const Sha256Hasher&) = delete;
+
+    bool ok() const { return hash_ != nullptr; }
+    bool update(const void* data, unsigned long size);
+    std::optional<Sha256> finish();
+
+private:
+    void* alg_ = nullptr;
+    void* hash_ = nullptr;
 };
 
 std::optional<FileDigest> digest_file(const fs::path& path);
