@@ -391,7 +391,7 @@ endif()
 
 # ── Update manager pure core (offline, deterministic) ────────────────────────
 if(TARGET parties_update_core)
-    foreach(update_test version data_compat manifest probation state_codec policy)
+    foreach(update_test version data_compat manifest probation state_codec policy link)
         add_executable(update_${update_test}_test update_${update_test}_test.cpp)
         target_link_libraries(update_${update_test}_test PRIVATE parties_update_core parties_common)
         add_test(NAME update_${update_test} COMMAND update_${update_test}_test)
@@ -404,4 +404,27 @@ if(TARGET parties_update_core)
     add_test(NAME update_boot COMMAND update_boot_test)
     # 100000 seeded random-walk sequences; about two minutes in a Debug build.
     set_tests_properties(update_probation PROPERTIES TIMEOUT 900)
+endif()
+
+# â”€â”€ Update launcher end to end (testing builds only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Drives the real PartiesLauncher.exe over fake builds in a temp install root.
+if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
+    find_package(RapidJSON CONFIG REQUIRED)
+    add_executable(update_fake_app WIN32 update_fake_app.cpp)
+    target_link_libraries(update_fake_app PRIVATE parties_update_link rapidjson unofficial::sqlite3::sqlite3)
+
+    add_executable(update_e2e_test update_e2e_test.cpp)
+    target_include_directories(update_e2e_test PRIVATE ../client/include)
+    target_link_libraries(update_e2e_test PRIVATE
+        parties_launcher_shell parties_common unofficial::sqlite3::sqlite3)
+    add_dependencies(update_e2e_test PartiesLauncher update_fake_app)
+    set(update_e2e_args --launcher $<TARGET_FILE:PartiesLauncher> --fake-app $<TARGET_FILE:update_fake_app>)
+    add_test(NAME update_e2e COMMAND update_e2e_test ${update_e2e_args})
+    set_tests_properties(update_e2e PROPERTIES TIMEOUT 1800)
+    # Needs a GPU: the real client reaches healthy only after presenting a frame.
+    if(TARGET parties_client)
+        add_test(NAME update_e2e_smoke COMMAND update_e2e_test ${update_e2e_args}
+            --real-client $<TARGET_FILE:parties_client>)
+        set_tests_properties(update_e2e_smoke PROPERTIES TIMEOUT 300)
+    endif()
 endif()

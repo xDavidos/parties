@@ -2,6 +2,7 @@
 #include <client/sqlite_file.h>
 
 #include <string_view>
+#include <variant>
 #include <system_error>
 #include <vector>
 
@@ -13,27 +14,56 @@ namespace parties::client {
 
 namespace fs = std::filesystem;
 
-DataLocationResult resolve_data_location(const DataLocationInputs& inputs) {
-    constexpr std::wstring_view kFlag = L"--data-dir=";
-    for (const std::wstring& arg : inputs.args) {
-        if (!arg.starts_with(kFlag)) continue;
-        const fs::path dir(arg.substr(kFlag.size()));
-        if (!dir.is_absolute())
-            return {std::nullopt, "--data-dir must be an absolute path, got \"" + utf8_path(dir) + "\""};
-        const fs::path data_dir = dir.lexically_normal();
-        return {DataLocation{data_dir, data_dir / "backups"}, {}};
-    }
+namespace {
 
+// Returns the absolute path given by --<name>=, an error, or nothing when absent.
+std::optional<std::variant<fs::path, std::string>> path_flag(std::span<const std::wstring> args,
+                                                             std::wstring_view flag) {
+    for (const std::wstring& arg : args) {
+        if (!arg.starts_with(flag)) continue;
+        const fs::path dir(arg.substr(flag.size()));
+        if (!dir.is_absolute())
+            return std::string(flag.begin(), flag.end() - 1) + " must be an absolute path, got \"" +
+                   utf8_path(dir) + "\"";
+        return dir.lexically_normal();
+    }
+    return std::nullopt;
+}
+
+DataLocationResult default_location(const DataLocationInputs& inputs) {
     if (inputs.retail) {
         if (!inputs.local_app_data.is_absolute())
             return {std::nullopt, "the local application data folder is unknown"};
         const fs::path root = inputs.local_app_data / "Parties";
         return {DataLocation{root / "data", root / "backups"}, {}};
     }
-
     if (!inputs.exe_dir.is_absolute())
         return {std::nullopt, "the executable's folder is unknown"};
     return {DataLocation{inputs.exe_dir, inputs.exe_dir / "backups"}, {}};
+}
+
+} // namespace
+
+// --backups-dir lets the launcher keep the app's pre-migration copies next to
+// its own snapshots instead of inside the data directory.
+DataLocationResult resolve_data_location(const DataLocationInputs& inputs) {
+    DataLocationResult result;
+    const auto data_dir = path_flag(inputs.args, L"--data-dir=");
+    if (data_dir && std::holds_alternative<std::string>(*data_dir))
+        return {std::nullopt, std::get<std::string>(*data_dir)};
+    if (data_dir) {
+        const fs::path& dir = std::get<fs::path>(*data_dir);
+        result = {DataLocation{dir, dir / "backups"}, {}};
+    } else {
+        result = default_location(inputs);
+        if (!result.location) return result;
+    }
+
+    const auto backups_dir = path_flag(inputs.args, L"--backups-dir=");
+    if (backups_dir && std::holds_alternative<std::string>(*backups_dir))
+        return {std::nullopt, std::get<std::string>(*backups_dir)};
+    if (backups_dir) result.location->backups_dir = std::get<fs::path>(*backups_dir);
+    return result;
 }
 
 namespace {

@@ -10,6 +10,7 @@
 #include <client/video_decode_backlog.h>
 #include <client/video_element.h>
 #include <client/custom_elements.h>
+#include <client/settings_schema.h>
 #include "RmlUi_RenderInterface_Extended.h"
 #include <parties/protocol.h>
 #include <parties/serialization.h>
@@ -972,6 +973,7 @@ void App::render_frame() {
     }
     const auto body_complete = std::chrono::steady_clock::now();
     ui_.render_end();           // EndFrame: present (+ DwmFlush) — no context, no lock
+    first_frame_presented_.store(true, std::memory_order_release);
     const auto present_complete = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::recursive_mutex> lock(ui_mutex_);
@@ -1023,6 +1025,7 @@ void App::tick_message_thread() {
 
     // Tick shared logic (network messages, speaking state, model updates, etc.)
     core_.tick();
+    poll_supervisor();
 
     poll_hotkeys();
 
@@ -1034,6 +1037,33 @@ void App::tick_message_thread() {
     // window ops (SetWindowPos) and must run on the message thread.
     if (ui_.is_fullscreen() != core_.model_.stream_fullscreen)
         ui_.set_fullscreen(core_.model_.stream_fullscreen);
+}
+
+void App::attach_supervisor(std::unique_ptr<SupervisorLink> link) {
+    supervisor_ = std::move(link);
+    if (supervisor_)
+        core_.supervise_updates([this] { supervisor_->request(update::link::RestartToUpdate{}); });
+}
+
+// The launcher judges a new build by this report: the lobby document is
+// loaded and the render thread has presented a frame of it. A window minimized
+// or hidden to the tray during startup never presents, and must not get a
+// working build rolled back.
+void App::poll_supervisor() {
+    if (!supervisor_) return;
+    if (!supervisor_->healthy_reported() && doc_ &&
+        (first_frame_presented_.load(std::memory_order_acquire) || ui_.is_render_suspended()))
+        supervisor_->report_healthy(static_cast<uint32_t>(schema::kCurrent.version));
+    if (supervisor_->poll()) {
+        const update::link::Status& status = *supervisor_->status();
+        LOG_INFO("Launcher status: phase {} current {} available {}", static_cast<int>(status.phase),
+                 status.current.to_string(), status.available ? status.available->to_string() : "-");
+        core_.apply_update_status(status);
+    }
+    if (supervisor_->exit_requested() && !exit_posted_) {
+        exit_posted_ = true;
+        PostQuitMessage(0);
+    }
 }
 
 void App::defer_resize(int width, int height) {

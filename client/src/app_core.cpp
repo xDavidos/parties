@@ -252,14 +252,33 @@ bool AppCore::init(PlatformBridge bridge, Rml::Context* rml_context)
     stream_audio_player_.init();
 
 #ifdef _WIN32
-    updater_ = std::make_unique<AutoUpdater>();
-    updater_->start();
+    if (!restart_to_update_) {
+        updater_ = std::make_unique<AutoUpdater>();
+        updater_->start();
+    }
 #endif
 
     start_query_thread();
 
     return true;
 }
+
+#ifdef _WIN32
+void AppCore::supervise_updates(std::function<void()> restart_to_update)
+{
+    restart_to_update_ = std::move(restart_to_update);
+}
+
+void AppCore::apply_update_status(const update::link::Status& status)
+{
+    using update::link::Phase;
+    model_.update_available  = status.phase == Phase::Downloading || status.phase == Phase::ReadyToRestart;
+    model_.update_downloading = status.phase == Phase::Downloading;
+    model_.update_ready       = status.phase == Phase::ReadyToRestart;
+    if (status.available)
+        model_.update_version = Rml::String("v") + status.available->to_string().c_str();
+}
+#endif
 
 void AppCore::shutdown()
 {
@@ -2761,6 +2780,10 @@ void AppCore::setup_model_callbacks()
 
 #ifdef _WIN32
     model_.on_apply_update = [this]() {
+        if (restart_to_update_) {
+            if (model_.update_ready.get()) restart_to_update_();
+            return;
+        }
         if (!updater_) return;
         auto s = updater_->state();
         if (s == AutoUpdater::State::UpdateAvailable) {

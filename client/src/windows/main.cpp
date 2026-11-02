@@ -4,6 +4,7 @@
 #include <client/exit_codes.h>
 #include <client/legacy_import.h>
 #include <client/sqlite_file.h>
+#include <client/supervisor_link.h>
 #include <client/win32_single_instance.h>
 #include <parties/version.h>
 #include <parties/crypto.h>
@@ -19,6 +20,7 @@
 #include "system_diagnostics.h"
 
 #include <dwmapi.h>
+#include <shellapi.h>
 #include <windowsx.h>
 #ifndef PARTIES_RETAIL
 #include <RmlUi/Debugger.h>
@@ -304,6 +306,18 @@ static int refuse_to_start(ExitCode code, const std::filesystem::path& where, co
     return static_cast<int>(code);
 }
 
+static constexpr int kInitFailed = static_cast<int>(ExitCode::InitFailed);
+
+static std::unique_ptr<SupervisorLink> connect_supervisor() {
+    int argc = 0;
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    std::vector<std::wstring> args;
+    for (int i = 1; argv && i < argc; ++i) args.emplace_back(argv[i]);
+    LocalFree(argv);
+    const auto version = parties::update::Version::parse(parties::APP_VERSION);
+    return SupervisorLink::from_args(args, version.value_or(parties::update::Version{}));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Entry point
 // ═══════════════════════════════════════════════════════════════════════
@@ -337,7 +351,7 @@ int main(int argc, char* argv[]) {
     if (instance_result == Win32SingleInstance::Result::Error) {
         MessageBoxW(nullptr, L"Unable to access the running Parties client.",
                     L"Parties", MB_OK | MB_ICONERROR);
-        return 1;
+        return kInitFailed;
     }
 
     parties::TimerResolutionGuard timer_resolution(1);
@@ -362,6 +376,7 @@ int main(int argc, char* argv[]) {
 #endif
     LOG_INFO("{} Client v{}", parties::APP_NAME, parties::APP_VERSION);
     LOG_INFO("Data directory: {}", utf8_path(data.data_dir));
+    std::unique_ptr<SupervisorLink> supervisor = connect_supervisor();
     parties::alloctrack::start_reporting(10);
 
 #ifdef PARTIES_RETAIL
@@ -381,6 +396,7 @@ int main(int argc, char* argv[]) {
 #endif
 
     App app;
+    app.attach_supervisor(std::move(supervisor));
     const Settings::OpenResult opened = app.open_data(data.settings_paths());
     if (opened.status != Settings::OpenStatus::Ready)
         return refuse_to_start(opened.status == Settings::OpenStatus::TooNew
@@ -393,20 +409,20 @@ int main(int argc, char* argv[]) {
 
     if (!parties::crypto_init()) {
         LOG_ERROR("Failed to initialize crypto");
-        return 1;
+        return kInitFailed;
     }
 
     if (!parties::net_init()) {
         LOG_ERROR("Failed to initialize networking");
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     if (!parties::quic_init()) {
         LOG_ERROR("Failed to initialize QUIC");
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     // Register window class
@@ -424,7 +440,7 @@ int main(int argc, char* argv[]) {
         LOG_ERROR("Failed to register window class");
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     // Create borderless window. WS_CAPTION enables DWM minimize/restore
@@ -443,7 +459,7 @@ int main(int argc, char* argv[]) {
         UnregisterClassW(window_class, wc.hInstance);
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     // Enable DWM shadow on borderless window
@@ -460,7 +476,7 @@ int main(int argc, char* argv[]) {
         UnregisterClassW(window_class, wc.hInstance);
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     ShowWindow(hwnd, SW_SHOW);

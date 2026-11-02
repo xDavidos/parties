@@ -67,8 +67,10 @@ jobs:
       - name: Install Ninja
         run: choco install ninja -y
 
+      # The Debug build also carries the update launcher's test hooks so the e2e
+      # harness can run; release artifacts never do.
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }} ${{ matrix.preset == 'default' && '-DPARTIES_UPDATE_TESTING=ON' || '' }}
 
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
@@ -78,7 +80,13 @@ jobs:
         run: ctest --test-dir ${{ matrix.preset == 'release' && 'build-release' || 'build' }} -R "^parties_data_" --output-on-failure --no-tests=error
 
       - name: Run update core tests
-        run: ctest --test-dir ${{ matrix.preset == 'release' && 'build-release' || 'build' }} -R "^update_" --output-on-failure --no-tests=error
+        run: ctest --test-dir ${{ matrix.preset == 'release' && 'build-release' || 'build' }} -R "^update_" -E "^update_e2e" --output-on-failure --no-tests=error
+
+      # About five minutes: every scenario replayed with a kill at each effect.
+      # update_e2e_smoke is left out because the real client needs a GPU.
+      - name: Run update launcher e2e
+        if: matrix.preset == 'default'
+        run: ctest --test-dir build -R "^update_e2e$" --output-on-failure --no-tests=error
 
       - name: Upload client artifact
         if: matrix.preset == 'release'
