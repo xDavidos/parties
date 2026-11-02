@@ -110,6 +110,7 @@ if(APPLE)
 endif()
 
 add_subdirectory(common)
+add_subdirectory(updater/core)
 if(BUILD_CLIENT)
     add_subdirectory(encdec)
     add_subdirectory(client)

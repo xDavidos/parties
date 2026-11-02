@@ -1,5 +1,8 @@
 #pragma once
 
+#include <parties/update/data_compat.h>
+
+#include <cstdint>
 #include <span>
 
 namespace parties::client::schema {
@@ -102,14 +105,10 @@ constexpr Version target_of(std::span<const Migration> migrations) {
 
 inline constexpr Version kCurrent = target_of(kMigrations);
 
-enum class OpenAction { Migrate, OpenAsIs, TooNew };
-
-// A build never lowers a newer database's version or floor; it opens one as is
-// when the floor admits it.
-constexpr OpenAction decide_open(Version db, int build_schema) {
-    if (db.version < build_schema) return OpenAction::Migrate;
-    if (db.version == build_schema || db.compat_floor <= build_schema) return OpenAction::OpenAsIs;
-    return OpenAction::TooNew;
+constexpr update::Compatibility compatibility(Version db, int build_schema) {
+    return update::compatibility(static_cast<uint32_t>(build_schema),
+                                 {static_cast<uint32_t>(db.version),
+                                  static_cast<uint32_t>(db.compat_floor)});
 }
 
 } // namespace parties::client::schema

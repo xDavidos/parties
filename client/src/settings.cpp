@@ -185,8 +185,8 @@ Settings::OpenResult Settings::open_with(const SettingsPaths& paths,
         return fail(OpenStatus::Unavailable, "cannot read the database: " + found.error);
 
     const schema::Version target = schema::target_of(migrations);
-    const schema::OpenAction action = schema::decide_open(found.version, target.version);
-    if (action == schema::OpenAction::TooNew)
+    const update::Compatibility action = schema::compatibility(found.version, target.version);
+    if (action == update::Compatibility::Incompatible)
         return fail(OpenStatus::TooNew,
                     "the data was written by a newer version of Parties (data version " +
                     std::to_string(found.version.version) + ", readable from version " +
@@ -197,7 +197,7 @@ Settings::OpenResult Settings::open_with(const SettingsPaths& paths,
     exec("PRAGMA journal_mode=WAL;", error);
     exec("PRAGMA foreign_keys=ON;", error);
 
-    if (action == schema::OpenAction::OpenAsIs)
+    if (action == update::Compatibility::ReadsAsIs)
         return {OpenStatus::Ready, {}};
 
     if (found.version.version >= 1) {
