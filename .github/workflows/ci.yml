@@ -148,7 +148,7 @@ jobs:
         run: cmake --preset ${{ matrix.preset }}
 
       - name: Build
-        run: cmake --build --preset ${{ matrix.preset }} -- -k 0
+        run: cmake --build --preset ${{ matrix.preset }}
 
       - name: Run update core and data safety tests
         run: ctest --test-dir ${{ matrix.preset == 'macos-arm64-release' && 'build-macos-release' || 'build-macos' }} -R "^(update_|parties_data_)" --output-on-failure --no-tests=error
