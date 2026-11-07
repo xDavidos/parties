@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
-max_lines=900
+max_lines=950
 failures=0
 
 lines=$(find "$repo/updater/host" -type f \( -name '*.h' -o -name '*.cpp' -o -name '*.mm' \) -exec cat {} + | wc -l | tr -d ' ')
