@@ -91,6 +91,8 @@ public:
     void deliver(Assignment assignment);
     // TerminateApp: SIGKILL the app front. False when there is none.
     bool kill_app();
+    // One line to the app on its link. False when it has no link.
+    bool send_link(const link::LauncherMessage& message);
     void activate_app();
 
 private:

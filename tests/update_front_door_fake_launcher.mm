@@ -2,7 +2,8 @@
 // --role=fake-launcher=<this dylib>, so this process, like the real launcher,
 // was never started by LaunchServices. It launches fronts through NSWorkspace,
 // plays every fake client scenario, and checks each ExitKind against the table
-// in process-contract.md, "Exit classification".
+// in process-contract.md, "Exit classification". Then it runs the real
+// PartiesClient.dylib on unusable, too new and normal data.
 
 #import <Foundation/Foundation.h>
 
@@ -67,8 +68,22 @@ constexpr Scenario kScenarios[]{
     {"corrupt", ExitKind::Clean, false, true},
 };
 
+// Each real client case runs on its own directory under --real-data-root,
+// which the shell prepared.
+struct RealCase {
+    const char* data;
+    ExitKind expected;
+    const char* logged;  // a line the front's log must contain
+};
+
+constexpr RealCase kRealCases[]{
+    {"read-only", ExitKind::DataUnavailable, "Refusing to start (exit code 3)"},
+    {"too-new", ExitKind::DataTooNew, "Refusing to start (exit code 4)"},
+    {"normal", ExitKind::Clean, "[host] terminate: exiting 0"},
+};
+
 struct Options {
-    fs::path install_root, data_dir, log_dir, fake_client;
+    fs::path install_root, data_dir, log_dir, fake_client, real_client, real_data_root;
     std::string test_namespace;
     bool launcher_loss = false;
 };
@@ -97,14 +112,19 @@ Sha256 file_sha256(const fs::path& file) {
     return digest;
 }
 
-Assignment prepare(const Options& o, const std::string& scenario, bool corrupt) {
-    const fs::path dir = o.install_root / "builds" / ("fake-" + scenario);
+Assignment install(const Options& o, const std::string& build, const fs::path& client, const fs::path& data_dir) {
+    const fs::path dir = o.install_root / "builds" / build;
     fs::create_directories(dir);
-    fs::copy_file(o.fake_client, dir / "PartiesClient.dylib", fs::copy_options::overwrite_existing);
-    std::ofstream(dir / "scenario") << scenario << "\n";
-    Sha256 digest = file_sha256(dir / "PartiesClient.dylib");
-    if (corrupt) digest.bytes[0] ^= 0xff;
-    return {"builds\\fake-" + scenario, digest, o.data_dir.string(), (o.data_dir / "backups").string()};
+    fs::copy_file(client, dir / "PartiesClient.dylib", fs::copy_options::overwrite_existing);
+    return {"builds\\" + build, file_sha256(dir / "PartiesClient.dylib"), data_dir.string(),
+            (data_dir / "backups").string()};
+}
+
+Assignment prepare(const Options& o, const std::string& scenario, bool corrupt) {
+    Assignment assignment = install(o, "fake-" + scenario, o.fake_client, o.data_dir);
+    std::ofstream(o.install_root / "builds" / ("fake-" + scenario) / "scenario") << scenario << "\n";
+    if (corrupt) assignment.app_sha256.bytes[0] ^= 0xff;
+    return assignment;
 }
 
 std::optional<double> lock_free_within(const fs::path& data_dir, Clock::time_point from) {
@@ -153,7 +173,7 @@ size_t registrations(const char* when) {
 
 struct Observed {
     std::optional<int32_t> pid;
-    bool loaded = false, corrupt = false, healthy = false, lock_held = false;
+    bool loaded = false, corrupt = false, hello = false, healthy = false, lock_held = false;
     std::optional<FrontExited> exit;
     Clock::time_point exit_at, kill_at;
 };
@@ -178,6 +198,7 @@ void observe(FrontDoor& door, const Options& o, Observed& seen, std::chrono::sec
                        },
                        [&](const LinkLine& e) {
                            auto message = link::parse_app_message(e.line);
+                           if (message && std::holds_alternative<link::Hello>(*message)) seen.hello = true;
                            if (message && std::holds_alternative<link::Healthy>(*message)) seen.healthy = true;
                        },
                        [&](const FrontExited& e) {
@@ -222,6 +243,43 @@ void play(FrontDoor& door, const Options& o, const Scenario& s) {
     const auto released = lock_free_within(o.data_dir, killed ? seen.kill_at : seen.exit_at);
     expect(released.has_value(), name + ": data.lock free " + (released ? fixed(*released) : std::string("> 1 s")) + " after " +
                                  (killed ? "SIGKILL" : "the death was seen"));
+}
+
+// The launcher asks a healthy app to exit, as PARTIES_TEST_EXIT_AFTER_HEALTHY_MS
+// makes the Windows launcher do, so a normal start ends Clean.
+void play_real(FrontDoor& door, const Options& o, const RealCase& c) {
+    const std::string name = std::string("real client on ") + c.data + " data";
+    const fs::path data_dir = o.real_data_root / c.data;
+    const bool healthy_expected = c.expected == ExitKind::Clean;
+    door.deliver(install(o, std::string("real-") + c.data, o.real_client, data_dir));
+    Observed seen;
+    std::optional<Clock::time_point> loaded_at;
+    bool exit_sent = false;
+    observe(door, o, seen, 180s, [&] {
+        if (seen.loaded && !loaded_at) loaded_at = Clock::now();
+        if (seen.healthy && !exit_sent) {
+            exit_sent = true;
+            std::printf("[e2e] %s: healthy %s after the payload loaded\n", name.c_str(),
+                        fixed(loaded_at ? ms_since(*loaded_at) : -1).c_str());
+            expect(door.send_link(link::ExitRequested{}), name + ": exit_requested went over the link");
+        }
+        return false;
+    });
+
+    const std::string got = seen.exit ? exit_kind_name(seen.exit->kind) : "no exit within 180 s";
+    expect(seen.exit && seen.exit->kind == c.expected,
+           name + ": " + got + " (expected " + exit_kind_name(c.expected) + ")");
+    expect(seen.loaded, name + ": loaded");
+    expect(seen.hello, name + ": hello arrived over the link");
+    expect(seen.healthy == healthy_expected,
+           name + (healthy_expected ? ": healthy arrived over the link" : ": never reported healthy"));
+    if (!seen.exit) return;
+    std::printf("[e2e] %s: front pid=%d\n", name.c_str(), seen.exit->pid);
+    expect(front_log(o, seen.exit->pid).find(c.logged) != std::string::npos,
+           name + ": the front logged \"" + c.logged + "\"");
+    const auto released = lock_free_within(data_dir, seen.exit_at);
+    expect(released.has_value(), name + ": data.lock free " + (released ? fixed(*released) : std::string("> 1 s")) +
+                                 " after the death was seen");
 }
 
 // Waits for a front other than the app to connect and leave.
@@ -316,6 +374,8 @@ extern "C" int parties_fake_launcher_main(const PartiesHostApi* host) {
         if (auto v = flag(arg, "--data-dir=")) o.data_dir = *v;
         if (auto v = flag(arg, "--log-dir=")) o.log_dir = *v;
         if (auto v = flag(arg, "--fake-client=")) o.fake_client = *v;
+        if (auto v = flag(arg, "--real-client=")) o.real_client = *v;
+        if (auto v = flag(arg, "--real-data-root=")) o.real_data_root = *v;
         if (auto v = flag(arg, "--test-namespace=")) o.test_namespace = *v;
         if (arg == "--mode=launcher-loss") o.launcher_loss = true;
     }
@@ -341,6 +401,8 @@ extern "C" int parties_fake_launcher_main(const PartiesHostApi* host) {
     }
 
     for (const Scenario& s : kScenarios) play(*door, o, s);
+    if (!o.real_client.empty())
+        for (const RealCase& c : kRealCases) play_real(*door, o, c);
     single_instance(*door, o, bundle, front_arguments);
     std::printf("[e2e] %s: %d failure(s)\n", failures ? "FAILED" : "passed", failures);
     return failures ? 1 : 0;

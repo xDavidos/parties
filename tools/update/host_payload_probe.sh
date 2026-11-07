@@ -41,29 +41,6 @@ self_test() {
     return "$rc"
 }
 
-# Capture device init blocks on the microphone prompt, which nobody answers on
-# a CI runner. GitHub's runner VMs let root write the TCC databases.
-grant_tcc() {
-    local now db service
-    now=$(date +%s)
-    for db in "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
-              "/Library/Application Support/com.apple.TCC/TCC.db"; do
-        for service in kTCCServiceMicrophone kTCCServiceCamera; do
-            if sudo sqlite3 "$db" "INSERT OR REPLACE INTO access
-                    (service, client, client_type, auth_value, auth_reason, auth_version, flags, last_modified)
-                    VALUES ('$service', '$bundle_id', 0, 2, 3, 1, 0, $now);"; then
-                echo "TCC grant $service in $db: inserted"
-            else
-                echo "TCC grant $service in $db: insert failed"
-                sudo sqlite3 "$db" ".schema access" || true
-            fi
-            echo "    row: $(sudo sqlite3 "$db" "SELECT service, client, client_type, auth_value, auth_reason
-                FROM access WHERE service = '$service' AND client = '$bundle_id';" 2>&1)"
-        done
-    done
-    sudo pkill -x tccd || true
-}
-
 logged_front_pid() {
     sed -n 's/^\[host\] front pid=\([0-9]*\).*/\1/p' "$log" | head -n 1
 }
@@ -110,7 +87,7 @@ fi
 
 echo "== Microphone and camera access for $bundle_id"
 if [ "${GITHUB_ACTIONS:-}" = true ]; then
-    grant_tcc
+    bash "$(dirname "$0")/grant_tcc.sh" "$bundle_id"
 else
     echo "not on GitHub Actions; leaving TCC alone, answer the prompts by hand"
 fi

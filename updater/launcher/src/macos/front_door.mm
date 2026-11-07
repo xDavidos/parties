@@ -366,6 +366,13 @@ void FrontDoor::activate_app() {
     if (app_) send(*app_, front_door::Activate{});
 }
 
+bool FrontDoor::send_link(const link::LauncherMessage& message) {
+    if (!app_) return false;
+    const int fd = fronts_.at(*app_).link;
+    const std::string line = link::write(message);
+    return fd >= 0 && ::send(fd, line.data(), line.size(), 0) == ssize_t(line.size());
+}
+
 void FrontDoor::send(int32_t pid, const front_door::LauncherMessage& message) {
     auto it = fronts_.find(pid);
     if (it == fronts_.end() || it->second.door < 0) return;
