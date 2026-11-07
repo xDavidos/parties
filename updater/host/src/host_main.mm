@@ -11,6 +11,7 @@
 #include <client/exit_codes.h>
 #include <parties/data_lock.h>
 #include <parties/front_door_socket.h>
+#include <parties/macos_layout.h>
 #include <parties/update/product.h>
 
 #include <chrono>
@@ -25,6 +26,7 @@
 
 namespace fs = std::filesystem;
 namespace door = parties::host::front_door;
+namespace layout = parties::update::macos;
 namespace protocol = parties::update::front_door;
 using parties::client::ExitCode;
 using parties::update::kMacClient;
@@ -47,15 +49,8 @@ fs::path app_support() {
         .firstObject.fileSystemRepresentation;
 }
 
-// Where parties.db lives when no launcher assigns a place. A dev build keeps
-// its own, so its schema never migrates the database a release build reads.
-fs::path unmanaged_data_dir() {
-#ifdef PARTIES_RETAIL
-    return app_support() / "Parties";
-#else
-    return app_support() / "Parties Dev";
-#endif
-}
+// Where parties.db lives when no launcher assigns a place.
+fs::path unmanaged_data_dir() { return app_support() / layout::kDataRoot; }
 
 #ifdef PARTIES_UPDATE_TESTING
 std::optional<std::string_view> flag(std::string_view arg, std::string_view name) {
@@ -65,7 +60,7 @@ std::optional<std::string_view> flag(std::string_view arg, std::string_view name
 #endif
 
 Args parse_args(int argc, const char* argv[]) {
-    Args args{.install_root = app_support() / "Parties Runtime"};
+    Args args{.install_root = app_support() / layout::kRuntimeRoot};
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
         if (arg == "--") {
@@ -137,8 +132,7 @@ void hold_data_lock(const fs::path& data_dir) {
 
 [[noreturn]] void run_assigned(const fs::path& bundle, const Args& args, const std::string& socket,
                                const protocol::Assign& assign) {
-    // The codec admits only "builds\<plain name>".
-    const fs::path build_dir = args.install_root / "builds" / assign.build.substr(sizeof("builds\\") - 1);
+    const fs::path build_dir = layout::build_path(args.install_root, assign.build);
     hold_data_lock(assign.data_dir);
     const auto payload = parties::host::load(build_dir / kMacClient.app_file, assign.app_sha256, kClientEntry);
     if (!payload) {
