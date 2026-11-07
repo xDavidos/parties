@@ -15,6 +15,9 @@ namespace parties::update::launcher {
 
 namespace {
 
+// Windows has no host to outgrow.
+constexpr Runner kRunner{.launcher_protocol = kLinkProtocol, .host_abi = 0};
+
 link::DowngradeEffect wire_effect(DataEffect effect) {
     switch (effect) {
     case DataEffect::ReadsAsIs:
@@ -193,7 +196,7 @@ JobOutcome UpdateWorker::run(const JobRequest& request) {
     }
 
     if (downgrade) {
-        ChannelSwitchPlan plan = plan_channel_switch(state, *manifest, kLinkProtocol, request.live_db);
+        ChannelSwitchPlan plan = plan_channel_switch(state, *manifest, kRunner, request.live_db);
         auto* pinned = std::get_if<StayPinned>(&plan);
         if (pinned && pinned->downgrade) {
             const DowngradeOffer& offer = *pinned->downgrade;
@@ -222,7 +225,7 @@ JobOutcome UpdateWorker::run(const JobRequest& request) {
     }
 
     out.events.push_back(ManifestSeen{channel, manifest->payload().revoked});
-    UpdateDecision decision = plan_update(state, *manifest, kLinkProtocol, request.live_db);
+    UpdateDecision decision = plan_update(state, *manifest, kRunner, request.live_db);
     if (decision.new_intent) out.events.push_back(ChannelIntentSet{channel, *decision.new_intent});
     out.ok = true;
     if (auto* stage = std::get_if<StageBuild>(&decision.plan)) {

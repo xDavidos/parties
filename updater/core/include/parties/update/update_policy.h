@@ -45,6 +45,7 @@ struct ReportPinned {
 enum class BlockReason : uint8_t {
     Busy,               // a candidate is on probation or data is being restored
     LauncherTooOld,     // the newer build cannot talk to the running launcher
+    HostTooOld,         // the newer build cannot load into the installed macOS host
     NoCompatibleBuild,  // good is revoked and no other build can run here
 };
 struct Blocked {
@@ -58,11 +59,16 @@ struct UpdateDecision {
     std::optional<ChannelIntent> new_intent;  // set when the channel caught up with a pin
 };
 
-// launcher_protocol: the link protocol of the running (good build's) launcher.
-// A candidate always runs under it, so a build whose
-// min_supported_launcher_link is above it is never staged.
-UpdateDecision plan_update(const SupervisorState& state, const VerifiedManifest& manifest,
-                           uint32_t launcher_protocol, const std::optional<DataInfo>& live_db);
+// What a candidate runs under: the good build's launcher, and on macOS the
+// installed host, which normal updates never replace. A build that asks for
+// more than either is never staged or offered.
+struct Runner {
+    uint32_t launcher_protocol;  // the link protocol of the good build's launcher
+    uint32_t host_abi;           // PARTIES_HOST_ABI of the host; 0 on Windows, where every build asks for 0
+};
+
+UpdateDecision plan_update(const SupervisorState& state, const VerifiedManifest& manifest, const Runner& runner,
+                           const std::optional<DataInfo>& live_db);
 
 struct FollowNow {};
 // The default when the target channel's newest build is older than good.
@@ -73,7 +79,7 @@ struct StayPinned {
 using ChannelSwitchPlan = std::variant<FollowNow, StayPinned>;
 
 ChannelSwitchPlan plan_channel_switch(const SupervisorState& state, const VerifiedManifest& target,
-                                      uint32_t launcher_protocol, const std::optional<DataInfo>& live_db);
+                                      const Runner& runner, const std::optional<DataInfo>& live_db);
 
 // The intent to commit (through ChannelIntentSet) when the user switches
 // without taking the downgrade.

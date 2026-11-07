@@ -9,19 +9,23 @@ namespace {
 struct Facts {
     const SupervisorState& state;
     const VerifiedManifest& manifest;
-    uint32_t launcher_protocol;
+    const Runner& runner;
     const std::optional<DataInfo>& live;
 
     bool quarantined(const BuildEntry& e) const {
         const BuildRecord* r = state.find(e.id());
         return r && r->quarantined();
     }
-    bool talks_to_launcher(const BuildEntry& e) const { return e.min_supported_launcher_link <= launcher_protocol; }
+    bool talks_to_launcher(const BuildEntry& e) const {
+        return e.min_supported_launcher_link <= runner.launcher_protocol;
+    }
+    bool loads_in_host(const BuildEntry& e) const { return e.min_host_abi <= runner.host_abi; }
+    bool runs_here(const BuildEntry& e) const { return talks_to_launcher(e) && loads_in_host(e); }
     bool reads_data(const BuildEntry& e) const {
         return !live || compatibility(e.data_schema, *live) != Compatibility::Incompatible;
     }
     bool offerable(const BuildEntry& e) const {
-        return !manifest.is_revoked(e.version) && talks_to_launcher(e) && !quarantined(e);
+        return !manifest.is_revoked(e.version) && runs_here(e) && !quarantined(e);
     }
     bool runnable(const BuildEntry& e) const { return offerable(e) && reads_data(e); }
 
@@ -55,9 +59,9 @@ struct Facts {
 
 } // namespace
 
-UpdateDecision plan_update(const SupervisorState& state, const VerifiedManifest& manifest,
-                           uint32_t launcher_protocol, const std::optional<DataInfo>& live_db) {
-    Facts f{state, manifest, launcher_protocol, live_db};
+UpdateDecision plan_update(const SupervisorState& state, const VerifiedManifest& manifest, const Runner& runner,
+                           const std::optional<DataInfo>& live_db) {
+    Facts f{state, manifest, runner, live_db};
     if (std::holds_alternative<Probation>(state.activation) || std::holds_alternative<Restoring>(state.operation))
         return {Blocked{BlockReason::Busy, std::nullopt}};
 
@@ -93,9 +97,13 @@ UpdateDecision plan_update(const SupervisorState& state, const VerifiedManifest&
 
     const BuildEntry* waiting = f.newest([&](const BuildEntry& e) {
         return e.version > installed && !manifest.is_revoked(e.version) && !f.quarantined(e) && f.reads_data(e) &&
-               !f.talks_to_launcher(e);
+               !f.runs_here(e);
     });
-    if (waiting) return {Blocked{BlockReason::LauncherTooOld, waiting->version}, new_intent};
+    // A new host is the one the user can fetch, and it brings a newer seed launcher.
+    if (waiting)
+        return {Blocked{f.loads_in_host(*waiting) ? BlockReason::LauncherTooOld : BlockReason::HostTooOld,
+                        waiting->version},
+                new_intent};
 
     const BuildEntry* top = f.newest([&](const BuildEntry& e) { return f.offerable(e); });
     if (top && top->version < installed && !f.already_staged(*top))
@@ -104,8 +112,8 @@ UpdateDecision plan_update(const SupervisorState& state, const VerifiedManifest&
 }
 
 ChannelSwitchPlan plan_channel_switch(const SupervisorState& state, const VerifiedManifest& target,
-                                      uint32_t launcher_protocol, const std::optional<DataInfo>& live_db) {
-    Facts f{state, target, launcher_protocol, live_db};
+                                      const Runner& runner, const std::optional<DataInfo>& live_db) {
+    Facts f{state, target, runner, live_db};
     const Version& installed = state.good.version;
     const BuildEntry* top = f.newest([&](const BuildEntry& e) { return f.offerable(e); });
     if (top && top->version >= installed) return FollowNow{};
