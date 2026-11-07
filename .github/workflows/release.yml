@@ -207,6 +207,7 @@ jobs:
     runs-on: macos-26
     env:
       VCPKG_DOWNLOADS: ${{ github.workspace }}/.vcpkg-downloads
+      APP: build-macos-release/updater/host/Parties.app
     steps:
       - uses: actions/checkout@v6
         with:
@@ -249,22 +250,21 @@ jobs:
       - name: Build
         run: cmake --build --preset macos-arm64-release
 
+      # Written outside the bundle, so nothing has to be removed before signing.
       - name: Generate dSYM bundles
-        run: dsymutil build-macos-release/client/parties_client.app/Contents/MacOS/parties_client
+        run: |
+          mkdir -p build-macos-release/dsym
+          dsymutil "$APP/Contents/MacOS/Parties" -o build-macos-release/dsym/Parties.dSYM
+          dsymutil "$APP/Contents/Frameworks/PartiesClient.dylib" -o build-macos-release/dsym/PartiesClient.dylib.dSYM
 
       - name: Upload client debug symbols to Sentry
         run: |
           npx -y @sentry/cli debug-files upload \
             --org ${{ secrets.SENTRY_ORG }} \
             --project ${{ secrets.SENTRY_PROJECT_MACOS }} \
-            build-macos-release/client/
+            build-macos-release/dsym/
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-
-      - name: Prepare app bundle for distribution
-        run: |
-          rm -rf build-macos-release/client/parties_client.app/Contents/MacOS/*.dSYM
-          mv build-macos-release/client/parties_client.app build-macos-release/client/Parties.app
 
       # ── Code signing ──────────────────────────────────────────────────────
       - name: Import code signing certificate
@@ -285,8 +285,6 @@ jobs:
 
       - name: Code sign app bundle
         run: |
-          APP="build-macos-release/client/Parties.app"
-
           # Find the Developer ID Application identity from the imported certificate
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "Signing with: $IDENTITY"
@@ -305,6 +303,10 @@ jobs:
           codesign --force --options runtime --sign "$IDENTITY" \
             "$SPARKLE/Versions/B"
 
+          # The client payload the host loads
+          codesign --force --options runtime --identifier org.parties.client.app \
+            --sign "$IDENTITY" "$APP/Contents/Frameworks/PartiesClient.dylib"
+
           # Sign the main app bundle
           codesign --force --options runtime \
             --entitlements client/res/Parties.entitlements \
@@ -318,7 +320,7 @@ jobs:
         run: |
           npx --yes create-dmg \
             --overwrite \
-            "build-macos-release/client/Parties.app" \
+            "$APP" \
             build-macos-release/ || true
           # create-dmg names the file automatically; rename to our convention
           mv build-macos-release/*.dmg "parties-client-macos-${{ github.ref_name }}.dmg"
@@ -423,7 +425,7 @@ jobs:
           python3 -m venv /tmp/sparkle-verify
           /tmp/sparkle-verify/bin/pip install --quiet --disable-pip-version-check pynacl
           DMG="parties-client-macos-${{ github.ref_name }}.dmg" \
-          PLIST="build-macos-release/client/Parties.app/Contents/Info.plist" \
+          PLIST="$APP/Contents/Info.plist" \
           /tmp/sparkle-verify/bin/python - <<'PY'
           import base64, glob, os, plistlib, re, sys
           info = plistlib.load(open(os.environ["PLIST"], "rb"))
