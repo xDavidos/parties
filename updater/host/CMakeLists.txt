@@ -3,11 +3,11 @@
 add_library(parties_host_api INTERFACE)
 target_include_directories(parties_host_api INTERFACE include)
 
-add_executable(parties_host MACOSX_BUNDLE src/host_main.mm src/payload.cpp)
+add_executable(parties_host MACOSX_BUNDLE src/host_main.mm src/payload.cpp src/front_door_client.mm)
 target_include_directories(parties_host PRIVATE ${CMAKE_SOURCE_DIR}/client/include)
 target_compile_definitions(parties_host PRIVATE
     $<$<BOOL:${PARTIES_UPDATE_TESTING}>:PARTIES_UPDATE_TESTING>)
-target_link_libraries(parties_host PRIVATE parties_host_api parties_update_boot "-framework AppKit")
+target_link_libraries(parties_host PRIVATE parties_host_api parties_update_link "-framework AppKit")
 
 set(MACOS_ICON "${CMAKE_SOURCE_DIR}/client/res/AppIcon.icns")
 set_source_files_properties(${MACOS_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)

@@ -17,6 +17,12 @@ struct LoadedPayload {
     int (*entry)(const PartiesHostApi*) = nullptr;
 };
 
+// The names of the two symbols a payload exports.
+struct Entry {
+    const char* min_host_abi;  // const uint32_t: the lowest host ABI it needs
+    const char* main;          // int (const PartiesHostApi*)
+};
+
 enum class LoadError : uint8_t {
     Missing,
     DigestMismatch,
@@ -31,6 +37,6 @@ std::expected<update::Sha256, LoadError> digest_file(const std::filesystem::path
 // checks its ABI. dlopen runs the image's static initializers, so nothing from
 // the file runs before its digest matches.
 std::expected<LoadedPayload, LoadError>
-load(const std::filesystem::path& file, const std::optional<update::Sha256>& expected);
+load(const std::filesystem::path& file, const std::optional<update::Sha256>& expected, const Entry& entry);
 
 } // namespace parties::host

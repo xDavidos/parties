@@ -35,7 +35,7 @@ std::expected<update::Sha256, LoadError> digest_file(const std::filesystem::path
 }
 
 std::expected<LoadedPayload, LoadError>
-load(const std::filesystem::path& file, const std::optional<update::Sha256>& expected) {
+load(const std::filesystem::path& file, const std::optional<update::Sha256>& expected, const Entry& entry) {
     const auto hash_start = std::chrono::steady_clock::now();
     const auto digest = digest_file(file);
     const double hash_ms = ms_since(hash_start);
@@ -57,9 +57,9 @@ load(const std::filesystem::path& file, const std::optional<update::Sha256>& exp
         return std::unexpected(LoadError::DlopenFailed);
     }
 
-    const auto* min_abi = static_cast<const uint32_t*>(dlsym(handle, "parties_client_min_host_abi"));
-    auto* entry = reinterpret_cast<int (*)(const PartiesHostApi*)>(dlsym(handle, "parties_client_main"));
-    if (!min_abi || !entry) {
+    const auto* min_abi = static_cast<const uint32_t*>(dlsym(handle, entry.min_host_abi));
+    auto* run = reinterpret_cast<int (*)(const PartiesHostApi*)>(dlsym(handle, entry.main));
+    if (!min_abi || !run) {
         std::fprintf(stderr, "[host] payload lacks its entry points: %s\n", file.c_str());
         return std::unexpected(LoadError::DlopenFailed);
     }
@@ -70,7 +70,7 @@ load(const std::filesystem::path& file, const std::optional<update::Sha256>& exp
 
     std::fprintf(stderr, "[host] payload loaded: %s sha256=%s hash_ms=%.2f dlopen_ms=%.2f\n",
                  file.c_str(), digest->to_hex().c_str(), hash_ms, dlopen_ms);
-    return LoadedPayload{handle, entry};
+    return LoadedPayload{handle, run};
 }
 
 } // namespace parties::host
