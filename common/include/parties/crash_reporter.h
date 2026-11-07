@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <string>
 
 namespace parties {
@@ -13,7 +14,10 @@ bool crash_reporter_is_crashpad_handler(int argc, char* argv[]);
 // Initialize Sentry crash reporting.
 // Does nothing if Sentry is not linked or dsn is null/empty.
 // Call once at startup, before any other initialization.
-void crash_reporter_init(const char* dsn, const char* exe_path = nullptr);
+// An empty database_path keeps Sentry's state in .sentry-native under the
+// working directory.
+void crash_reporter_init(const char* dsn, const char* exe_path = nullptr,
+                         const std::filesystem::path& database_path = {});
 
 // Set user identity after authentication succeeds.
 void crash_reporter_set_user(const std::string& user_id, const std::string& display_name);

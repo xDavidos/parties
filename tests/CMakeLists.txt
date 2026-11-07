@@ -6,6 +6,9 @@ if(BUILD_CLIENT)
 endif()
 set_target_properties(toml11::toml11 PROPERTIES INTERFACE_COMPILE_OPTIONS "")
 
+# macOS builds only the platform-neutral data and update tests.
+if(NOT APPLE)
+
 add_executable(parties_integration_test
     integration_test.cpp
     ../server/src/server.cpp
@@ -233,6 +236,32 @@ if(BUILD_CLIENT)
         ${SPEEXDSP_LIBRARY})
 endif()
 
+endif()
+
+if(BUILD_CLIENT)
+    set(data_tests settings)
+    set(data_test_sources ../client/src/settings.cpp ../client/src/sqlite_file.cpp)
+    if(WIN32)
+        list(APPEND data_tests location legacy_import)
+        list(APPEND data_test_sources
+            ../client/src/windows/data_location.cpp
+            ../client/src/windows/legacy_import.cpp)
+    else()
+        list(APPEND data_tests posix_commit)
+    endif()
+    foreach(data_test ${data_tests})
+        add_executable(parties_data_${data_test}_test data_${data_test}_test.cpp ${data_test_sources})
+        target_include_directories(parties_data_${data_test}_test PRIVATE ../client/include)
+        target_link_libraries(parties_data_${data_test}_test PRIVATE
+            parties_common
+            parties_update_data
+            unofficial::sqlite3::sqlite3)
+        add_test(NAME parties_data_${data_test} COMMAND parties_data_${data_test}_test)
+    endforeach()
+endif()
+
+if(NOT APPLE)
+
 if(WIN32 AND BUILD_CLIENT)
     find_path(AMD_AMF_INCLUDE_DIRS "AMF/core/Result.h" REQUIRED)
     add_executable(parties_amf_decode_state_test amf_decode_state_test.cpp)
@@ -368,4 +397,121 @@ if(WIN32 AND BUILD_CLIENT)
     add_test(NAME parties_rmlui_dx12_resize COMMAND parties_rmlui_dx12_multiwindow_test --resize)
     add_test(NAME parties_rmlui_dx12_resize_msaa COMMAND parties_rmlui_dx12_multiwindow_test --resize --msaa)
     set_tests_properties(parties_rmlui_dx12_resize parties_rmlui_dx12_resize_msaa PROPERTIES TIMEOUT 60)
+endif()
+endif()
+
+if(TARGET parties_update_core)
+    foreach(update_test version data_compat manifest probation state_codec policy link retention front_door)
+        add_executable(update_${update_test}_test update_${update_test}_test.cpp)
+        target_link_libraries(update_${update_test}_test PRIVATE parties_update_core parties_common)
+        add_test(NAME update_${update_test} COMMAND update_${update_test}_test)
+    endforeach()
+
+    # Links only the boot library, which proves the boot stub's decisions build
+    # without parties_common and OpenSSL.
+    add_executable(update_boot_test update_boot_test.cpp)
+    target_link_libraries(update_boot_test PRIVATE parties_update_boot)
+    add_test(NAME update_boot COMMAND update_boot_test)
+    if(PARTIES_UPDATE_TESTING AND TARGET parties_boot_stub)
+        add_executable(update_fake_launcher WIN32 update_fake_launcher.cpp)
+        target_link_libraries(update_fake_launcher PRIVATE parties_update_boot)
+        add_executable(update_stub_test update_stub_test.cpp)
+        target_link_libraries(update_stub_test PRIVATE parties_update_boot bcrypt)
+        add_dependencies(update_stub_test parties_boot_stub update_fake_launcher)
+        add_test(NAME update_stub COMMAND update_stub_test
+            $<TARGET_FILE:parties_boot_stub> $<TARGET_FILE:update_fake_launcher>)
+        set_tests_properties(update_stub PROPERTIES TIMEOUT 300)
+    endif()
+
+    if(TARGET parties_manifest_tool)
+        add_executable(update_release_ops_test update_release_ops_test.cpp)
+        target_link_libraries(update_release_ops_test PRIVATE parties_release_ops parties_common)
+        add_test(NAME update_release_ops COMMAND update_release_ops_test)
+        if(PARTIES_UPDATE_TESTING)
+            add_executable(update_manifest_tool_test update_manifest_tool_test.cpp)
+            target_link_libraries(update_manifest_tool_test PRIVATE parties_update_release_keys parties_common)
+            add_dependencies(update_manifest_tool_test parties_manifest_tool)
+            add_test(NAME update_manifest_tool COMMAND update_manifest_tool_test $<TARGET_FILE:parties_manifest_tool>)
+        else()
+            add_test(NAME update_manifest_tool_retail_keyring
+                COMMAND parties_manifest_tool verify --envelope none --channel beta --keyring .)
+            set_tests_properties(update_manifest_tool_retail_keyring PROPERTIES
+                PASS_REGULAR_EXPRESSION "unknown option --keyring")
+        endif()
+    endif()
+    # 100000 seeded random-walk sequences; about two minutes in a Debug build.
+    set_tests_properties(update_probation PROPERTIES TIMEOUT 900)
+
+    if(BUILD_CLIENT)
+        add_executable(update_view_test update_view_test.cpp
+            ../client/src/update_view.cpp ../client/src/lobby_model.cpp)
+        target_include_directories(update_view_test PRIVATE ../client/include ../common/include)
+        target_link_libraries(update_view_test PRIVATE parties_update_link RmlUi::RmlUi)
+        add_test(NAME update_view COMMAND update_view_test)
+    endif()
+endif()
+
+# ── macOS front door end to end (testing builds only) ────────────────────────
+# A fake launcher that the host runs launches fronts through LaunchServices and
+# plays a fake client's exit scenarios. Needs a logged-in GUI session.
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND PARTIES_UPDATE_TESTING AND TARGET parties_host)
+    add_library(update_front_door_fake_client SHARED update_front_door_fake_client.mm)
+    target_link_libraries(update_front_door_fake_client PRIVATE
+        parties_host_api parties_update_link "-framework AppKit")
+    add_library(update_front_door_fake_launcher SHARED update_front_door_fake_launcher.mm)
+    target_link_libraries(update_front_door_fake_launcher PRIVATE parties_launcher_macos "-framework Foundation")
+    add_test(NAME update_front_door_e2e COMMAND bash ${CMAKE_SOURCE_DIR}/tools/update/front_door_e2e.sh
+        $<TARGET_BUNDLE_DIR:parties_host> ${CMAKE_SOURCE_DIR}/client/res/Parties.entitlements
+        $<TARGET_FILE:update_front_door_fake_client> $<TARGET_FILE:update_front_door_fake_launcher>
+        ${CMAKE_CURRENT_BINARY_DIR}/front_door_e2e)
+    set_tests_properties(update_front_door_e2e PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
+endif()
+
+# ── Update launcher end to end (testing builds only) ─────────────────────────
+# Drives the real PartiesLauncher.exe over fake builds in a temp install root.
+if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
+    find_package(RapidJSON CONFIG REQUIRED)
+    add_executable(update_fake_app WIN32 update_fake_app.cpp ../client/src/windows/shell_identity.cpp)
+    target_link_libraries(update_fake_app PRIVATE parties_update_link rapidjson unofficial::sqlite3::sqlite3)
+
+    add_executable(update_e2e_test update_e2e_test.cpp)
+    target_include_directories(update_e2e_test PRIVATE ../client/include)
+    target_link_libraries(update_e2e_test PRIVATE
+        parties_launcher_shell parties_common unofficial::sqlite3::sqlite3)
+    add_dependencies(update_e2e_test PartiesLauncher update_fake_app parties_manifest_tool)
+    set(update_e2e_args --launcher $<TARGET_FILE:PartiesLauncher> --fake-app $<TARGET_FILE:update_fake_app>
+        --manifest-tool $<TARGET_FILE:parties_manifest_tool>)
+    add_test(NAME update_e2e COMMAND update_e2e_test ${update_e2e_args})
+    set_tests_properties(update_e2e PROPERTIES TIMEOUT 1800)
+
+    add_executable(update_authenticode_test update_authenticode_test.cpp)
+    target_link_libraries(update_authenticode_test PRIVATE parties_launcher_shell)
+    add_test(NAME update_authenticode COMMAND update_authenticode_test)
+    # Needs a GPU: the real client reaches healthy only after presenting a frame.
+    if(TARGET parties_client)
+        add_test(NAME update_e2e_smoke COMMAND update_e2e_test ${update_e2e_args}
+            --real-client $<TARGET_FILE:parties_client>)
+        set_tests_properties(update_e2e_smoke PROPERTIES TIMEOUT 300 LABELS gpu)
+    endif()
+
+    add_executable(update_setup_test update_setup_test.cpp)
+    target_include_directories(update_setup_test PRIVATE ../client/include)
+    target_link_libraries(update_setup_test PRIVATE
+        parties_launcher_shell parties_common unofficial::sqlite3::sqlite3 ole32 propsys shell32)
+    add_dependencies(update_setup_test PartiesLauncher parties_boot_stub update_fake_app)
+    set(update_setup_args --launcher $<TARGET_FILE:PartiesLauncher> --stub $<TARGET_FILE:parties_boot_stub>
+        --fake-app $<TARGET_FILE:update_fake_app>)
+    add_test(NAME update_setup COMMAND update_setup_test ${update_setup_args})
+    set_tests_properties(update_setup PROPERTIES TIMEOUT 900)
+    add_test(NAME update_bridge COMMAND update_setup_test ${update_setup_args} --only bridge-)
+    set_tests_properties(update_bridge PROPERTIES TIMEOUT 900)
+    if(TARGET parties_client)
+        add_test(NAME update_bridge_no_updater COMMAND update_setup_test --no-updater-in $<TARGET_FILE:parties_client>)
+        add_test(NAME update_bridge_smoke COMMAND update_setup_test ${update_setup_args}
+            --real-client $<TARGET_FILE:parties_client> --only bridge-)
+        set_tests_properties(update_bridge_smoke PROPERTIES TIMEOUT 300 LABELS gpu)
+        add_test(NAME update_e2e_setup_smoke COMMAND update_setup_test ${update_setup_args}
+            --real-client $<TARGET_FILE:parties_client>)
+        set_tests_properties(update_e2e_setup_smoke PROPERTIES TIMEOUT 300 LABELS gpu)
+    endif()
 endif()
