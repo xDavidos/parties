@@ -1,6 +1,7 @@
 #include "front_door.h"
 
 #include "code_signing.h"
+#include "test_hooks.h"
 
 #import <AppKit/AppKit.h>
 
@@ -18,6 +19,9 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <string_view>
+
+extern char** environ;
 
 namespace parties::update::launcher::macos {
 
@@ -65,6 +69,18 @@ void launch_front(const std::string& bundle, const std::vector<std::string>& arg
     configuration.arguments = args;
     configuration.activates = YES;
     configuration.createsNewApplicationInstance = new_instance;
+    // LaunchServices starts a front with launchd's environment, so a
+    // harness's test settings reach it only this way.
+    if (testing::enabled()) {
+        NSMutableDictionary<NSString*, NSString*>* environment = [NSMutableDictionary dictionary];
+        for (char** e = environ; *e; ++e) {
+            const std::string_view entry = *e;
+            const size_t eq = entry.find('=');
+            if (entry.starts_with("PARTIES_TEST_") && eq != std::string_view::npos)
+                environment[@(std::string(entry.substr(0, eq)).c_str())] = @(std::string(entry.substr(eq + 1)).c_str());
+        }
+        configuration.environment = environment;
+    }
     NSURL* url = [NSURL fileURLWithPath:@(bundle.c_str()) isDirectory:YES];
     const auto started = std::chrono::steady_clock::now();
     std::fprintf(stderr, "[front-door] NSWorkspace open createsNewApplicationInstance=%s %s\n",
@@ -215,6 +231,11 @@ bool FrontDoor::on_line(int fd, Conn& conn, const std::string& line) {
         std::visit(overloaded{
                        [&](const front_door::Loaded& m) { events_.push_back(FrontLoaded{pid, m.build}); },
                        [&](const front_door::Corrupt& m) { events_.push_back(FrontCorrupt{pid, m.build}); },
+                       [&](const front_door::RecoveryChoice& m) {
+                           trace(now_ms(), "pid=%d recovery_choice{%s}", pid, m.id.c_str());
+                           if (front.state == front_door::FrontState::Recovering)
+                               events_.push_back(RecoveryAnswered{pid, m.id});
+                       },
                        [&](const front_door::Exiting& m) {
                            trace(now_ms(), "pid=%d exiting{%d}", pid, m.code);
                            if (!front.outcome.reported_code)
@@ -266,7 +287,7 @@ void FrontDoor::on_front(int fd, Conn& conn, const front_door::Front& message) {
 
     front_door::RouteInput input{
         .pending_spawn = pending_ && !app_,
-        .recovery_pending = false,
+        .recovery_pending = pending_recovery_.has_value(),
         .newcomer_recover = message.recover,
         .newcomer_seed_pending = message.seed_pending,
     };
@@ -275,6 +296,7 @@ void FrontDoor::on_front(int fd, Conn& conn, const front_door::Front& message) {
 
     std::visit(overloaded{
                    [&](const front_door::DeliverPendingSpawn&) { assign(pid); },
+                   [&](const front_door::DeliverPendingRecovery&) { deliver_recovery(pid); },
                    [&](const front_door::SendActivateOther& r) {
                        trace(now_ms(), "pid=%d -> activate_other (owner pid=%d)", pid, r.owner);
                        front.state = front_door::FrontState::Leaving;
@@ -348,9 +370,29 @@ void FrontDoor::deliver(Assignment assignment) {
 void FrontDoor::start_pending() {
     for (const auto& [pid, front] : fronts_)
         if (front.state == front_door::FrontState::Waiting) return assign(pid);
-    std::vector<std::string> arguments{"--ticket=" + std::to_string(pending_ticket_)};
+    launch(pending_ticket_);
+}
+
+void FrontDoor::launch(uint64_t ticket) {
+    std::vector<std::string> arguments{"--ticket=" + std::to_string(ticket)};
     arguments.insert(arguments.end(), options_.front_arguments.begin(), options_.front_arguments.end());
     launch_front(options_.host_bundle, arguments, false);
+}
+
+void FrontDoor::offer_recovery(front_door::Recovery recovery) {
+    pending_recovery_ = std::move(recovery);
+    for (const auto& [pid, front] : fronts_)
+        if (front.state == front_door::FrontState::Waiting) return deliver_recovery(pid);
+    launch(next_ticket_++);
+}
+
+void FrontDoor::deliver_recovery(int32_t pid) {
+    fronts_.at(pid).state = front_door::FrontState::Recovering;
+    send(pid, *pending_recovery_);
+    trace(now_ms(), "pid=%d recovery %s (%zu options)", pid, pending_recovery_->reason.c_str(),
+        pending_recovery_->options.size());
+    pending_recovery_.reset();
+    events_.push_back(RecoveryDelivered{pid});
 }
 
 void FrontDoor::assign(int32_t pid) {

@@ -190,7 +190,8 @@ void Supervisor::signal_boot_ok() {
     if (boot_ok_fd_ < 0) return;
     const char byte = 1;
     // The booting front may be gone; then nobody waits for this.
-    if (write(boot_ok_fd_, &byte, 1) != 1) log("boot_ok was not delivered: {}", std::strerror(errno));
+    if (write(boot_ok_fd_, &byte, 1) == 1) log("boot_ok sent");
+    else log("boot_ok was not delivered: {}", std::strerror(errno));
     close(boot_ok_fd_);
     boot_ok_fd_ = -1;
 }
@@ -266,6 +267,8 @@ void Supervisor::on_door(const Event& event) {
                        log("a newer seed is waiting to be installed; leaving");
                        core_->on_quit();
                    },
+                   [](const RecoveryDelivered&) {},
+                   [](const RecoveryAnswered& e) { log("front {} answered a recovery nobody waits for", e.pid); },
                },
                event);
 }
@@ -274,17 +277,42 @@ void Supervisor::drain_door() {
     while (auto event = door_->next(std::chrono::milliseconds(0))) on_door(*event);
 }
 
+// The host of a front draws the alert, so this waits for a front to show it,
+// for its answer and for that front to be gone: the next front LaunchServices
+// starts must be a new process. Like the Windows dialog, it waits as long as
+// the user does.
 void Supervisor::show_recovery(RecoveryDue due) {
     log("recovery shown: {}", recovery_reason_name(due.why));
-    RecoveryChoice choice = Quit{};
-    if (auto answer = testing::scripted_recovery()) {
-        signal_boot_ok();
-        choice = scripted_choice(core_->state(), due.live_db, due.backups, *answer);
-        log("recovery answered by script: {}", *answer);
-    } else {
-        // The host's recovery alert arrives with the boot role.
-        log("recovery needs the host's alert, which this build cannot show yet; leaving");
+    door_->offer_recovery({recovery_reason_name(due.why), options_.data_root.string(),
+                           recovery_options(core_->state(), due.live_db, due.backups)});
+    const auto give_up = Clock::now() + std::chrono::seconds(60);
+    std::optional<int32_t> shown_to;
+    std::optional<std::string> answer;
+    for (bool gone = false; !gone;) {
+        if (!shown_to && Clock::now() > give_up) {
+            log("no front came to show the recovery");
+            door_->withdraw();
+            break;
+        }
+        auto event = door_->next(std::chrono::milliseconds(250));
+        if (!event) continue;
+        std::visit(overloaded{
+                       [&](const RecoveryDelivered& e) {
+                           shown_to = e.pid;
+                           signal_boot_ok();
+                       },
+                       [&](const RecoveryAnswered& e) { answer = e.id; },
+                       [&](const FrontExited& e) {
+                           if (shown_to == e.pid) gone = true;
+                           else on_door(*event);
+                       },
+                       [&](const auto&) { on_door(*event); },
+                   },
+                   *event);
     }
+    log("recovery answered: {}", answer.value_or("nothing"));
+    const RecoveryChoice choice =
+        answer ? choice_for(*answer, core_->state(), due.live_db, due.backups) : RecoveryChoice{Quit{}};
     if (std::holds_alternative<Quit>(choice)) {
         quit_ = true;
         return;

@@ -66,7 +66,16 @@ struct FrontExited {
 struct QuitForInstallSent {
     int32_t pid = 0;
 };
-using Event = std::variant<FrontWaiting, FrontLoaded, FrontCorrupt, LinkLine, FrontExited, QuitForInstallSent>;
+// The recovery offer_recovery holds was sent to this front.
+struct RecoveryDelivered {
+    int32_t pid = 0;
+};
+struct RecoveryAnswered {
+    int32_t pid = 0;
+    std::string id;
+};
+using Event = std::variant<FrontWaiting, FrontLoaded, FrontCorrupt, LinkLine, FrontExited, QuitForInstallSent,
+                           RecoveryDelivered, RecoveryAnswered>;
 
 class FrontDoor {
 public:
@@ -96,9 +105,16 @@ public:
     void deliver(Assignment assignment);
     // TerminateApp: SIGKILL the app front. False when there is none.
     bool kill_app();
-    // A Spawn whose front never connected is given up: a front that comes
-    // later is not handed it.
-    void withdraw() { pending_.reset(); }
+    // ShowRecovery: send recovery to a waiting front, else launch one
+    // through LaunchServices and send it when it connects. Its host shows
+    // the alert, answers, and exits without loading a payload.
+    void offer_recovery(front_door::Recovery recovery);
+    // A Spawn or a recovery whose front never connected is given up: a front
+    // that comes later is not handed it.
+    void withdraw() {
+        pending_.reset();
+        pending_recovery_.reset();
+    }
     std::optional<int32_t> app_pid() const { return app_; }
     // The user's session is ending: a front that dies from now on without
     // reporting a code ended with it, not by crashing.
@@ -133,6 +149,8 @@ private:
     void on_exit(int32_t pid);
     void finish(int32_t pid);
     void assign(int32_t pid);
+    void deliver_recovery(int32_t pid);
+    void launch(uint64_t ticket);
     void start_pending();
     void send(int32_t pid, const front_door::LauncherMessage& message);
     void close_conn(int fd);
@@ -146,6 +164,7 @@ private:
     std::map<int32_t, Front> fronts_;  // by pid: one front-door connection per process
     std::optional<int32_t> app_;
     std::optional<Assignment> pending_;
+    std::optional<front_door::Recovery> pending_recovery_;
     uint64_t pending_ticket_ = 0;
     uint64_t next_ticket_ = 1;
     std::deque<Event> events_;

@@ -6,6 +6,7 @@
 #include "build_store.h"
 #include "code_signing.h"
 #include "durable_file.h"
+#include "file_io.h"
 #include "install_plan.h"
 #include "log.h"
 #include "state_store.h"
@@ -89,8 +90,17 @@ int run_install_seed(const LauncherOptions& o) {
     testing::before_effect();
     if (!apply(plan, builds, store, seed.id)) return 1;
     testing::before_effect();
+    // The host compares entry_sha256 with its own seed's build.json to know
+    // whether that seed still has to be installed.
+    const auto entry_digest = digest_file(seed_file);
+    if (!entry_digest) {
+        log("cannot read {}", seed_file.string());
+        return 1;
+    }
+    const std::string record =
+        "{\"seed\":\"" + seed.id.dir_name() + "\",\"entry_sha256\":\"" + entry_digest->sha256.to_hex() + "\"}\n";
     std::string error;
-    if (!durable_replace(o.install.state() / "seed.json", "{\"seed\":\"" + seed.id.dir_name() + "\"}\n", error)) {
+    if (!durable_replace(o.install.state() / "seed.json", record, error)) {
         log("cannot record the seed: {}", error);
         return 1;
     }

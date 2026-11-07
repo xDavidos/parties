@@ -45,6 +45,38 @@ RecoveryChoice scripted_choice(const SupervisorState& s, const std::optional<Dat
     return Quit{};
 }
 
+std::vector<front_door::RecoveryOption> recovery_options(const SupervisorState& s,
+                                                         const std::optional<DataInfo>& live_db,
+                                                         const std::vector<Backup>& backups) {
+    std::vector<front_door::RecoveryOption> out{
+        {"start", "Start Parties " + s.good.version.to_string(), "Try again with the current version."}};
+    if (auto previous = start_previous(s, live_db, backups); previous && previous->build != s.good) {
+        std::string detail;
+        if (previous->restore)
+            detail = "Starts on your data from the backup " + previous->restore->id.stem +
+                     ". Your current data is kept as a separate backup.";
+        out.push_back({"previous", "Start the previous version (" + previous->build.version.to_string() + ")", detail});
+    }
+    for (const BuildId& build : retryable(s))
+        out.push_back({"retry:" + build.dir_name(), "Try Parties " + build.version.to_string() + " again", ""});
+    if (restorable(s))
+        for (size_t i = 0; i < backups.size() && i < 3; ++i)
+            out.push_back({"restore:" + backups[i].id.stem, "Restore the backup " + backups[i].id.stem,
+                           "Data version " + std::to_string(backups[i].data.version) +
+                               ". Your current data is kept as a separate backup."});
+    return out;
+}
+
+RecoveryChoice choice_for(std::string_view id, const SupervisorState& s, const std::optional<DataInfo>& live_db,
+                          const std::vector<Backup>& backups) {
+    for (const BuildId& build : retryable(s))
+        if (id == "retry:" + build.dir_name()) return RetryBuild{build};
+    if (restorable(s))
+        for (const Backup& b : backups)
+            if (id == "restore:" + b.id.stem) return RestoreBackup{Snapshot{b.id, b.data}};
+    return scripted_choice(s, live_db, backups, id);
+}
+
 const char* recovery_reason_name(const std::optional<RecoveryReason>& why) {
     if (!why) return "requested";
     switch (*why) {
