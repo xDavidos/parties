@@ -9,17 +9,13 @@
 #include "recovery_ui.h"
 #include "shell_integration.h"
 #include "state_store.h"
+#include "supervisor_core.h"
 #include "testing.h"
 #include "update_worker.h"
-
-#include <parties/update/link.h>
-#include <parties/update/probation.h>
-#include <parties/update/update_policy.h>
 
 #include <algorithm>
 #include <charconv>
 #include <chrono>
-#include <deque>
 #include <memory>
 
 #include <windows.h>
@@ -28,13 +24,6 @@
 namespace parties::update::launcher {
 
 namespace {
-
-using Clock = std::chrono::steady_clock;
-
-constexpr auto kCheckInterval = std::chrono::hours(6);
-// How long a check or download may keep the launcher running after the app
-// exits: a full build over a slow link, but not a hidden process all day.
-constexpr auto kJobCapAfterExit = std::chrono::minutes(15);
 
 std::string random_hex(size_t bytes) {
     std::vector<unsigned char> raw(bytes);
@@ -54,24 +43,6 @@ void tell_user(const std::string& text) {
     if (!testing::enabled()) MessageBoxW(nullptr, widen(text).c_str(), L"Parties", MB_OK | MB_ICONERROR);
 }
 
-link::StatusNotice wire_notice(const Notice& n) {
-    link::StatusNotice out;
-    switch (n.kind) {
-    case Notice::Kind::RolledBack: out.kind = link::StatusNotice::Kind::RolledBack; break;
-    case Notice::Kind::DataRestored: out.kind = link::StatusNotice::Kind::DataRestored; break;
-    case Notice::Kind::Withdrawn: out.kind = link::StatusNotice::Kind::Withdrawn; break;
-    case Notice::Kind::RestoreFailed: out.kind = link::StatusNotice::Kind::RestoreFailed; break;
-    }
-    out.from = n.from;
-    out.to = n.to;
-    if (n.preserved) out.preserved = "backups\\" + n.preserved->stem + ".db";
-    return out;
-}
-
-struct PendingRecovery {
-    std::optional<RecoveryReason> why;
-};
-
 std::unique_ptr<UpdateSource> make_source(const LauncherOptions& o) {
     if (o.feed_dir) return make_local_dir_source(*o.feed_dir);
     if (o.feed_base) return make_https_source(*o.feed_base, true);
@@ -81,56 +52,72 @@ std::unique_ptr<UpdateSource> make_source(const LauncherOptions& o) {
     return make_https_source(std::string(kFeedBase), false);
 }
 
-class Supervisor {
+// The Win32 event loop around SupervisorCore, and its Executor: a job object,
+// a named pipe per app, WinHTTP or a local feed, the Apps entry, the boot
+// stub's event, and WM_ENDSESSION.
+class Supervisor final : Executor {
 public:
     explicit Supervisor(const LauncherOptions& o)
         : options_(o), store_(o.install, utf8(o.data.data())), builds_(o.install), data_(o.data),
-          worker_(make_source(o), testing::pinned_keys(), o.data.trust(), BuildStore(o.install)),
-          timing_(testing::timing()) {}
+          worker_(make_source(o), testing::pinned_keys(), o.data.trust(), BuildStore(o.install)) {}
 
     int run();
 
 private:
-    struct AppRun {
-        BuildId build;
+    // One app in the job object, with its link. SupervisorCore owns it; app_
+    // points at it for the wait handles while it exists.
+    struct AppRun final : AppSession {
+        AppRun(Supervisor& s, AppProcess p, std::unique_ptr<LinkServer> l)
+            : owner(s), process(std::move(p)), link(std::move(l)) {
+            owner.app_ = this;
+        }
+        ~AppRun() override {
+            if (owner.app_ == this) owner.app_ = nullptr;
+        }
+
+        bool send(const link::LauncherMessage& message) override { return link->send(message); }
+        void terminate() override { process.terminate(); }
+        void activate() override {
+            HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, owner.object_name(L".Client.Activate").c_str());
+            if (e) {
+                SetEvent(e);
+                CloseHandle(e);
+            }
+        }
+
+        Supervisor& owner;
         AppProcess process;
         std::unique_ptr<LinkServer> link;
-        Clock::time_point started;
-        std::optional<Clock::time_point> healthy_at;
-        bool welcomed = false;
-        bool deadline_fired = false;
-        bool clean_mark_fired = false;
-        bool confirm_mark_fired = false;
-        bool exit_sent = false;
-        std::optional<link::Status> last_sent;
     };
 
-    bool load_state();
-    bool adopt_own_build();
-    void dispatch(Event event);
-    bool execute(const Effect& effect);
-    bool spawn(const BuildId& build);
+    Clock::time_point now() const override { return Clock::now(); }
+    void before_effect() override { testing::before_effect(); }
+    bool commit(const SupervisorState& next, const BuildId& previous_good, std::string& error) override;
+    bool take_snapshot(const SnapshotId& id, const SupervisorState& committed, std::string& error) override;
+    std::expected<void, RestoreError> restore_snapshot(const std::optional<SnapshotId>& from,
+                                                       const SnapshotId& preserve_live_as) override {
+        return data_.restore(from, preserve_live_as);
+    }
+    std::expected<std::unique_ptr<AppSession>, SpawnFailure> spawn(const BuildRecord& build) override;
+    bool delete_build(const BuildId& build, const SupervisorState& committed, std::string& error) override {
+        return builds_.remove(build, committed, error);
+    }
+    void signal_boot_ok() override;
+    std::expected<std::optional<DataInfo>, std::string> inspect_live_db() const override { return data_.inspect(); }
+    std::vector<Backup> list_backups() const override { return data_.list(); }
+    bool feed_available() const override { return worker_.available(); }
+    bool job_busy() const override { return worker_.busy(); }
+    bool start_job(JobRequest request) override { return worker_.start(std::move(request)); }
+    std::optional<Download> download() const override { return worker_.download(); }
+    void cancel_job() override { worker_.cancel(); }
+
+    std::optional<SupervisorState> load_state();
+    std::optional<SupervisorState> adopt_own_build();
     void on_app_exit();
     void on_link();
-    void on_request(const link::Request& request);
-    void on_activate();
-    void on_quit();
-    void on_worker();
-    void on_timers();
-    std::optional<Clock::time_point> next_deadline() const;
-    void start_check();
-    void submit(Job job);
-    void pump();
-    void cancel_jobs();
-    bool repairing() const;
-    void show_pending_recovery();
-    void publish_status();
-    link::Status status() const;
-    std::optional<DataInfo> live_db();
-    void signal_boot_ok();
+    void show_pending_recovery(RecoveryDue due);
     void write_session(bool clean);
     void end_session();
-    Clock::duration units(uint32_t seconds) const { return timing_.unit * seconds; }
     std::wstring object_name(const wchar_t* suffix) const { return L"Local\\" + options_.object_prefix + suffix; }
 
     static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
@@ -141,161 +128,69 @@ private:
     DataGuard data_;
     UpdateWorker worker_;
     AppJob job_;
-    testing::Timing timing_;
 
-    SupervisorState state_;  // the last state that reached disk
-    std::deque<Event> queue_;
-    bool draining_ = false;
-    std::optional<AppRun> app_;
-    std::optional<PendingRecovery> recovery_;
-    std::optional<DataInfo> last_live_db_;
-    FeedView feed_view_;
-    bool restart_requested_ = false;
-    bool quitting_ = false;
+    AppRun* app_ = nullptr;
+    // Declared after job_, so a running app's handles close before the job
+    // object that kills it on close.
+    std::optional<SupervisorCore> core_;
     bool quit_ = false;
     bool session_ended_ = false;
-    Clock::time_point next_check_ = Clock::time_point::max();
-    std::optional<Clock::time_point> jobs_cut_off_;
-    std::deque<Job> jobs_;
-    std::optional<Job> running_job_;
 
     fs::path self_exe_;
     Sha256 self_sha_;
 };
 
-bool Supervisor::adopt_own_build() {
+std::optional<SupervisorState> Supervisor::adopt_own_build() {
     auto record = builds_.adopt(self_exe_.parent_path());
     if (!record) {
         tell_user("Parties is not installed correctly: " + record.error());
-        return false;
+        return std::nullopt;
     }
     SupervisorState initial = adopted_state(*record);
     std::string error;
     if (!store_.commit(initial, error)) {
         tell_user("Parties cannot save its update state: " + error);
-        return false;
+        return std::nullopt;
     }
-    state_ = initial;
     log("adopted {} as the good build", record->id.dir_name());
-    return true;
+    return initial;
 }
 
-bool Supervisor::load_state() {
+std::optional<SupervisorState> Supervisor::load_state() {
     LoadResult loaded = store_.load();
-    if (auto* s = std::get_if<SupervisorState>(&loaded)) {
-        state_ = *s;
-        return true;
-    }
+    if (auto* s = std::get_if<SupervisorState>(&loaded)) return *s;
     if (std::holds_alternative<NewerLauncherState>(loaded)) {
         // The boot stub falls back to its own safe mode when we exit without
         // boot_ok, so leaving now is the safe answer.
         log("supervisor.json was written by a newer launcher; leaving it untouched");
-        return false;
+        return std::nullopt;
     }
     if (std::holds_alternative<UnreadableState>(loaded))
         log("supervisor.json and its .prev are unreadable; rebuilding from the running build");
     return adopt_own_build();
 }
 
-std::optional<DataInfo> Supervisor::live_db() {
-    if (app_) return last_live_db_;
-    auto info = data_.inspect();
-    if (!info) {
-        log("cannot read the live database: {}", info.error());
-        return last_live_db_ = std::nullopt;
-    }
-    return last_live_db_ = *info;
+bool Supervisor::commit(const SupervisorState& next, const BuildId& previous_good, std::string& error) {
+    if (!store_.commit(next, error)) return false;
+    if (next.good != previous_good) refresh_uninstall_entry(options_.install, next.good);
+    return true;
 }
 
-void Supervisor::dispatch(Event event) {
-    queue_.push_back(std::move(event));
-    if (draining_) return;
-    draining_ = true;
-    while (!queue_.empty()) {
-        Event next = std::move(queue_.front());
-        queue_.pop_front();
-        Context ctx{live_db(), timing_.policy};
-        Step result = step(state_, next, ctx);
-        for (const Effect& effect : result.effects) {
-            testing::before_effect();
-            if (!execute(effect)) break;
-        }
-    }
-    draining_ = false;
-    publish_status();
+bool Supervisor::take_snapshot(const SnapshotId& id, const SupervisorState& committed, std::string& error) {
+    if (!data_.snapshot(id, error)) return false;
+    data_.prune(committed);
+    return true;
 }
 
-bool Supervisor::execute(const Effect& effect) {
-    std::string error;
-    bool ok = std::visit(
-        [&](const auto& e) -> bool {
-            using T = std::decay_t<decltype(e)>;
-            if constexpr (std::is_same_v<T, TakeSnapshot>) {
-                if (app_) return (error = "the app is running", false);
-                if (!data_.snapshot(e.id, error)) return false;
-                data_.prune(state_);
-                return true;
-            } else if constexpr (std::is_same_v<T, Commit>) {
-                if (!store_.commit(e.state, error)) return false;
-                if (e.state.good != state_.good) refresh_uninstall_entry(options_.install, e.state.good);
-                state_ = e.state;
-                return true;
-            } else if constexpr (std::is_same_v<T, Spawn>) {
-                return spawn(e.build);
-            } else if constexpr (std::is_same_v<T, TerminateApp>) {
-                if (!app_) return true;
-                app_->process.terminate();
-                log("killed {} after it missed the health deadline", app_->build.dir_name());
-                app_.reset();
-                queue_.push_back(AppExited{ExitKind::KilledHung});
-                return true;
-            } else if constexpr (std::is_same_v<T, RestoreSnapshot>) {
-                if (app_) return (error = "the app is running", false);
-                auto restored = data_.restore(e.from, e.preserve_live_as);
-                if (restored) return true;
-                error = restored.error().why;
-                // A restore that cannot even start would otherwise stop every
-                // launch here; one that changed the live data is resumed instead.
-                if (!restored.error().live_changed) {
-                    queue_.push_back(RestoreFailed{});
-                    if (!recovery_) queue_.push_back(StartRequested{});
-                }
-                return false;
-            } else if constexpr (std::is_same_v<T, DeleteBuild>) {
-                // A leftover directory is untracked, so the next start collects it.
-                if (!builds_.remove(e.build, state_, error)) log("cannot delete {}: {}", e.build.dir_name(), error);
-                return true;
-            } else if constexpr (std::is_same_v<T, Redownload>) {
-                if (!worker_.available()) log("{} needs to be downloaded again, but there is no update feed", e.build.dir_name());
-                else submit(RepairJob{e.build});
-                return true;
-            } else if constexpr (std::is_same_v<T, ShowRecovery>) {
-                recovery_ = PendingRecovery{e.why};
-                return true;
-            } else {
-                signal_boot_ok();
-                return true;
-            }
-        },
-        effect);
-    if (!ok && !error.empty()) log("effect failed: {}", error);
-    return ok;
-}
-
-bool Supervisor::spawn(const BuildId& build) {
-    const BuildRecord* record = state_.find(build);
-    std::optional<ExecLease> lease = record ? builds_.lease_app(*record) : std::nullopt;
-    if (!lease) {
-        queue_.push_back(BuildCorrupt{build});
-        return false;
-    }
+std::expected<std::unique_ptr<AppSession>, SpawnFailure> Supervisor::spawn(const BuildRecord& build) {
+    std::optional<ExecLease> lease = builds_.lease_app(build);
+    if (!lease) return std::unexpected(SpawnFailure::BuildCorrupt);
     std::wstring pipe = L"\\\\.\\pipe\\parties-link-" + std::to_wstring(options_.boot_session) + L"-" +
                         widen(random_hex(16));
     auto link = LinkServer::create(pipe);
     if (!link) {
         log("{}", link.error());
-        queue_.push_back(AppExited{ExitKind::Abnormal});
-        return false;
+        return std::unexpected(SpawnFailure::StartFailed);
     }
     std::vector<std::wstring> args{L"--data-dir=" + options_.data.data().wstring(),
                                    L"--backups-dir=" + options_.data.backups().wstring(),
@@ -304,277 +199,30 @@ bool Supervisor::spawn(const BuildId& build) {
     auto process = AppProcess::spawn(job_, std::move(*lease), args, options_.data.data());
     if (!process) {
         log("{}", process.error());
-        queue_.push_back(AppExited{ExitKind::Abnormal});
-        return false;
+        return std::unexpected(SpawnFailure::StartFailed);
     }
     (*link)->expect_client(process->pid());
-    app_.emplace(AppRun{build, std::move(*process), std::move(*link), Clock::now()});
-    jobs_cut_off_.reset();
-    return true;
+    return std::make_unique<AppRun>(*this, std::move(*process), std::move(*link));
 }
 
 void Supervisor::on_app_exit() {
     on_link();
     if (!app_) return;
-    ExitKind kind = app_->process.exit_kind();
-    app_.reset();
-    dispatch(AppExited{kind});
-    if (quitting_) {
-        on_quit();
-        return;
-    }
-    if (restart_requested_ && !app_) {
-        restart_requested_ = false;
-        dispatch(StartRequested{});
-    }
-    if (app_) return;
-    // The job in flight finishes, or a user whose sessions are shorter than a
-    // download would never get an update. Nobody is left to see the queued
-    // checks and downgrades; a queued repair is what lets the next start succeed.
-    std::erase_if(jobs_, [](const Job& j) { return !std::holds_alternative<RepairJob>(j); });
-    jobs_cut_off_ = Clock::now() + testing::job_cap().value_or(kJobCapAfterExit);
+    core_->on_app_exited(app_->process.exit_kind());
 }
 
 void Supervisor::on_link() {
-    if (!app_) return;
-    for (link::AppMessage& message : app_->link->poll()) {
-        if (!app_) return;
-        if (auto* hello = std::get_if<link::Hello>(&message)) {
-            auto protocol = link::negotiate(*hello, kLinkProtocol);
-            if (!protocol) {
-                log("app {} cannot talk link protocol {}", hello->version.to_string(), kLinkProtocol);
-                continue;
-            }
-            app_->link->send(link::Welcome{*protocol});
-            app_->welcomed = true;
-            app_->last_sent.reset();
-            publish_status();
-            if (quitting_) on_quit();
-        } else if (auto* healthy = std::get_if<link::Healthy>(&message)) {
-            if (app_->healthy_at) continue;
-            log("app reported healthy (data schema {})", healthy->data_schema);
-            app_->healthy_at = Clock::now();
-            dispatch(AppHealthy{});
-            // The first check of a launcher run waits for the app, so it never
-            // competes with startup.
-            if (next_check_ == Clock::time_point::max()) start_check();
-        } else if (auto* request = std::get_if<link::Request>(&message)) {
-            on_request(*request);
-        }
-    }
+    if (app_) core_->on_link(app_->link->poll());
 }
 
-void Supervisor::on_request(const link::Request& request) {
-    std::visit(
-        [&](const auto& r) {
-            using T = std::decay_t<decltype(r)>;
-            if constexpr (std::is_same_v<T, link::RestartToUpdate>) {
-                if (!std::holds_alternative<Staged>(state_.activation) || !app_) return;
-                log("restarting into the staged build");
-                restart_requested_ = true;
-                app_->exit_sent = app_->link->send(link::ExitRequested{});
-            } else if constexpr (std::is_same_v<T, link::CheckNow>) {
-                start_check();
-            } else if constexpr (std::is_same_v<T, link::AcknowledgeNotice>) {
-                dispatch(NoticeAcknowledged{});
-            } else {
-                if (r.choice == link::ChannelChoice::DowngradeNow) {
-                    submit(DowngradeJob{r.channel, state_.channel, state_.intent});
-                    return;
-                }
-                ChannelIntent intent =
-                    r.choice == link::ChannelChoice::Wait ? wait_intent(state_) : ChannelIntent{Follow{}};
-                dispatch(ChannelIntentSet{r.channel, intent});
-                start_check();
-            }
-        },
-        request);
-}
-
-void Supervisor::on_quit() {
-    quitting_ = true;
-    restart_requested_ = false;
-    // Setup and uninstall replace the install; a download in flight is not worth waiting for.
-    cancel_jobs();
-    if (app_ && !app_->exit_sent) app_->exit_sent = app_->link->send(link::ExitRequested{});
-}
-
-void Supervisor::on_activate() {
-    if (quitting_) return;
-    if (app_) {
-        HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, object_name(L".Client.Activate").c_str());
-        if (e) {
-            SetEvent(e);
-            CloseHandle(e);
-        }
-        return;
-    }
-    dispatch(StartRequested{});
-}
-
-void Supervisor::on_worker() {
-    auto outcome = worker_.take();
-    if (!outcome) {
-        publish_status();
-        return;
-    }
-    running_job_.reset();
-    auto* downgrade = std::get_if<DowngradeJob>(&outcome->job);
-    if (std::holds_alternative<CheckJob>(outcome->job) && outcome->channel != state_.channel) {
-        log("dropping a check of the channel the user just left");
-        if (app_) submit(CheckJob{});
-    } else if (downgrade && (downgrade->asked_on != state_.channel || downgrade->asked_with != state_.intent)) {
-        log("dropping a switch to {} the user withdrew", channel_name(downgrade->channel));
-        if (app_) submit(CheckJob{});
-    } else if (std::holds_alternative<RepairJob>(outcome->job)) {
-        for (Event& e : outcome->events) dispatch(std::move(e));
-        if (outcome->ok && recovery_ && recovery_->why == RecoveryReason::Repairing && !app_ && !repairing()) {
-            log("repaired; starting again");
-            recovery_.reset();
-            dispatch(StartRequested{});
-        }
-    } else {
-        feed_view_ = outcome->view;
-        for (Event& e : outcome->events) dispatch(std::move(e));
-        if (std::holds_alternative<DowngradeJob>(outcome->job) && app_) submit(CheckJob{});
-    }
-    pump();
-    publish_status();
-}
-
-void Supervisor::start_check() {
-    next_check_ = Clock::now() + kCheckInterval;
-    submit(CheckJob{});
-}
-
-void Supervisor::submit(Job job) {
-    if (!worker_.available()) return;
-    bool duplicate = std::ranges::find(jobs_, job) != jobs_.end() ||
-                     (std::holds_alternative<CheckJob>(job) && running_job_ == job);
-    if (!duplicate) jobs_.push_back(std::move(job));
-    pump();
-}
-
-void Supervisor::cancel_jobs() {
-    jobs_.clear();
-    worker_.cancel();
-}
-
-void Supervisor::pump() {
-    if (running_job_ || jobs_.empty() || worker_.busy()) return;
-    Job job = jobs_.front();
-    std::vector<Backup> backups = std::holds_alternative<RepairJob>(job) ? std::vector<Backup>{} : data_.list();
-    if (!worker_.start(JobRequest{job, state_, last_live_db_, std::move(backups)})) return;
-    jobs_.pop_front();
-    running_job_ = std::move(job);
-    publish_status();
-}
-
-bool Supervisor::repairing() const {
-    auto repair = [](const Job& j) { return std::holds_alternative<RepairJob>(j); };
-    return (running_job_ && repair(*running_job_)) || std::ranges::any_of(jobs_, repair);
-}
-
-std::optional<Clock::time_point> Supervisor::next_deadline() const {
-    std::optional<Clock::time_point> next;
-    auto consider = [&](Clock::time_point t) {
-        if (!next || t < *next) next = t;
-    };
-    if (!app_) {
-        if (jobs_cut_off_) consider(*jobs_cut_off_);
-        return next;
-    }
-    if (worker_.available()) consider(next_check_);
-    if (!app_->healthy_at) {
-        if (!app_->deadline_fired) consider(app_->started + units(timing_.policy.health_deadline_s));
-        return next;
-    }
-    if (!app_->clean_mark_fired) consider(*app_->healthy_at + units(timing_.policy.confirm_on_clean_exit_after_s));
-    if (!app_->confirm_mark_fired) consider(*app_->healthy_at + units(timing_.policy.confirm_uptime_s));
-    if (auto exit_after = testing::exit_after_healthy(); exit_after && !app_->exit_sent)
-        consider(*app_->healthy_at + *exit_after);
-    return next;
-}
-
-void Supervisor::on_timers() {
-    const auto now = Clock::now();
-    if (!app_) {
-        if (jobs_cut_off_ && now >= *jobs_cut_off_) {
-            jobs_cut_off_.reset();
-            if (running_job_) log("giving up on the update job: the app exited too long ago");
-            cancel_jobs();
-        }
-        return;
-    }
-    if (worker_.available() && now >= next_check_) start_check();
-    if (!app_->healthy_at) {
-        if (!app_->deadline_fired && now >= app_->started + units(timing_.policy.health_deadline_s)) {
-            app_->deadline_fired = true;
-            dispatch(HealthDeadlinePassed{});
-        }
-        return;
-    }
-    const Clock::time_point healthy = *app_->healthy_at;
-    if (!app_->clean_mark_fired && now >= healthy + units(timing_.policy.confirm_on_clean_exit_after_s)) {
-        app_->clean_mark_fired = true;
-        dispatch(ConfirmTimerElapsed{timing_.policy.confirm_on_clean_exit_after_s});
-        if (!app_) return;
-    }
-    if (!app_->confirm_mark_fired && now >= healthy + units(timing_.policy.confirm_uptime_s)) {
-        app_->confirm_mark_fired = true;
-        dispatch(ConfirmTimerElapsed{timing_.policy.confirm_uptime_s});
-        if (!app_) return;
-    }
-    if (auto exit_after = testing::exit_after_healthy(); exit_after && !app_->exit_sent && now >= healthy + *exit_after) {
-        log("asking the app to exit (testing)");
-        app_->link->send(link::ExitRequested{});
-        app_->exit_sent = true;
-    }
-}
-
-link::Status Supervisor::status() const {
-    link::Status s;
-    s.channel = state_.channel;
-    s.current = app_ ? app_->build.version : state_.good.version;
-    if (auto download = worker_.download()) {
-        s.phase = link::Phase::Downloading;
-        s.percent = download->percent;
-        s.available = download->version;
-    } else if (worker_.busy()) {
-        s.phase = link::Phase::Checking;
-    } else if (auto* staged = std::get_if<Staged>(&state_.activation)) {
-        s.phase = link::Phase::ReadyToRestart;
-        s.available = staged->build.version;
-    } else {
-        s.phase = feed_view_.phase;
-        s.available = feed_view_.available;
-    }
-    if (auto* pin = std::get_if<PinnedUntilAtLeast>(&state_.intent)) {
-        s.pinned_until = pin->floor;
-        if (s.phase == link::Phase::Idle) s.phase = link::Phase::Pinned;
-    }
-    s.downgrade = feed_view_.downgrade;
-    if (state_.notice) s.notice = wire_notice(*state_.notice);
-    return s;
-}
-
-void Supervisor::publish_status() {
-    if (!app_ || !app_->welcomed) return;
-    link::Status s = status();
-    if (app_->last_sent == s) return;
-    if (app_->link->send(s)) app_->last_sent = s;
-}
-
-void Supervisor::show_pending_recovery() {
-    PendingRecovery pending = *recovery_;
-    recovery_.reset();
-    RecoveryChoice choice = show_recovery(
-        {pending.why, state_, live_db(), data_.list(), options_.data.data(), [this] { signal_boot_ok(); }});
+void Supervisor::show_pending_recovery(RecoveryDue due) {
+    RecoveryChoice choice = show_recovery({due.why, core_->state(), due.live_db, std::move(due.backups),
+                                           options_.data.data(), [this] { signal_boot_ok(); }});
     if (std::holds_alternative<Quit>(choice)) {
         quit_ = true;
         return;
     }
-    for (Event& e : events_for(choice)) dispatch(std::move(e));
+    core_->on_recovery_choice(choice);
 }
 
 void Supervisor::signal_boot_ok() {
@@ -592,7 +240,8 @@ void Supervisor::end_session() {
     if (session_ended_) return;
     log("session is ending");
     if (app_ && WaitForSingleObject(app_->process.handle(), 5000) == WAIT_OBJECT_0) on_app_exit();
-    cancel_jobs();
+    // Before the core exists no job has started, so there is nothing to cancel.
+    if (core_) core_->cancel_jobs();
     write_session(true);
     session_ended_ = true;
     quit_ = true;
@@ -640,40 +289,39 @@ int Supervisor::run() {
 
     std::error_code ec;
     fs::create_directories(options_.data.data(), ec);
-    if (!load_state()) return 1;
-    builds_.collect_garbage(state_, self_exe_.parent_path());
-    data_.prune(state_);
-    refresh_uninstall_entry(options_.install, state_.good);
+    std::optional<SupervisorState> state = load_state();
+    if (!state) return 1;
+    builds_.collect_garbage(*state, self_exe_.parent_path());
+    data_.prune(*state);
+    refresh_uninstall_entry(options_.install, state->good);
 
-    if (options_.recover) recovery_ = PendingRecovery{std::nullopt};
-    dispatch(Resumed{});
-    if (!options_.recover) dispatch(StartRequested{});
+    const testing::Timing timing = testing::timing();
+    core_.emplace(static_cast<Executor&>(*this), std::move(*state),
+                  CoreConfig{timing.unit, timing.policy, testing::exit_after_healthy(), testing::job_cap()});
+    core_->start(options_.recover);
 
     while (!quit_) {
-        // A repair in flight may make the recovery dialog unnecessary.
-        if (recovery_ && !app_ && !repairing() && !quitting_) {
-            show_pending_recovery();
+        if (auto due = core_->take_recovery()) {
+            show_pending_recovery(std::move(*due));
             continue;
         }
-        // running_job_, not worker_.busy(): a job that just ended still has an
-        // outcome to commit.
-        if (!app_ && !running_job_ && jobs_.empty()) break;
+        if (core_->idle()) break;
 
-        const bool with_app = app_.has_value();
+        const bool with_app = app_ != nullptr;
         std::vector<HANDLE> handles{activate, worker_.event(), quit};
         if (with_app) handles.insert(handles.end(), {app_->link->event(), app_->process.handle()});
         DWORD timeout = INFINITE;
-        if (auto deadline = next_deadline()) {
+        if (auto deadline = core_->next_deadline()) {
             auto wait = std::chrono::ceil<std::chrono::milliseconds>(*deadline - Clock::now()).count();
             timeout = static_cast<DWORD>(std::clamp<long long>(wait, 0, 24ll * 3600 * 1000));
         }
         DWORD r = MsgWaitForMultipleObjectsEx(static_cast<DWORD>(handles.size()), handles.data(), timeout, QS_ALLINPUT,
                                               MWMO_INPUTAVAILABLE);
-        if (r == WAIT_OBJECT_0) on_activate();
-        else if (r == WAIT_OBJECT_0 + 1) on_worker();
+        if (r == WAIT_OBJECT_0) core_->on_activate();
+        else if (r == WAIT_OBJECT_0 + 1) core_->on_worker(worker_.take());
         else if (r == WAIT_OBJECT_0 + 2) {
             log("asked to quit");
-            on_quit();
+            core_->on_quit();
         } else if (with_app && r == WAIT_OBJECT_0 + 3) on_link();
         else if (with_app && r == WAIT_OBJECT_0 + 4) on_app_exit();
         else if (r == WAIT_OBJECT_0 + handles.size()) {
@@ -683,7 +331,7 @@ int Supervisor::run() {
                 DispatchMessageW(&msg);
             }
         }
-        on_timers();
+        core_->on_timers();
     }
 
     worker_.stop();

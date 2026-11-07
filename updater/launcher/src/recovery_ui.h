@@ -4,6 +4,7 @@
 // depends on nothing but Windows.
 
 #include "data_guard.h"
+#include "supervisor_core.h"
 
 #include <parties/update/probation.h>
 
@@ -13,17 +14,6 @@
 #include <vector>
 
 namespace parties::update::launcher {
-
-struct StartAgain {};
-// restore: the backup the build starts on, when it cannot read the live data.
-struct StartBuild {
-    BuildId build;
-    std::optional<Snapshot> restore;
-};
-struct RetryBuild { BuildId build; };
-struct RestoreBackup { Snapshot snapshot; };
-struct Quit {};
-using RecoveryChoice = std::variant<StartAgain, StartBuild, RetryBuild, RestoreBackup, Quit>;
 
 struct RecoveryRequest {
     std::optional<RecoveryReason> why;  // nullopt: opened with --recover
@@ -35,7 +25,5 @@ struct RecoveryRequest {
 };
 
 RecoveryChoice show_recovery(const RecoveryRequest& request);
-
-std::vector<Event> events_for(const RecoveryChoice& choice);
 
 } // namespace parties::update::launcher

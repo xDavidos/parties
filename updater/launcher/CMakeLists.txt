@@ -1,7 +1,9 @@
-# What both launchers do around the update core: StateStore owns the state
-# files. Each platform defines log_line, read_file and durable_replace.
+# What both launchers do around the update core: SupervisorCore drives step()
+# through a platform Executor, and StateStore owns the state files. Each
+# platform defines log_line, read_file and durable_replace.
 add_library(parties_launcher_core STATIC
     src/core_shell/state_store.cpp
+    src/core_shell/supervisor_core.cpp
 )
 target_include_directories(parties_launcher_core PUBLIC src/core_shell)
 target_link_libraries(parties_launcher_core PUBLIC parties_update_core)

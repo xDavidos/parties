@@ -5,6 +5,7 @@
 // exists, so the launcher and the app never write the database at the same
 // time.
 
+#include "executor.h"
 #include "paths.h"
 
 #include <parties/update/supervisor_state.h>
@@ -16,17 +17,6 @@
 #include <vector>
 
 namespace parties::update::launcher {
-
-struct Backup {
-    SnapshotId id;
-    DataInfo data;
-    fs::file_time_type written;
-};
-
-struct RestoreError {
-    std::string why;
-    bool live_changed = false;  // false: the live database is exactly as it was
-};
 
 class DataGuard {
 public:

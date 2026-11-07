@@ -205,17 +205,4 @@ RecoveryChoice show_recovery(const RecoveryRequest& r) {
     }
 }
 
-std::vector<Event> events_for(const RecoveryChoice& choice) {
-    return std::visit(
-        [](const auto& c) -> std::vector<Event> {
-            using T = std::decay_t<decltype(c)>;
-            if constexpr (std::is_same_v<T, StartAgain>) return {StartRequested{}};
-            else if constexpr (std::is_same_v<T, StartBuild>) return {UserRollback{c.build, c.restore}};
-            else if constexpr (std::is_same_v<T, RetryBuild>) return {UserRetry{c.build}, StartRequested{}};
-            else if constexpr (std::is_same_v<T, RestoreBackup>) return {UserRestore{c.snapshot}, StartRequested{}};
-            else return {};
-        },
-        choice);
-}
-
 } // namespace parties::update::launcher

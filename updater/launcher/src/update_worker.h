@@ -6,6 +6,7 @@
 
 #include "build_store.h"
 #include "data_guard.h"
+#include "executor.h"
 #include "update_source.h"
 
 #include <parties/update/link.h>
@@ -19,50 +20,6 @@
 #include <vector>
 
 namespace parties::update::launcher {
-
-struct CheckJob {
-    friend bool operator==(const CheckJob&, const CheckJob&) = default;
-};
-struct RepairJob {
-    BuildId build;
-    friend bool operator==(const RepairJob&, const RepairJob&) = default;
-};
-// set_channel with downgrade_now. Its outcome applies only while the channel
-// and intent it was asked from still hold, so a later choice withdraws it.
-struct DowngradeJob {
-    Channel channel;
-    Channel asked_on;
-    ChannelIntent asked_with;
-    friend bool operator==(const DowngradeJob&, const DowngradeJob&) = default;
-};
-using Job = std::variant<CheckJob, RepairJob, DowngradeJob>;
-
-struct JobRequest {
-    Job job;
-    SupervisorState state;
-    std::optional<DataInfo> live_db;
-    std::vector<Backup> backups;
-};
-
-struct FeedView {
-    link::Phase phase = link::Phase::Idle;
-    std::optional<Version> available;  // a newer build this launcher cannot stage yet
-    std::optional<Version> pinned_until;
-    std::optional<link::DowngradeOffer> downgrade;
-};
-
-struct JobOutcome {
-    Job job;
-    Channel channel;
-    bool ok = false;
-    std::vector<Event> events;
-    FeedView view;
-};
-
-struct Download {
-    Version version;
-    uint8_t percent = 0;
-};
 
 class UpdateWorker {
 public:
