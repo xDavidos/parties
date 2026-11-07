@@ -1,3 +1,14 @@
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    # The macOS launcher, so far only its end of the front door. The host's
+    # shared headers (data_lock.h, front_door_socket.h) come with parties_host_api.
+    add_library(parties_launcher_macos STATIC src/macos/front_door.mm)
+    target_include_directories(parties_launcher_macos PUBLIC src/macos)
+    target_link_libraries(parties_launcher_macos
+        PUBLIC parties_update_core parties_host_api
+        PRIVATE "-framework AppKit")
+    return()
+endif()
+
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
 find_package(RapidJSON CONFIG REQUIRED)
 

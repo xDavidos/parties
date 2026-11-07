@@ -449,6 +449,22 @@ if(TARGET parties_update_core)
     endif()
 endif()
 
+# ── macOS front door end to end (testing builds only) ────────────────────────
+# A fake launcher that the host runs launches fronts through LaunchServices and
+# plays a fake client's exit scenarios. Needs a logged-in GUI session.
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND PARTIES_UPDATE_TESTING AND TARGET parties_host)
+    add_library(update_front_door_fake_client SHARED update_front_door_fake_client.mm)
+    target_link_libraries(update_front_door_fake_client PRIVATE
+        parties_host_api parties_update_link "-framework AppKit")
+    add_library(update_front_door_fake_launcher SHARED update_front_door_fake_launcher.mm)
+    target_link_libraries(update_front_door_fake_launcher PRIVATE parties_launcher_macos "-framework Foundation")
+    add_test(NAME update_front_door_e2e COMMAND bash ${CMAKE_SOURCE_DIR}/tools/update/front_door_e2e.sh
+        $<TARGET_BUNDLE_DIR:parties_host> ${CMAKE_SOURCE_DIR}/client/res/Parties.entitlements
+        $<TARGET_FILE:update_front_door_fake_client> $<TARGET_FILE:update_front_door_fake_launcher>
+        ${CMAKE_CURRENT_BINARY_DIR}/front_door_e2e)
+    set_tests_properties(update_front_door_e2e PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
+endif()
+
 # ── Update launcher end to end (testing builds only) ─────────────────────────
 # Drives the real PartiesLauncher.exe over fake builds in a temp install root.
 if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)

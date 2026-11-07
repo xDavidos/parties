@@ -166,7 +166,12 @@ jobs:
           test -x "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
 
       - name: Run update core and data safety tests
-        run: ctest --test-dir ${{ matrix.preset == 'macos-arm64-release' && 'build-macos-release' || 'build-macos' }} -R "^(update_|parties_data_)" --output-on-failure --no-tests=error
+        run: ctest --test-dir ${{ matrix.preset == 'macos-arm64-release' && 'build-macos-release' || 'build-macos' }} -R "^(update_|parties_data_)" -E "^update_front_door_e2e$" --output-on-failure --no-tests=error
+
+      # Verbose, so the log shows each scenario's ExitKind and the front-door trace.
+      - name: Front door end to end
+        if: matrix.preset == 'macos-arm64-debug'
+        run: ctest --test-dir build-macos -R "^update_front_door_e2e$" --verbose --no-tests=error
 
       - name: Host payload probe
         if: matrix.preset == 'macos-arm64-debug'
@@ -181,6 +186,16 @@ jobs:
             ${{ runner.temp }}/host-payload-probe/*.log
             ${{ runner.temp }}/host-payload-probe/*.txt
             ${{ runner.temp }}/host-payload-probe/*.png
+          if-no-files-found: ignore
+
+      - name: Upload front door e2e logs
+        if: always() && matrix.preset == 'macos-arm64-debug'
+        uses: actions/upload-artifact@v7
+        with:
+          name: front-door-e2e
+          path: |
+            build-macos/tests/front_door_e2e/*.log
+            build-macos/tests/front_door_e2e/logs/*.log
           if-no-files-found: ignore
 
       - name: Upload client artifact

@@ -36,7 +36,7 @@ struct Args {
     std::string test_namespace;
     std::vector<std::string> forwarded;  // after "--"; every other unknown flag is dropped
 #ifdef PARTIES_UPDATE_TESTING
-    std::optional<fs::path> self_test, log_dir;
+    std::optional<fs::path> self_test, fake_launcher, log_dir;
 #endif
 };
 
@@ -64,6 +64,7 @@ Args parse_args(int argc, const char* argv[]) {
         if (auto v = flag(arg, "--install-root=")) args.install_root = *v;
         if (auto v = flag(arg, "--test-namespace=")) args.test_namespace = *v;
         if (auto v = flag(arg, "--self-test=")) args.self_test = *v;
+        if (auto v = flag(arg, "--role=fake-launcher=")) args.fake_launcher = *v;
         if (auto v = flag(arg, "--log-dir=")) args.log_dir = *v;
 #endif
     }
@@ -159,6 +160,31 @@ void hold_data_lock(const fs::path& data_dir) {
     door::exit_process(1);
 }
 
+#ifdef PARTIES_UPDATE_TESTING
+// The front-door e2e test's launcher: a dylib that a host process runs the way
+// the real launcher will run, without LaunchServices ever starting it.
+int run_fake_launcher(const fs::path& dylib, int argc, const char* argv[]) {
+    constexpr parties::host::Entry entry{"parties_fake_launcher_min_host_abi", "parties_fake_launcher_main"};
+    const auto payload = parties::host::load(dylib, std::nullopt, entry);
+    if (!payload) return 1;
+    const std::string bundle = NSBundle.mainBundle.bundlePath.fileSystemRepresentation;
+    const fs::path dir = dylib.parent_path();
+    const PartiesHostApi api{
+        .abi = PARTIES_HOST_ABI,
+        .size = sizeof(PartiesHostApi),
+        .host_bundle = bundle.c_str(),
+        .build_dir = dir.c_str(),
+        .data_dir = "",
+        .backups_dir = "",
+        .link_fd = -1,
+        .argc = argc - 1,
+        .argv = argv + 1,
+        .exit_process = &door::exit_process,
+    };
+    return payload->entry(&api);
+}
+#endif
+
 } // namespace
 
 int main(int argc, const char* argv[]) {
@@ -170,6 +196,7 @@ int main(int argc, const char* argv[]) {
             std::setvbuf(stderr, nullptr, _IONBF, 0);
         }
         if (args.self_test) return parties::host::load(*args.self_test, std::nullopt, kClientEntry) ? 0 : 1;
+        if (args.fake_launcher) return run_fake_launcher(*args.fake_launcher, argc, argv);
 #endif
         run_front(args);
     }
