@@ -9,8 +9,14 @@
 // launcher (or the seed install) ended right before its n-th effect, then run
 // again, and must reach the same outcome with no cleanup in between.
 //
+// The boot scenarios then start the bundle with `open`, as a double-click
+// does, so the front boots the launcher itself (process-contract.md, "Front
+// start"): broken launchers, safe mode, a launcher lost before boot_ok, and a
+// bundle on a read-only disk image. They have no kill sweep.
+//
 // usage: update_macos_e2e_test --app <built Parties.app> --entitlements <file>
-//            --fake-client <dylib> --launcher <dylib> [--only <name>] [--no-kill] [--verbose]
+//            --fake-client <dylib> --launcher <dylib> --broken-launcher-exits <dylib>
+//            --broken-launcher-hangs <dylib> [--only <name>] [--no-kill] [--verbose]
 
 #include <parties/crypto.h>
 #include <parties/data_lock.h>
@@ -21,6 +27,7 @@
 #include <sqlite3.h>
 
 #include <CommonCrypto/CommonDigest.h>
+#include <CoreGraphics/CoreGraphics.h>
 #include <fcntl.h>
 #include <libproc.h>
 #include <signal.h>
@@ -64,7 +71,7 @@ constexpr int kKilled = 0xDE;
 constexpr const char* kTiming = "10,600,600,30";
 constexpr const char* kRunMs = "700";
 
-fs::path g_app, g_entitlements, g_fake_client, g_launcher, g_work;
+fs::path g_app, g_entitlements, g_fake_client, g_launcher, g_broken_exits, g_broken_hangs, g_work;
 bool g_verbose = false;
 int g_failures = 0;
 std::set<int> g_fronts;  // every front pid seen, for the crash report check
@@ -172,9 +179,11 @@ struct Release {
 };
 
 // One seed bundle per build, shared by every scenario that uses the build.
-Release release(const std::string& version, uint32_t schema, uint32_t floor) {
+// `launcher` replaces the real launcher dylib in it.
+Release release(const std::string& version, uint32_t schema, uint32_t floor, const fs::path& launcher = {}) {
     static std::map<std::string, Release> made;
-    const std::string key = version + "-" + std::to_string(schema) + "-" + std::to_string(floor);
+    const std::string key = version + "-" + std::to_string(schema) + "-" + std::to_string(floor) +
+                            (launcher.empty() ? "" : "-" + launcher.stem().string());
     if (auto it = made.find(key); it != made.end()) return it->second;
     Release r;
     r.entry.version = *Version::parse(version);
@@ -184,6 +193,13 @@ Release release(const std::string& version, uint32_t schema, uint32_t floor) {
     r.bundle = g_work / "bundles" / key / "Parties.app";
     const fs::path log = g_work / "codesign.log";
     must(run_tool({"ditto", g_base.app.string(), r.bundle.string()}, log), "copy the base bundle");
+    if (!launcher.empty()) {
+        const fs::path file = r.bundle / "Contents" / "Frameworks" / kMacClient.launcher_file;
+        fs::copy_file(launcher, file, fs::copy_options::overwrite_existing);
+        must(run_tool({"codesign", "--force", "--sign", "-", "--identifier", "org.parties.client.launcher", file.string()}, log),
+             "sign " + launcher.filename().string());
+        r.entry.files[0] = file_entry(file);
+    }
     write_file(r.bundle / "Contents" / "Resources" / "seed" / "build.json", write_build_entry(r.entry));
     must(run_tool({"codesign", "--force", "--sign", "-", "--options", "runtime", "--entitlements",
                    g_entitlements.string(), r.bundle.string()},
@@ -924,6 +940,416 @@ void check_crash_reports() {
     std::printf("crash reports from %zu fronts: %d\n", g_fronts.size(), found);
 }
 
+// ---- boot: fronts LaunchServices starts, as a double-click does --------------
+
+std::vector<std::string> front_flags(const World& w) {
+    return {"--install-root=" + w.install_root.string(), "--data-root=" + w.data_root.string(),
+            "--test-namespace=e2e" + std::to_string(getpid()), "--log-dir=" + w.logs.string(),
+            "--feed-dir=" + w.feed.string()};
+}
+
+std::map<std::string, std::string> boot_env(const World& w) {
+    auto env = base_env();
+    env["PARTIES_TEST_ENV_PROBE"] = w.name;
+    return env;
+}
+
+bool has(std::string_view text, std::string_view what) { return text.find(what) != std::string_view::npos; }
+
+// $TMPDIR is under /var, which is /private/var: this matches either spelling.
+std::string path_tail(const fs::path& path) {
+    const std::string text = path.string();
+    return text.starts_with("/private/") ? text.substr(8) : text;
+}
+
+size_t count(std::string_view text, std::string_view what) {
+    size_t n = 0;
+    for (size_t at = text.find(what); at != std::string_view::npos; at = text.find(what, at + what.size())) ++n;
+    return n;
+}
+
+// The stderr of one host process, from its --log-dir file.
+struct HostLog {
+    int pid = 0;
+    bool launcher = false;  // --role=launcher, else a front
+    std::string text;
+};
+
+std::vector<HostLog> host_logs(const World& w) {
+    std::vector<HostLog> out;
+    std::error_code ec;
+    for (const auto& item : fs::directory_iterator(w.logs, ec)) {
+        const std::string name = item.path().filename().string();
+        HostLog log;
+        if (std::sscanf(name.c_str(), "front-%d.log", &log.pid) == 1) log.launcher = false;
+        else if (std::sscanf(name.c_str(), "launcher-%d.log", &log.pid) == 1) log.launcher = true;
+        else continue;
+        log.text = read_file(item.path()).value_or("");
+        out.push_back(std::move(log));
+    }
+    std::ranges::sort(out, {}, &HostLog::pid);
+    return out;
+}
+
+std::vector<HostLog> fronts_with(const World& w, std::string_view what) {
+    std::vector<HostLog> out;
+    for (HostLog& log : host_logs(w))
+        if (!log.launcher && has(log.text, what)) out.push_back(std::move(log));
+    return out;
+}
+
+// The lines that tell a reader how each front started and what it ran.
+void quote_boot(const World& w, const std::string& label) {
+    const char* keys[] = {"[host] front pid", "[host] plan", "[host] launcher pid", "never listened", "failed boot",
+                          "digest mismatch", "[host] alert", "[host] safe mode", "[host] relaunched", "launcher lost",
+                          "activate_other", "recovery answered", "NSWorkspace answered", "[fake-client] pid",
+                          "[fake-client] healthy"};
+    std::cout << "  -- " << label << ": host processes\n";
+    for (const HostLog& log : host_logs(w)) {
+        std::istringstream lines(log.text);
+        for (std::string line; std::getline(lines, line);)
+            if (std::ranges::any_of(keys, [&](const char* k) { return has(line, k); }))
+                std::cout << "  " << (log.launcher ? "launcher " : "front ") << log.pid << ": " << line << "\n";
+    }
+    std::istringstream lines(w.seed_log() + w.full_log());
+    const char* launcher_keys[] = {"boot_ok", "move offered", "move answered", "moved to", "recovery shown"};
+    for (std::string line; std::getline(lines, line);)
+        if (std::ranges::any_of(launcher_keys, [&](const char* k) { return has(line, k); }))
+            std::cout << "  launcher.log: " << line << "\n";
+}
+
+// `open <bundle> --args ...`, with no -n, so LaunchServices decides whether
+// a running front is reused. Returns once every host process has exited;
+// `during` runs while it waits.
+bool open_bundle(World& w, const fs::path& bundle, const std::map<std::string, std::string>& env,
+                 const std::function<void()>& during = {}) {
+    w.log_mark = w.full_log().size();
+    write_fake_env(w, env);
+    std::vector<std::string> argv{"open"};
+    for (const auto& [k, v] : env)
+        if (!k.starts_with("PARTIES_FAKE_")) argv.insert(argv.end(), {"--env", k + "=" + v});
+    argv.push_back(bundle.string());
+    argv.push_back("--args");
+    for (const std::string& flag : front_flags(w)) argv.push_back(flag);
+    if (int rc = run_tool(argv, w.logs / "open.txt"); rc != 0) {
+        fail(w.name, "open exited " + std::to_string(rc));
+        return false;
+    }
+    const auto until = Clock::now() + 150s;
+    while (!live_hosts().empty()) {
+        if (during) during();
+        if (Clock::now() > until) {
+            fail(w.name, "host processes still ran 150 s after open");
+            for (int pid : live_hosts()) kill(pid, SIGKILL);
+            return false;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    wait_hosts_gone(w, false);
+    return true;
+}
+
+// The front that ran the app and reported healthy, supervised by a launcher.
+std::optional<HostLog> supervised_app(const World& w, const Release& build) {
+    for (HostLog& log : fronts_with(w, "[fake-client] healthy"))
+        if (has(log.text, "build=" + build.entry.version.to_string()) && has(log.text, " supervised env_probe"))
+            return std::move(log);
+    return std::nullopt;
+}
+
+void expect_supervised(const World& w, const std::string& label, const Release& build) {
+    auto app = supervised_app(w, build);
+    if (!app) return fail(label, build.entry.version.to_string() + " did not run supervised and report healthy");
+    if (!has(w.last_run_log(), "boot_ok sent")) fail(label, "no launcher sent boot_ok");
+    if (!has(app->text, "[host] payload loaded")) fail(label, "the app front did not load the payload itself");
+    if (!fronts_with(w, "[host] safe mode").empty()) fail(label, "a front went to safe mode");
+}
+
+// The front that booted the launcher is already running when the launcher
+// first asks LaunchServices for one (createsNewApplicationInstance=NO).
+void report_reuse(const World& w, const std::string& label) {
+    const auto booting = fronts_with(w, "[host] launcher pid=");
+    std::set<int> answered;
+    for (const HostLog& log : host_logs(w)) {
+        std::istringstream lines(log.text);
+        for (std::string line; std::getline(lines, line);) {
+            int pid = 0;
+            if (const size_t at = line.find("NSWorkspace answered pid="); at != std::string::npos &&
+                std::sscanf(line.c_str() + at, "NSWorkspace answered pid=%d", &pid) == 1)
+                answered.insert(pid);
+        }
+    }
+    for (const HostLog& front : booting)
+        std::cout << "  -- " << label << ": LaunchServices "
+                  << (answered.contains(front.pid) ? "reused the booting front " : "did not answer with the booting front ")
+                  << front.pid << " (answered " << answered.size() << " open(s))\n";
+}
+
+// Window server entries owned by pid. Owner and bounds need no Screen
+// Recording access, only the title does.
+std::vector<std::string> windows_of(int pid) {
+    std::vector<std::string> out;
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+    for (CFIndex i = 0; list && i < CFArrayGetCount(list); ++i) {
+        auto info = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(list, i));
+        int owner = 0;
+        auto number = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowOwnerPID));
+        if (!number || !CFNumberGetValue(number, kCFNumberIntType, &owner) || owner != pid) continue;
+        CGRect rect{};
+        auto bounds = static_cast<CFDictionaryRef>(CFDictionaryGetValue(info, kCGWindowBounds));
+        if (bounds) CGRectMakeWithDictionaryRepresentation(bounds, &rect);
+        out.push_back(std::format("{:.0f}x{:.0f} at {:.0f},{:.0f}", rect.size.width, rect.size.height, rect.origin.x,
+                                  rect.origin.y));
+    }
+    if (list) CFRelease(list);
+    return out;
+}
+
+// A build B whose launcher is `launcher`, proven good under A's launcher, so
+// that boot-contract.json names B's launcher as good and A's as previous_good.
+void make_b_good(World& w, const fs::path& launcher) {
+    w.b = release("2.0.0.0", 1, 1, launcher);
+    if (install_seed(w, w.a, {}).exit_code != 0) return fail(w.name, "the first install of A failed");
+    publish(w.feed, {&w.a, &w.b}, 1);
+    prove_b(w);
+    auto contract = w.contract();
+    if (!contract || contract->good.dir != w.b.token() || !contract->previous_good ||
+        contract->previous_good->dir != w.a.token())
+        fail(w.name, "boot-contract.json does not name B good and A previous_good");
+}
+
+void append_byte(const fs::path& file) { std::ofstream(file, std::ios::binary | std::ios::app).put('\0'); }
+
+// A's seed bundle on a read-only disk image, mounted under the world's root.
+// The path of the bundle on it.
+fs::path mount_image(World& w) {
+    const fs::path image = w.root / "Parties.dmg", mount = w.root / "image";
+    fs::create_directories(mount);
+    must(run_tool({"hdiutil", "create", "-quiet", "-srcfolder", w.a.bundle.parent_path().string(), "-volname",
+                   "Parties", "-format", "UDRO", "-ov", image.string()},
+                  w.logs / "hdiutil.txt"),
+         "create the disk image");
+    must(run_tool({"hdiutil", "attach", "-readonly", "-nobrowse", "-noverify", "-mountpoint", mount.string(),
+                   image.string()},
+                  w.logs / "hdiutil.txt"),
+         "attach the disk image");
+    const fs::path nested = mount / w.a.bundle.parent_path().filename() / "Parties.app";
+    return fs::exists(nested) ? nested : mount / "Parties.app";
+}
+
+void detach_image(World& w) { run_tool({"hdiutil", "detach", "-force", (w.root / "image").string()}, w.logs / "hdiutil.txt"); }
+
+struct BootScenario {
+    std::string name;
+    std::function<void(World&, const std::string&)> run;
+};
+
+std::vector<BootScenario> boot_scenarios() {
+    std::vector<BootScenario> out;
+
+    out.push_back({"open-fresh", [](World& w, const std::string& label) {
+                       publish(w.feed, {&w.a}, 1);
+                       if (!open_bundle(w, w.a.bundle, boot_env(w))) return;
+                       const auto installer = fronts_with(w, "[host] plan 2:");
+                       if (installer.empty()) fail(label, "no front installed the seed");
+                       else if (!has(installer.front().text, "[host] plan 3:"))
+                           fail(label, "the front that installed the seed did not then boot a launcher");
+                       if (!has(w.seed_log(), "seed " + w.a.dir() + " installed")) fail(label, "the seed was not installed");
+                       if (!good_is(w, w.a)) fail(label, "A is not the good build");
+                       expect_supervised(w, label, w.a);
+                       report_reuse(w, label);
+                   }});
+
+    out.push_back({"open-installed", [](World& w, const std::string& label) {
+                       if (install_seed(w, w.a, {}).exit_code != 0) return fail(label, "the first install of A failed");
+                       publish(w.feed, {&w.a}, 1);
+                       if (!open_bundle(w, w.a.bundle, boot_env(w))) return;
+                       if (!fronts_with(w, "[host] plan 2:").empty()) fail(label, "a front installed the seed again");
+                       if (fronts_with(w, "[host] plan 3:").empty()) fail(label, "no front booted a launcher");
+                       expect_supervised(w, label, w.a);
+                       report_reuse(w, label);
+                   }});
+
+    // Two failed boots of good's launcher, then previous_good's launcher
+    // supervises the good build's app.
+    auto falls_back = [](std::string name, std::function<fs::path()> launcher, std::string boot_wait_ms) {
+        return BootScenario{name, [launcher, boot_wait_ms](World& w, const std::string& label) {
+                                make_b_good(w, launcher());
+                                auto env = boot_env(w);
+                                env["PARTIES_TEST_BOOT_WAIT_MS"] = boot_wait_ms;
+                                if (!open_bundle(w, w.a.bundle, env)) return;
+                                const auto booting = fronts_with(w, "[host] launcher pid=");
+                                if (booting.size() != 1) return fail(label, "expected one booting front");
+                                const std::string& text = booting.front().text;
+                                if (count(text, "[host] failed boot recorded") != 2)
+                                    fail(label, "B's launcher did not fail exactly twice");
+                                if (count(text, "from " + w.b.token()) != 2 || count(text, "from " + w.a.token()) != 1)
+                                    fail(label, "the front did not boot B's launcher twice, then A's");
+                                expect_supervised(w, label, w.b);
+                            }};
+    };
+    out.push_back(falls_back("launcher-exits", [] { return g_broken_exits; }, "300000"));
+    out.push_back(falls_back("launcher-hangs", [] { return g_broken_hangs; }, "6000"));
+
+    out.push_back({"launcher-digest", [](World& w, const std::string& label) {
+                       make_b_good(w, g_broken_exits);
+                       append_byte(w.build_dir_of(w.b) / kMacClient.launcher_file);
+                       if (!open_bundle(w, w.a.bundle, boot_env(w))) return;
+                       const auto booting = fronts_with(w, "[host] launcher pid=");
+                       if (booting.size() != 1) return fail(label, "expected one booting front");
+                       const std::string& text = booting.front().text;
+                       if (has(text, "[host] failed boot recorded")) fail(label, "a launcher that does not match counted as a failed boot");
+                       if (!has(text, "wait status " + std::to_string(70 << 8)))
+                           fail(label, "B's launcher process did not exit 70");
+                       if (count(text, "from " + w.a.token()) != 1) fail(label, "A's launcher was not booted next");
+                       bool mismatch = false;
+                       for (const HostLog& log : host_logs(w)) mismatch = mismatch || (log.launcher && has(log.text, "digest mismatch"));
+                       if (!mismatch) fail(label, "no launcher process reported the digest mismatch");
+                       expect_supervised(w, label, w.b);
+                   }});
+
+    // Both launchers unusable. First no answer is scripted, so the host draws
+    // its NSAlert before [NSApp run], and this process looks for its window.
+    // Then Start the last working version runs B's app with no launcher.
+    out.push_back({"both-broken", [](World& w, const std::string& label) {
+                       make_b_good(w, g_broken_exits);
+                       append_byte(w.build_dir_of(w.a) / kMacClient.launcher_file);
+                       auto env = boot_env(w);
+                       env.erase("PARTIES_TEST_RECOVERY");
+                       std::vector<std::string> seen;
+                       int alert_pid = 0;
+                       bool looked = false;
+                       Clock::time_point alert_at;
+                       open_bundle(w, w.a.bundle, env, [&] {
+                           if (looked) return;
+                           if (!alert_pid) {
+                               auto shown = fronts_with(w, "[host] alert shown: Parties could not start");
+                               if (shown.empty()) return;
+                               alert_pid = shown.front().pid;
+                               alert_at = Clock::now();
+                           }
+                           seen = windows_of(alert_pid);
+                           if (seen.empty() && Clock::now() - alert_at < 15s) return;
+                           looked = true;
+                           std::cout << "  -- " << label << ": front " << alert_pid << " has " << seen.size()
+                                     << " window(s) on screen while its NSAlert runs"
+                                     << (seen.empty() ? "" : ", the first " + seen.front()) << "\n";
+                           kill(alert_pid, SIGKILL);
+                       });
+                       if (!alert_pid) fail(label, "no front drew the safe mode alert");
+                       else if (seen.empty()) fail(label, "the safe mode NSAlert put no window on screen");
+                       const long long b_runs = markers(w.db(), "2.0.0.0");
+                       const size_t launcher_log = w.full_log().size();
+
+                       env["PARTIES_TEST_RECOVERY"] = "start_last_good";
+                       if (!open_bundle(w, w.a.bundle, env)) return;
+                       if (fronts_with(w, "[host] alert answered by PARTIES_TEST_RECOVERY: Parties could not start").empty())
+                           fail(label, "the scripted answer did not reach the safe mode alert");
+                       if (fronts_with(w, "[host] safe mode: start_last_good").empty())
+                           fail(label, "safe mode did not start the last good app");
+                       const auto unsupervised = fronts_with(w, "safe mode runs " + w.b.token() + " unsupervised");
+                       if (unsupervised.size() != 1) return fail(label, "no front ran B's app in safe mode");
+                       const std::string& text = unsupervised.front().text;
+                       if (!has(text, "unsupervised env_probe=" + w.name))
+                           fail(label, "the --safe-mode front did not get its environment through NSWorkspaceOpenConfiguration");
+                       if (!has(text, "[fake-client] healthy")) fail(label, "B's app did not run to health in safe mode");
+                       if (markers(w.db(), "2.0.0.0") != b_runs + 1) fail(label, "B's app did not open the data once");
+                       if (w.full_log().size() != launcher_log) fail(label, "a launcher ran in safe mode");
+                   }});
+
+    // The launcher dies while its app runs and before boot_ok: the front
+    // relaunches itself with --boot-round=1, which chooses again.
+    out.push_back({"boot-ok-lost", [](World& w, const std::string& label) {
+                       if (install_seed(w, w.a, {}).exit_code != 0) return fail(label, "the first install of A failed");
+                       publish(w.feed, {&w.a}, 1);
+                       auto env = boot_env(w);
+                       env["PARTIES_FAKE_FAULT"] = "1.0.0.0:slow-health";
+                       int killed = 0;
+                       open_bundle(w, w.a.bundle, env, [&] {
+                           if (killed) return;
+                           for (const HostLog& front : fronts_with(w, "[host] payload loaded")) {
+                               int pid = 0;
+                               const size_t at = front.text.find("[host] launcher pid=");
+                               if (at == std::string::npos || std::sscanf(front.text.c_str() + at, "[host] launcher pid=%d", &pid) != 1)
+                                   continue;
+                               if (has(w.last_run_log(), "boot_ok sent")) return fail(label, "boot_ok came before the kill");
+                               kill(pid, SIGKILL);
+                               killed = pid;
+                               std::cout << "  -- " << label << ": killed launcher " << pid << " under front " << front.pid << "\n";
+                               return;
+                           }
+                       });
+                       if (!killed) return fail(label, "the app never loaded under a booted launcher");
+                       const auto lost = fronts_with(w, "[host] launcher lost");
+                       if (lost.empty() || !has(lost.front().text, "[host] failed boot recorded") ||
+                           !has(lost.front().text, "relaunched with --boot-round=1"))
+                           fail(label, "the front did not count the lost launcher and relaunch itself with --boot-round=1");
+                       const auto round_1 = fronts_with(w, "boot round 1");
+                       if (round_1.empty() || !has(round_1.front().text, "[host] launcher pid="))
+                           fail(label, "the --boot-round=1 front did not boot a launcher");
+                       expect_supervised(w, label, w.a);
+                   }});
+
+    // A read-only disk image: the launcher offers the move, Not Now keeps
+    // Parties running from the image, and the update to B happens there.
+    out.push_back({"read-only-image", [](World& w, const std::string& label) {
+                       const fs::path bundle = mount_image(w);
+                       publish(w.feed, {&w.a, &w.b}, 1);
+                       auto env = boot_env(w);
+                       env["PARTIES_TEST_RECOVERY"] = "keep";
+                       for (int run = 0; run < 8 && !good_is(w, w.b); ++run) open_bundle(w, bundle, env);
+                       const std::string launcher_log = w.full_log();
+                       detach_image(w);
+                       if (count(launcher_log, "move offered: Parties runs from ") != 1 || !has(launcher_log, path_tail(bundle)))
+                           fail(label, "the move was not offered exactly once");
+                       if (!has(launcher_log, "move answered: keep")) fail(label, "Not Now was not the answer");
+                       if (!fs::exists(w.install_root / "state" / "move-declined")) fail(label, "Not Now was not recorded");
+                       if (!good_is(w, w.b)) fail(label, "B did not become good from the image");
+                       for (const HostLog& front : host_logs(w))
+                           if (!front.launcher && has(front.text, "[host] front pid=") &&
+                               !has(front.text, path_tail(bundle) + " boot round"))
+                               fail(label, "front " + std::to_string(front.pid) + " did not run from the image");
+                       expect_supervised(w, label, w.b);
+                   }});
+
+    // Move to Applications: the copy boots a launcher of its own.
+    out.push_back({"move-to-applications", [](World& w, const std::string& label) {
+                       const fs::path bundle = mount_image(w);
+                       publish(w.feed, {&w.a}, 1);
+                       const fs::path applications = w.root / "Applications";
+                       fs::create_directories(applications);
+                       auto env = boot_env(w);
+                       env["PARTIES_TEST_RECOVERY"] = "move";
+                       env["PARTIES_TEST_APPLICATIONS_DIR"] = applications.string();
+                       open_bundle(w, bundle, env);
+                       detach_image(w);
+                       const fs::path moved = applications / "Parties.app";
+                       if (!has(w.full_log(), "moved to ") || !has(w.full_log(), path_tail(moved)))
+                           fail(label, "the launcher did not move the bundle");
+                       const auto copies = fronts_with(w, path_tail(moved) + " boot round");
+                       if (copies.empty() || !has(copies.front().text, "[host] launcher pid="))
+                           return fail(label, "the moved bundle did not boot a launcher of its own");
+                       auto app = supervised_app(w, w.a);
+                       if (!app || !has(app->text, path_tail(moved) + " boot round"))
+                           fail(label, "A did not run supervised from the moved bundle");
+                       if (fs::exists(w.install_root / "state" / "move-declined")) fail(label, "the move was recorded as declined");
+                   }});
+    return out;
+}
+
+void run_boot_scenario(const BootScenario& sc) {
+    const auto t0 = Clock::now();
+    const int before = g_failures;
+    {
+        World w(sc.name, "2.0.0.0", 1, 1);
+        sc.run(w, sc.name);
+        quote_boot(w, sc.name);
+    }
+    std::printf("%-26s %-6s %s %.0fs\n", sc.name.c_str(), g_failures == before ? "pass" : "FAIL", "no kill sweep",
+                std::chrono::duration<double>(Clock::now() - t0).count());
+    std::fflush(stdout);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -935,13 +1361,17 @@ int main(int argc, char** argv) {
         else if (a == "--entitlements" && i + 1 < argc) g_entitlements = argv[++i];
         else if (a == "--fake-client" && i + 1 < argc) g_fake_client = argv[++i];
         else if (a == "--launcher" && i + 1 < argc) g_launcher = argv[++i];
+        else if (a == "--broken-launcher-exits" && i + 1 < argc) g_broken_exits = argv[++i];
+        else if (a == "--broken-launcher-hangs" && i + 1 < argc) g_broken_hangs = argv[++i];
         else if (a == "--only" && i + 1 < argc) only = argv[++i];
         else if (a == "--no-kill") kill_points = false;
         else if (a == "--verbose") g_verbose = true;
     }
-    if (g_app.empty() || g_entitlements.empty() || g_fake_client.empty() || g_launcher.empty()) {
+    if (g_app.empty() || g_entitlements.empty() || g_fake_client.empty() || g_launcher.empty() ||
+        g_broken_exits.empty() || g_broken_hangs.empty()) {
         std::cerr << "usage: update_macos_e2e_test --app <Parties.app> --entitlements <file> --fake-client <dylib> "
-                     "--launcher <dylib> [--only <name>] [--no-kill] [--verbose]\n";
+                     "--launcher <dylib> --broken-launcher-exits <dylib> --broken-launcher-hangs <dylib> "
+                     "[--only <name>] [--no-kill] [--verbose]\n";
         return 2;
     }
     if (!parties::crypto_init()) return 2;
@@ -982,6 +1412,8 @@ int main(int argc, char** argv) {
     if (!only || *only == "stray-holds-data-lock") stray_holds_data_lock();
     if (!only || *only == "restore-meets-held-lock") restore_meets_held_lock();
     std::printf("kill points exercised: %d\n", total_kills);
+    for (const BootScenario& sc : boot_scenarios())
+        if (!only || *only == sc.name) run_boot_scenario(sc);
     check_crash_reports();
     std::printf("total %.0fs, %s\n", std::chrono::duration<double>(Clock::now() - started).count(),
                 g_failures ? "FAILED" : "passed");

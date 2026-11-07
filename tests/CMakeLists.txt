@@ -482,15 +482,27 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND PARTIES_UPDATE_TESTING AND TARGET par
         ${CMAKE_CURRENT_BINARY_DIR}/front_door_e2e)
     set_tests_properties(update_front_door_e2e PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
 
+    # Launchers a front boots and that never come up.
+    foreach(fault exits hangs)
+        add_library(update_broken_launcher_${fault} SHARED update_broken_launcher.cpp)
+        target_link_libraries(update_broken_launcher_${fault} PRIVATE parties_host_api)
+    endforeach()
+    target_compile_definitions(update_broken_launcher_hangs PRIVATE BROKEN_LAUNCHER_HANGS)
+
     # The real host and PartiesLauncher.dylib supervising fake builds, with a
-    # kill at every effect of every scenario (update_macos_e2e_test.cpp).
+    # kill at every effect of every scenario, then fronts that LaunchServices
+    # starts booting launchers (update_macos_e2e_test.cpp).
     add_executable(update_macos_e2e_test update_macos_e2e_test.cpp)
     target_link_libraries(update_macos_e2e_test PRIVATE
-        parties_update_core parties_common parties_host_api unofficial::sqlite3::sqlite3)
-    add_dependencies(update_macos_e2e_test parties_host PartiesLauncher update_front_door_fake_client)
+        parties_update_core parties_common parties_host_api unofficial::sqlite3::sqlite3
+        "-framework CoreGraphics" "-framework CoreFoundation")
+    add_dependencies(update_macos_e2e_test parties_host PartiesLauncher update_front_door_fake_client
+        update_broken_launcher_exits update_broken_launcher_hangs)
     add_test(NAME update_macos_e2e COMMAND update_macos_e2e_test
         --app $<TARGET_BUNDLE_DIR:parties_host> --entitlements ${CMAKE_SOURCE_DIR}/client/res/Parties.entitlements
-        --fake-client $<TARGET_FILE:update_front_door_fake_client> --launcher $<TARGET_FILE:PartiesLauncher>)
+        --fake-client $<TARGET_FILE:update_front_door_fake_client> --launcher $<TARGET_FILE:PartiesLauncher>
+        --broken-launcher-exits $<TARGET_FILE:update_broken_launcher_exits>
+        --broken-launcher-hangs $<TARGET_FILE:update_broken_launcher_hangs>)
     set_tests_properties(update_macos_e2e PROPERTIES TIMEOUT 5400 RUN_SERIAL TRUE)
 endif()
 
