@@ -187,7 +187,9 @@ jobs:
 
       - name: Host payload probe
         if: matrix.preset == 'macos-arm64-debug'
-        run: bash tools/update/host_payload_probe.sh build-macos/updater/host/Parties.app client/res/Parties.entitlements "$RUNNER_TEMP/host-payload-probe"
+        run: >-
+          bash tools/update/host_payload_probe.sh build-macos/updater/host/Parties.app client/res/Parties.entitlements
+          "$RUNNER_TEMP/host-payload-probe" build-macos/updater/host/parties_build_json
 
       # Verbose, so the log shows each scenario's decisions and how many kill points it replayed.
       - name: Launcher end to end

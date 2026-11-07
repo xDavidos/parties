@@ -1,14 +1,16 @@
 #!/bin/bash
 # The macOS client runs as a payload the host executable loads, when
-# LaunchServices starts the bundle. Needs a PARTIES_UPDATE_TESTING build and a
-# logged-in GUI session.
+# LaunchServices starts the bundle. The front boots the bundle's launcher,
+# installing the seed first on a fresh runtime root, and runs the payload it
+# is assigned. Needs a PARTIES_UPDATE_TESTING build and a logged-in GUI session.
 #
-#   host_payload_probe.sh <built Parties.app> <entitlements> <output dir>
+#   host_payload_probe.sh <built Parties.app> <entitlements> <output dir> <parties_build_json>
 set -euo pipefail
 
 built_app=$1
 entitlements=$2
 out=$3
+build_json=$4
 bundle_id=org.parties.client
 
 rm -rf "$out"
@@ -27,6 +29,9 @@ fail() {
 # $1: extra codesign options, empty for no hardened runtime.
 sign() {
     codesign --force --sign - $1 --identifier "$bundle_id.app" "$payload"
+    # Signing changed the payload's digest, which the seed entry names.
+    "$build_json" --launcher "$app/Contents/Frameworks/PartiesLauncher.dylib" --app "$payload" \
+        --out "$app/Contents/Resources/seed/build.json"
     codesign --force --sign - $1 --entitlements "$entitlements" "$app"
     codesign --verify --strict "$app"
     codesign --display --verbose=2 "$app" 2>&1 | grep -E '^(Identifier|CodeDirectory|Signature|TeamIdentifier)'
@@ -132,6 +137,16 @@ healthy_pid=$(sed -n 's/^\[update-testing\] healthy pid=\([0-9]*\).*/\1/p' "$log
 [ "$front_pid" = "$healthy_pid" ] || fail "host pid $front_pid and payload pid $healthy_pid differ"
 echo "front pid $front_pid runs $(ps -o comm= -p "$front_pid")"
 lsof -p "$front_pid" 2>/dev/null | grep -F PartiesClient.dylib || fail "PartiesClient.dylib is not mapped into the front"
+echo "-- how the front started"
+grep -E '^\[host\] (plan|launcher pid|failed boot|safe mode|alert)' "$log" || true
+grep -q '^\[host\] safe mode' "$log" && fail "the front fell back to safe mode"
+if grep -q '^\[host\] plan 2:' "$log"; then
+    echo "the probe ran supervised, after the front installed the bundle's seed"
+elif grep -q '^\[host\] launcher pid=' "$log"; then
+    echo "the probe ran supervised by the installed launcher, which the front booted"
+else
+    echo "the probe ran supervised by a launcher that was already running"
+fi
 
 echo "== LaunchServices registrations for $bundle_id"
 lsappinfo find "bundleid=$bundle_id" | tee "$out/lsappinfo-find.txt"

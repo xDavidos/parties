@@ -52,6 +52,18 @@ add_custom_command(OUTPUT "${frameworks}/PartiesLauncher.dylib"
 )
 add_custom_target(parties_host_payload DEPENDS "${frameworks}/PartiesClient.dylib" "${frameworks}/PartiesLauncher.dylib")
 add_dependencies(parties_host parties_host_payload)
+# Relinking whenever a seed dylib changes runs the POST_BUILD steps below again.
+set_property(TARGET parties_host APPEND PROPERTY LINK_DEPENDS
+    "${frameworks}/PartiesClient.dylib" "${frameworks}/PartiesLauncher.dylib")
+
+# The seed's build.json names both dylibs' digests, so it is written from their
+# final bytes: after every other POST_BUILD step, vcpkg's applocal.py, which
+# may rewrite them with install_name_tool, first among them. A step that signs
+# the dylibs again must run parties_build_json again, as the PR 1 probe does.
+add_executable(parties_build_json ${CMAKE_SOURCE_DIR}/updater/tools/build_json.cpp)
+target_include_directories(parties_build_json PRIVATE ${CMAKE_SOURCE_DIR}/client/include ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(parties_build_json PRIVATE parties_update_core)
+add_dependencies(parties_host parties_build_json)
 if(BUILD_IN_RETAIL)
     include(FetchContent)
     FetchContent_GetProperties(sparkle)
@@ -60,3 +72,10 @@ if(BUILD_IN_RETAIL)
         COMMAND ditto "${sparkle_SOURCE_DIR}/Sparkle.framework" "${frameworks}/Sparkle.framework"
     )
 endif()
+
+set(seed_entry "${CMAKE_CURRENT_BINARY_DIR}/Parties.app/Contents/Resources/seed/build.json")
+add_custom_command(TARGET parties_host POST_BUILD
+    COMMAND parties_build_json --launcher "${frameworks}/PartiesLauncher.dylib"
+            --app "${frameworks}/PartiesClient.dylib" --out "${seed_entry}"
+    VERBATIM
+)
