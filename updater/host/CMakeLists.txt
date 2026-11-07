@@ -1,5 +1,8 @@
 # The macOS host executable and the app bundle around it. Automatic updates
 # will never replace the host, so tools/update/check_host.sh caps its size.
+set(PARTIES_APPLE_TEAM_ID "" CACHE STRING
+    "Team ID whose Developer ID signature retail builds require of every Parties dylib and of a peer on the front door")
+
 add_library(parties_host_api INTERFACE)
 target_include_directories(parties_host_api INTERFACE include)
 

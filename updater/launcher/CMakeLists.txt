@@ -26,13 +26,25 @@ if(PARTIES_UPDATE_TESTING)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    # The macOS launcher, so far only its end of the front door. The host's
-    # shared headers (data_lock.h, front_door_socket.h) come with parties_host_api.
-    add_library(parties_launcher_macos STATIC src/macos/front_door.mm)
+    # The macOS launcher. The host's shared headers (data_lock.h,
+    # front_door_socket.h, macos_layout.h) come with parties_host_api.
+    add_library(parties_launcher_macos STATIC
+        src/macos/build_store.cpp
+        src/macos/code_signing.cpp
+        src/macos/file_io.cpp
+        src/macos/front_door.mm
+        src/macos/log.cpp
+    )
     target_include_directories(parties_launcher_macos PUBLIC src/macos)
     target_link_libraries(parties_launcher_macos
-        PUBLIC parties_update_core parties_host_api
-        PRIVATE "-framework AppKit")
+        PUBLIC parties_launcher_core parties_host_api
+        PRIVATE "-framework AppKit" "-framework Security")
+    # Like the host, so both name the same data root (macos_layout.h).
+    target_compile_definitions(parties_launcher_macos PUBLIC $<$<BOOL:${BUILD_IN_RETAIL}>:PARTIES_RETAIL=1>)
+    if(PARTIES_APPLE_TEAM_ID)
+        set_property(SOURCE src/macos/code_signing.cpp APPEND PROPERTY
+            COMPILE_DEFINITIONS "PARTIES_APPLE_TEAM_ID=\"${PARTIES_APPLE_TEAM_ID}\"")
+    endif()
     return()
 endif()
 
