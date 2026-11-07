@@ -6,6 +6,9 @@ if(BUILD_CLIENT)
 endif()
 set_target_properties(toml11::toml11 PROPERTIES INTERFACE_COMPILE_OPTIONS "")
 
+# macOS builds only the platform-neutral data and update tests.
+if(NOT APPLE)
+
 add_executable(parties_integration_test
     integration_test.cpp
     ../server/src/server.cpp
@@ -233,15 +236,19 @@ if(BUILD_CLIENT)
         ${SPEEXDSP_LIBRARY})
 endif()
 
-if(WIN32 AND BUILD_CLIENT)
-    foreach(data_test settings location legacy_import)
-        add_executable(parties_data_${data_test}_test
-            data_${data_test}_test.cpp
-            ../client/src/settings.cpp
-            ../client/src/sqlite_file.cpp
+endif()
+
+if(BUILD_CLIENT)
+    set(data_tests settings)
+    set(data_test_sources ../client/src/settings.cpp ../client/src/sqlite_file.cpp)
+    if(WIN32)
+        list(APPEND data_tests location legacy_import)
+        list(APPEND data_test_sources
             ../client/src/windows/data_location.cpp
-            ../client/src/windows/legacy_import.cpp
-        )
+            ../client/src/windows/legacy_import.cpp)
+    endif()
+    foreach(data_test ${data_tests})
+        add_executable(parties_data_${data_test}_test data_${data_test}_test.cpp ${data_test_sources})
         target_include_directories(parties_data_${data_test}_test PRIVATE ../client/include)
         target_link_libraries(parties_data_${data_test}_test PRIVATE
             parties_common
@@ -250,6 +257,8 @@ if(WIN32 AND BUILD_CLIENT)
         add_test(NAME parties_data_${data_test} COMMAND parties_data_${data_test}_test)
     endforeach()
 endif()
+
+if(NOT APPLE)
 
 if(WIN32 AND BUILD_CLIENT)
     find_path(AMD_AMF_INCLUDE_DIRS "AMF/core/Result.h" REQUIRED)
@@ -387,6 +396,7 @@ if(WIN32 AND BUILD_CLIENT)
     add_test(NAME parties_rmlui_dx12_resize_msaa COMMAND parties_rmlui_dx12_multiwindow_test --resize --msaa)
     set_tests_properties(parties_rmlui_dx12_resize parties_rmlui_dx12_resize_msaa PROPERTIES TIMEOUT 60)
 endif()
+endif()
 
 if(TARGET parties_update_core)
     foreach(update_test version data_compat manifest probation state_codec policy link retention)
@@ -411,19 +421,21 @@ if(TARGET parties_update_core)
         set_tests_properties(update_stub PROPERTIES TIMEOUT 300)
     endif()
 
-    add_executable(update_release_ops_test update_release_ops_test.cpp)
-    target_link_libraries(update_release_ops_test PRIVATE parties_release_ops parties_common)
-    add_test(NAME update_release_ops COMMAND update_release_ops_test)
-    if(PARTIES_UPDATE_TESTING)
-        add_executable(update_manifest_tool_test update_manifest_tool_test.cpp)
-        target_link_libraries(update_manifest_tool_test PRIVATE parties_update_release_keys parties_common)
-        add_dependencies(update_manifest_tool_test parties_manifest_tool)
-        add_test(NAME update_manifest_tool COMMAND update_manifest_tool_test $<TARGET_FILE:parties_manifest_tool>)
-    else()
-        add_test(NAME update_manifest_tool_retail_keyring
-            COMMAND parties_manifest_tool verify --envelope none --channel beta --keyring .)
-        set_tests_properties(update_manifest_tool_retail_keyring PROPERTIES
-            PASS_REGULAR_EXPRESSION "unknown option --keyring")
+    if(TARGET parties_manifest_tool)
+        add_executable(update_release_ops_test update_release_ops_test.cpp)
+        target_link_libraries(update_release_ops_test PRIVATE parties_release_ops parties_common)
+        add_test(NAME update_release_ops COMMAND update_release_ops_test)
+        if(PARTIES_UPDATE_TESTING)
+            add_executable(update_manifest_tool_test update_manifest_tool_test.cpp)
+            target_link_libraries(update_manifest_tool_test PRIVATE parties_update_release_keys parties_common)
+            add_dependencies(update_manifest_tool_test parties_manifest_tool)
+            add_test(NAME update_manifest_tool COMMAND update_manifest_tool_test $<TARGET_FILE:parties_manifest_tool>)
+        else()
+            add_test(NAME update_manifest_tool_retail_keyring
+                COMMAND parties_manifest_tool verify --envelope none --channel beta --keyring .)
+            set_tests_properties(update_manifest_tool_retail_keyring PROPERTIES
+                PASS_REGULAR_EXPRESSION "unknown option --keyring")
+        endif()
     endif()
     # 100000 seeded random-walk sequences; about two minutes in a Debug build.
     set_tests_properties(update_probation PROPERTIES TIMEOUT 900)

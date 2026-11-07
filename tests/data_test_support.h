@@ -10,7 +10,11 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace data_test {
 
@@ -25,8 +29,13 @@ class TempDir {
 public:
     TempDir() {
         static std::atomic<int> counter{0};
+#ifdef _WIN32
+        const auto pid = GetCurrentProcessId();
+#else
+        const auto pid = getpid();
+#endif
         path_ = fs::temp_directory_path() /
-                ("parties-data-test-" + std::to_string(GetCurrentProcessId()) + "-" +
+                ("parties-data-test-" + std::to_string(pid) + "-" +
                  std::to_string(counter++));
         fs::remove_all(path_);
         fs::create_directories(path_);

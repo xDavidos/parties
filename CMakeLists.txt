@@ -138,7 +138,7 @@ endif()
 if(NOT APPLE)
     add_subdirectory(server)
 endif()
-if(NOT APPLE)
+if(NOT APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     add_subdirectory(tests)
 endif()
 

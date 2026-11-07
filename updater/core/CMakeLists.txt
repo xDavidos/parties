@@ -3,7 +3,7 @@
 add_library(parties_update_data INTERFACE)
 target_include_directories(parties_update_data INTERFACE include)
 
-if(NOT WIN32)
+if(NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     return()
 endif()
 
