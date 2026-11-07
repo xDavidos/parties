@@ -407,6 +407,14 @@ if(TARGET parties_update_core)
         add_test(NAME update_${update_test} COMMAND update_${update_test}_test)
     endforeach()
 
+    add_executable(update_golden_test update_golden_test.cpp)
+    target_link_libraries(update_golden_test PRIVATE parties_update_core parties_common)
+    if(WIN32)
+        # build.json is the Windows launcher's.
+        target_link_libraries(update_golden_test PRIVATE parties_launcher_shell)
+    endif()
+    add_test(NAME update_golden COMMAND update_golden_test)
+
     # Links only the boot library, which proves the boot stub's decisions build
     # without parties_common and OpenSSL.
     add_executable(update_boot_test update_boot_test.cpp)
