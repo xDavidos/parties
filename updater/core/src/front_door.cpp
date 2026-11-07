@@ -72,11 +72,13 @@ std::string write(const HostMessage& message) {
                 return json::message("loaded", [&](Writer& w) { string_field(w, "build", m.build); });
             } else if constexpr (std::is_same_v<T, Corrupt>) {
                 return json::message("corrupt", [&](Writer& w) { string_field(w, "build", m.build); });
-            } else {
+            } else if constexpr (std::is_same_v<T, Exiting>) {
                 return json::message("exiting", [&](Writer& w) {
                     json::key(w, "code");
                     w.Int(m.code);
                 });
+            } else {
+                return json::message("recovery_choice", [&](Writer& w) { string_field(w, "id", m.id); });
             }
         },
         message);
@@ -99,8 +101,23 @@ std::string write(const LauncherMessage& message) {
                 return json::message("activate_other", [](Writer&) {});
             } else if constexpr (std::is_same_v<T, Activate>) {
                 return json::message("activate", [](Writer&) {});
-            } else {
+            } else if constexpr (std::is_same_v<T, QuitForInstall>) {
                 return json::message("quit_for_install", [](Writer&) {});
+            } else {
+                return json::message("recovery", [&](Writer& w) {
+                    string_field(w, "reason", m.reason);
+                    string_field(w, "data_dir", m.data_dir);
+                    json::key(w, "options");
+                    w.StartArray();
+                    for (const RecoveryOption& o : m.options) {
+                        w.StartObject();
+                        string_field(w, "id", o.id);
+                        string_field(w, "label", o.label);
+                        string_field(w, "detail", o.detail);
+                        w.EndObject();
+                    }
+                    w.EndArray();
+                });
             }
         },
         message);
@@ -136,6 +153,11 @@ std::optional<HostMessage> parse_host_message(std::string_view line) {
         if (!code) return std::nullopt;
         return Exiting{*code};
     }
+    if (type == "recovery_choice") {
+        auto id = json::string(doc, "id");
+        if (!id || id->empty()) return std::nullopt;
+        return RecoveryChoice{std::string(*id)};
+    }
     return std::nullopt;
 }
 
@@ -156,6 +178,22 @@ std::optional<LauncherMessage> parse_launcher_message(std::string_view line) {
     if (type == "activate_other") return ActivateOther{};
     if (type == "activate") return Activate{};
     if (type == "quit_for_install") return QuitForInstall{};
+    if (type == "recovery") {
+        auto reason = json::string(doc, "reason");
+        auto data_dir = json::string(doc, "data_dir");
+        const Value* list = json::array(doc, "options");
+        if (!reason || !data_dir || !list) return std::nullopt;
+        Recovery r{std::string(*reason), std::string(*data_dir), {}};
+        for (const Value& item : list->GetArray()) {
+            if (!item.IsObject()) return std::nullopt;
+            auto id = json::string(item, "id");
+            auto label = json::string(item, "label");
+            auto detail = json::string(item, "detail");
+            if (!id || id->empty() || !label || !detail) return std::nullopt;
+            r.options.push_back({std::string(*id), std::string(*label), std::string(*detail)});
+        }
+        return r;
+    }
     return std::nullopt;
 }
 

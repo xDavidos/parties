@@ -1,5 +1,6 @@
 #include <parties/update/front_door.h>
 #include <parties/update/front_door_policy.h>
+#include <parties/update/front_start.h>
 
 #include <climits>
 #include <cstdio>
@@ -8,6 +9,8 @@
 
 using namespace parties::update;
 using namespace parties::update::front_door;
+namespace start = parties::update::front_start;
+namespace boot = parties::update::boot;
 
 namespace {
 
@@ -155,6 +158,17 @@ void test_codec() {
     check(round_trips(LauncherMessage{ActivateOther{}}, launcher), "activate_other round-trips");
     check(round_trips(LauncherMessage{Activate{}}, launcher), "activate round-trips");
     check(round_trips(LauncherMessage{QuitForInstall{}}, launcher), "quit_for_install round-trips");
+    Recovery recovery{"good_failed_to_start", "/Users/u/Library/Application Support/Parties",
+                      {{"start", "Start Parties 1.2.3.4", ""}, {"restore:pre-migration-g2", "Restore a backup", "\"x\"\n"}}};
+    check(round_trips(LauncherMessage{recovery}, launcher), "recovery round-trips");
+    check(round_trips(LauncherMessage{Recovery{}}, launcher), "a recovery without options round-trips");
+    check(round_trips(HostMessage{RecoveryChoice{"previous"}}, host), "recovery_choice round-trips");
+    check(!parse_host_message("{\"type\":\"recovery_choice\",\"id\":\"\"}"), "an empty choice");
+    check(!parse_launcher_message("{\"type\":\"recovery\",\"reason\":\"requested\",\"data_dir\":\"/d\","
+                                  "\"options\":[{\"id\":\"\",\"label\":\"x\",\"detail\":\"\"}]}"),
+          "an option without an id");
+    check(!parse_launcher_message("{\"type\":\"recovery\",\"reason\":\"requested\",\"options\":[]}"),
+          "a recovery without data_dir");
 
     check(write(HostMessage{Exiting{3}}) == "{\"type\":\"exiting\",\"code\":3}\n", "exiting wire shape");
     check(write(HostMessage{Loaded{"builds\\b"}}) == "{\"type\":\"loaded\",\"build\":\"builds\\\\b\"}\n",
@@ -190,12 +204,235 @@ void test_codec() {
     check(!parse_launcher_message(with("\"ticket\":9", "\"ticket\":-9")), "a negative ticket");
 }
 
+// process-contract.md, "Front start", spelled out independently of plan_front.
+start::FrontPlan contract_plan(const start::FrontFacts& f) {
+    bool pending = false;
+    if (f.bundle_seed && f.bundle_seed != f.installed_seed)
+        pending = !(f.record.seed == *f.bundle_seed && f.record.install_failures >= 2);
+    if (f.launcher_reachable) return pending ? start::FrontPlan::ConnectSeedPending : start::FrontPlan::Connect;
+    if (pending) return start::FrontPlan::InstallSeed;
+    if (!f.has_contract) return start::FrontPlan::SafeMode;
+    return f.boot_round <= 2 ? start::FrontPlan::ChooseLauncher : start::FrontPlan::SafeMode;
+}
+
+void test_plan_front_exhaustive() {
+    const std::vector<std::optional<std::string>> seeds{std::nullopt, "a", "b"};
+    int cases = 0;
+    for (int flags = 0; flags < 4; ++flags)
+        for (const auto& bundle : seeds)
+            for (const auto& installed : seeds)
+                for (const auto& counted : seeds)
+                    for (uint8_t failures : {0, 1, 2, 3, 255})
+                        for (uint8_t round : {0, 1, 2, 3}) {
+                            start::FrontFacts f{bool(flags & 1), bool(flags & 2), bundle, installed,
+                                                {counted.value_or(""), failures, false}, round};
+                            std::string label = "flags=" + std::to_string(flags) + " bundle=" + bundle.value_or("-") +
+                                                " installed=" + installed.value_or("-") +
+                                                " counted=" + counted.value_or("-") +
+                                                " failures=" + std::to_string(failures) +
+                                                " round=" + std::to_string(round);
+                            check(start::plan_front(f) == contract_plan(f), "plan_front " + label);
+                            ++cases;
+                        }
+    std::printf("plan_front: %d facts\n", cases);
+
+    start::FrontFacts first_run{false, false, "a", std::nullopt, {}, 0};
+    check(start::plan_front(first_run) == start::FrontPlan::InstallSeed, "a first run installs the seed");
+    first_run.record = start::record_seed_failure(start::record_seed_failure({}, "a"), "a");
+    check(start::plan_front(first_run) == start::FrontPlan::SafeMode, "two failed installs and nothing installed");
+    const start::HostRecord gave_up = start::record_seed_failure(start::record_seed_failure({}, "b"), "b");
+    start::FrontFacts broken_seed{false, true, "b", "a", gave_up, 0};
+    check(start::plan_front(broken_seed) == start::FrontPlan::ChooseLauncher,
+          "a broken seed never blocks the good build");
+    start::FrontFacts newer_dmg{false, true, "c", "a", gave_up, 0};
+    check(start::plan_front(newer_dmg) == start::FrontPlan::InstallSeed, "another seed starts its own count");
+    check(start::record_seed_failure(gave_up, "c") == start::HostRecord{"c", 1, false},
+          "a failure of another seed restarts the count");
+    start::FrontFacts dev_build{false, false, std::nullopt, std::nullopt, {}, 0};
+    check(start::plan_front(dev_build) == start::FrontPlan::SafeMode, "nothing installed and no seed");
+    start::FrontFacts relaunched{false, true, "a", "a", {}, 3};
+    check(start::plan_front(relaunched) == start::FrontPlan::SafeMode, "a third lost launcher ends in safe mode");
+}
+
+void test_placement_and_records() {
+    using start::Placement;
+    const std::string translocated = "/private/var/folders/x/T/AppTranslocation/1A2B/d/Parties.app";
+    check(start::classify_placement("/Applications/Parties.app", false) == Placement::Installed, "installed");
+    check(start::classify_placement("/Volumes/Parties/Parties.app", true) == Placement::ReadOnlyVolume,
+          "a mounted DMG");
+    check(start::classify_placement("/Volumes/Parties/Parties.app", false) == Placement::Installed,
+          "a writable volume is installed");
+    check(start::classify_placement(translocated, true) == Placement::Translocated, "translocated");
+    check(start::classify_placement(translocated, false) == Placement::Translocated,
+          "translocation wins over the volume flag");
+    check(start::classify_placement("/Users/u/AppTranslocationNotes/Parties.app", false) == Placement::Installed,
+          "only the whole path component counts");
+
+    const start::HostRecord record{std::string(64, 'f'), 2, true};
+    check(start::parse_host_record(start::write_host_record(record)) == record, "host.json round-trips");
+    check(start::parse_host_record(start::write_host_record({})) == start::HostRecord{},
+          "an empty host.json round-trips");
+    check(!start::parse_host_record("{\"seed\":\"a\"}"), "host.json without counters");
+    auto huge = start::parse_host_record("{\"seed\":\"a\",\"install_failures\":900,\"move_declined\":false}");
+    check(huge && huge->install_failures == 255, "a huge counter saturates");
+    check(start::parse_installed_seed("{\"seed\":\"1.0.0.0-abcdef12\",\"entry_sha256\":\"ab\"}") == "ab",
+          "seed.json names the entry it processed");
+    check(!start::parse_installed_seed("{\"seed\":\"1.0.0.0-abcdef12\"}"), "a seed.json without an entry digest");
+
+    Recovery recovery{"repairing", "/d", {{"previous", "Start the previous version (1.0.0.0)", "Starts on a backup."}}};
+    start::Alert alert = start::recovery_alert(recovery);
+    check(alert.options.size() == 3 && alert.options[0].id == "previous" && alert.options[1].id == start::kOpenData &&
+              alert.options.back().id == start::kQuit,
+          "recovery offers the launcher's options, then the data folder and Quit");
+    check(alert.message.find("Starts on a backup.") != std::string::npos, "an option's detail is in the message");
+    check(start::safe_mode_alert(true).options.front().id == start::kStartLastGood,
+          "safe mode offers the last good app first");
+    for (const auto& o : start::safe_mode_alert(false).options)
+        check(o.id != start::kStartLastGood, "no last good app to start without a contract");
+    check(start::move_alert(Placement::ReadOnlyVolume).options.front().id == start::kMove, "the move is the default");
+}
+
+std::vector<const char*> argv_of(const std::vector<std::string>& args) {
+    std::vector<const char*> out;
+    for (const auto& a : args) out.push_back(a.c_str());
+    return out;
+}
+
+void test_host_args() {
+    const std::vector<std::string> launcher{"--role=launcher", "--install-root=/r", "--data-root=/d", "--build=builds\\x",
+                                            "--boot-session=7", "--boot-ok-fd=3", "--recover", "-psn_0_1"};
+    for (bool testing : {false, true}) {
+        auto a = start::parse_host_args(argv_of(launcher), testing, "/default-r", "/default-d");
+        check(a.launcher && a.install_root == "/r" && a.data_root == "/d" && a.build == "builds\\x" && a.recover,
+              "the launcher role takes the roots its front passes");
+        check(a.forwarded.empty(), "unknown flags are dropped");
+    }
+    const std::vector<std::string> front{"--install-root=/r", "--data-root=/d", "--test-namespace=n", "--boot-round=2",
+                                         "--after=99", "--ticket=4", "--safe-mode", "--", "--install-root=/user", "x"};
+    auto retail = start::parse_host_args(argv_of(front), false, "/default-r", "/default-d");
+    check(retail.install_root == "/default-r" && retail.data_root == "/default-d",
+          "a retail front ignores roots on its command line");
+    check(retail.test_namespace.empty() && retail.testing.empty(), "a retail front takes no test flags");
+    check(retail.boot_round == 2 && retail.after == 99 && retail.ticketed && retail.safe_mode, "front flags");
+    check(retail.forwarded == std::vector<std::string>{"--install-root=/user", "x"}, "the user's arguments after --");
+    auto testing = start::parse_host_args(argv_of(front), true, "/default-r", "/default-d");
+    check(testing.install_root == "/r" && testing.data_root == "/d" && testing.test_namespace == "n",
+          "a testing front takes its roots and namespace");
+    check(testing.testing == std::vector<std::string>{"--install-root=/r", "--data-root=/d", "--test-namespace=n"},
+          "the testing flags it passes on");
+    check(start::parse_host_args(argv_of({"--boot-round=x"}), false, "/r", "/d").boot_round == 0,
+          "an unreadable round is round 0");
+
+    const auto relaunch = start::relaunch_arguments(testing, {"--boot-round=3"}, 42);
+    check(relaunch == std::vector<std::string>{"--boot-round=3", "--after=42", "--install-root=/r", "--data-root=/d",
+                                               "--test-namespace=n", "--", "--install-root=/user", "x"},
+          "a relaunch keeps the testing flags and the user's arguments");
+    const auto spawn = start::launcher_arguments(testing, "/A/Parties", {"--install-seed=/A"});
+    check(spawn == std::vector<std::string>{"/A/Parties", "--role=launcher", "--install-root=/r", "--data-root=/d",
+                                            "--install-seed=/A", "--install-root=/r", "--data-root=/d",
+                                            "--test-namespace=n"},
+          "a launcher gets the roots, its role, then the testing flags");
+}
+
+boot::BootContract contract_with(bool previous) {
+    boot::BootContract c{{"builds\\good", sha('1')}, std::nullopt, {"builds\\good", sha('a')}, "/d"};
+    if (previous) c.previous_good = boot::LauncherRef{"builds\\prev", sha('2')};
+    return c;
+}
+
+// The stub's loop in updater/boot/main.cpp run(), replayed over scripted
+// launcher outcomes: the dirs it starts, then whether it ends in recovery.
+std::vector<std::string> stub_runs(const boot::BootContract& c, const std::vector<char>& outcomes) {
+    boot::BootRecord record;
+    std::vector<Sha256> unusable;
+    std::vector<std::string> runs;
+    size_t next = 0;
+    for (int failures = 0;;) {
+        auto d = boot::choose(c, record, std::nullopt, unusable);
+        const auto* run = std::get_if<boot::RunLauncher>(&d.choice);
+        if (!run || next == outcomes.size()) break;
+        runs.push_back(run->dir);
+        const char outcome = outcomes[next++];
+        if (outcome == 'u') {
+            unusable.push_back(run->sha256);
+            continue;
+        }
+        if (outcome == 'o') return runs;
+        record = boot::record_boot_failure(d.next_record);
+        if (++failures > 2) break;
+    }
+    runs.push_back("recovery");
+    return runs;
+}
+
+std::vector<std::string> choice_runs(const boot::BootContract& c, const std::vector<char>& outcomes) {
+    start::LauncherChoice choice(c, {}, std::nullopt);
+    std::vector<std::string> runs;
+    size_t next = 0;
+    while (auto run = choice.next()) {
+        if (next == outcomes.size()) break;
+        runs.push_back(run->dir);
+        const char outcome = outcomes[next++];
+        if (outcome == 'u') choice.unusable();
+        else if (outcome == 'o') return runs;
+        else choice.failed();
+    }
+    runs.push_back("recovery");
+    return runs;
+}
+
+void test_launcher_choice() {
+    int cases = 0;
+    // Every sequence of up to six outcomes: f failed, u unusable, o listened.
+    std::vector<std::vector<char>> sequences{{}};
+    for (size_t len = 0; len < 6; ++len) {
+        const size_t from = sequences.size();
+        for (size_t i = 0; i < from; ++i)
+            if (sequences[i].size() == len)
+                for (char o : {'f', 'u', 'o'}) {
+                    auto s = sequences[i];
+                    s.push_back(o);
+                    sequences.push_back(s);
+                }
+    }
+    for (bool previous : {false, true})
+        for (const auto& outcomes : sequences) {
+            const auto c = contract_with(previous);
+            check(choice_runs(c, outcomes) == stub_runs(c, outcomes),
+                  "LauncherChoice decides as Parties.exe: " + std::string(outcomes.begin(), outcomes.end()) +
+                      (previous ? " with previous_good" : ""));
+            ++cases;
+        }
+    std::printf("launcher choice: %d sequences\n", cases);
+
+    const auto c = contract_with(true);
+    check(choice_runs(c, {'f', 'f', 'o'}) == std::vector<std::string>{"builds\\good", "builds\\good", "builds\\prev"},
+          "two failed boots of good fall back to previous_good");
+    check(choice_runs(c, {'u', 'o'}) == std::vector<std::string>{"builds\\good", "builds\\prev"},
+          "an unusable good is passed over at once");
+    check(choice_runs(c, {'u', 'u'}) == std::vector<std::string>{"builds\\good", "builds\\prev", "recovery"},
+          "both unusable: safe mode");
+    start::LauncherChoice failing(c, {}, std::nullopt);
+    for (int i = 0; i < 3; ++i) {
+        failing.next();
+        failing.failed();
+    }
+    check(!failing.next() && !failing.record().attempt, "after three failed boots no attempt is left open");
+    check(start::pinned_launcher(c, "builds\\prev") == sha('2') && start::pinned_launcher(c, "builds\\good") == sha('1') &&
+              !start::pinned_launcher(c, "builds\\other"),
+          "only good and previous_good launchers are pinned");
+}
+
 } // namespace
 
 int main() {
     test_classify_exhaustive();
     test_route_exhaustive();
     test_codec();
+    test_plan_front_exhaustive();
+    test_placement_and_records();
+    test_host_args();
+    test_launcher_choice();
     if (failures) {
         std::fprintf(stderr, "update_front_door_test: %d failure(s)\n", failures);
         return 1;

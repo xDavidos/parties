@@ -26,6 +26,7 @@ add_library(parties_update_link STATIC
     src/channel.cpp
     src/link.cpp
     src/front_door.cpp
+    src/front_start.cpp
 )
 target_include_directories(parties_update_link PUBLIC include)
 target_link_libraries(parties_update_link

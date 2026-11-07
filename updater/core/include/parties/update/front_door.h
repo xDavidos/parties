@@ -46,7 +46,12 @@ struct Exiting {
     int32_t code = 0;
     friend bool operator==(const Exiting&, const Exiting&) = default;
 };
-using HostMessage = std::variant<Front, Attach, Loaded, Corrupt, Exiting>;
+// The user's answer to Recovery: one of its option ids, or "quit".
+struct RecoveryChoice {
+    std::string id;
+    friend bool operator==(const RecoveryChoice&, const RecoveryChoice&) = default;
+};
+using HostMessage = std::variant<Front, Attach, Loaded, Corrupt, Exiting, RecoveryChoice>;
 
 // Launcher to host.
 struct Assign {
@@ -69,7 +74,21 @@ struct Activate {
 struct QuitForInstall {
     friend bool operator==(const QuitForInstall&, const QuitForInstall&) = default;
 };
-using LauncherMessage = std::variant<Assign, ActivateOther, Activate, QuitForInstall>;
+struct RecoveryOption {
+    std::string id;
+    std::string label;
+    std::string detail;  // may be empty
+    friend bool operator==(const RecoveryOption&, const RecoveryOption&) = default;
+};
+// The executor of ShowRecovery: the front shows the options, answers with
+// recovery_choice and exits without loading a payload.
+struct Recovery {
+    std::string reason;  // "good_failed_to_start", "data_unavailable", "data_incompatible", "repairing" or "requested"
+    std::string data_dir;
+    std::vector<RecoveryOption> options;
+    friend bool operator==(const Recovery&, const Recovery&) = default;
+};
+using LauncherMessage = std::variant<Assign, ActivateOther, Activate, QuitForInstall, Recovery>;
 
 // Each writer returns one line including the trailing '\n'.
 std::string write(const HostMessage& message);
