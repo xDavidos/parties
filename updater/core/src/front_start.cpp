@@ -59,7 +59,6 @@ HostArgs parse_host_args(std::span<const char* const> args, bool testing, std::s
             if (arg.starts_with(name)) a.testing.emplace_back(arg);
         if (auto v = value("--test-namespace=")) a.test_namespace = *v;
         if (auto v = value("--self-test=")) a.self_test = *v;
-        if (auto v = value("--role=fake-launcher=")) a.fake_launcher = *v;
         if (auto v = value("--log-dir=")) a.log_dir = *v;
     }
     if (install_root && (a.launcher || testing)) a.install_root = *install_root;

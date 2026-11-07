@@ -1,6 +1,7 @@
 #!/bin/bash
 # The macOS front door end to end (process-contract.md). A fake launcher that
-# the host runs, and LaunchServices never started, launches fronts through
+# the host runs as the bundle's seed launcher (--role=launcher
+# --install-seed), and LaunchServices never started, launches fronts through
 # NSWorkspace and checks each fake client scenario's ExitKind, single instance
 # and data.lock. It also runs the real client on a read-only data directory, a
 # database from a newer schema and a fresh one. Then the launcher is killed
@@ -23,7 +24,9 @@ real_data=$(mktemp -d "${TMPDIR:-/tmp}/parties-e2e-data.XXXXXX")
 app="$out/Parties.app"
 ditto "$built_app" "$app"
 host="$app/Contents/MacOS/Parties"
+cp "$fake_launcher" "$app/Contents/Frameworks/PartiesLauncher.dylib"
 codesign --force --sign - --identifier org.parties.client.app "$app/Contents/Frameworks/PartiesClient.dylib"
+codesign --force --sign - --identifier org.parties.client.launcher "$app/Contents/Frameworks/PartiesLauncher.dylib"
 codesign --force --sign - --options runtime --entitlements "$entitlements" "$app"
 
 fail() {
@@ -58,7 +61,7 @@ common=(--fake-client="$fake_client" --install-root="$out/runtime" --data-dir="$
 
 echo "== Scenarios through the front door"
 rc=0
-"$host" --role=fake-launcher="$fake_launcher" "${common[@]}" --test-namespace="e2e-$$" \
+"$host" --role=launcher --install-seed="$app" "${common[@]}" --test-namespace="e2e-$$" \
     --real-client="$app/Contents/Frameworks/PartiesClient.dylib" --real-data-root="$real_data" 2>&1 \
     | tee "$out/fake-launcher.log" || rc=$?
 if [ "$rc" != 0 ]; then
@@ -70,7 +73,7 @@ if [ "$rc" != 0 ]; then
 fi
 launcher=$(sed -n 's/^\[e2e\] fake launcher pid=\([0-9]*\),.*/\1/p' "$out/fake-launcher.log")
 echo "-- the launcher's front-door trace"
-cat "$out/logs/front-$launcher.log"
+cat "$out/logs/launcher-$launcher.log"
 
 for pid in $(sed -n 's/^\[e2e\] real client on .* data: front pid=\([0-9]*\)$/\1/p' "$out/fake-launcher.log"); do
     echo "-- real client front $pid"
@@ -101,7 +104,7 @@ done
 
 echo "== Launcher loss: kill -9 the launcher under a running front"
 loss_log="$out/launcher-loss.log"
-"$host" --role=fake-launcher="$fake_launcher" "${common[@]}" --test-namespace="loss-$$" --mode=launcher-loss \
+"$host" --role=launcher --install-seed="$app" "${common[@]}" --test-namespace="loss-$$" --mode=launcher-loss \
     > "$loss_log" 2>&1 &
 launcher_pid=$!
 owner=

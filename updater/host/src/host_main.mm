@@ -425,7 +425,6 @@ bool reach_launcher(const std::string& socket) {
     }
     door::exit_process(1);
 }
-
 // --role=launcher (process-contract.md, "Launcher argv"): verify the launcher
 // dylib, load it and run it. Exit 70 when it cannot be used.
 int run_launcher_role(int argc, const char* argv[]) {
@@ -454,17 +453,6 @@ int run_launcher_role(int argc, const char* argv[]) {
     return run_entry(*payload, dir, "", "", -1, {argv + 1, argv + argc});
 }
 
-#ifdef PARTIES_UPDATE_TESTING
-// The front-door e2e test's launcher: a dylib that a host process runs the way
-// the real launcher will run, without LaunchServices ever starting it.
-int run_fake_launcher(const fs::path& dylib, int argc, const char* argv[]) {
-    constexpr parties::host::Entry entry{"parties_fake_launcher_min_host_abi", "parties_fake_launcher_main"};
-    const auto payload = parties::host::load(dylib, std::nullopt, entry);
-    if (!payload) return 1;
-    return run_entry(*payload, dylib.parent_path(), "", "", -1, {argv + 1, argv + argc});
-}
-#endif
-
 } // namespace
 
 int main(int argc, const char* argv[]) {
@@ -480,7 +468,6 @@ int main(int argc, const char* argv[]) {
             std::setvbuf(stderr, nullptr, _IONBF, 0);
         }
         if (g_args.self_test) return parties::host::load(*g_args.self_test, std::nullopt, kClientEntry) ? 0 : 1;
-        if (g_args.fake_launcher) return run_fake_launcher(*g_args.fake_launcher, argc, argv);
 #endif
         if (g_args.launcher) return run_launcher_role(argc, argv);
         run_front();

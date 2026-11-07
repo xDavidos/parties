@@ -1,6 +1,6 @@
-// update_front_door_e2e's launcher. A shell runs the host with
-// --role=fake-launcher=<this dylib>, so this process, like the real launcher,
-// was never started by LaunchServices. It launches fronts through NSWorkspace,
+// update_front_door_e2e's launcher. A shell puts it in a bundle as the seed's
+// PartiesLauncher.dylib and runs the host with --role=launcher --install-seed,
+// so this process, like the real launcher, was never started by LaunchServices. It launches fronts through NSWorkspace,
 // plays every fake client scenario, and checks each ExitKind against the table
 // in process-contract.md, "Exit classification". Then it runs the real
 // PartiesClient.dylib on unusable, too new and normal data.
@@ -364,9 +364,9 @@ std::optional<std::string_view> flag(std::string_view arg, std::string_view name
 
 } // namespace
 
-extern "C" const uint32_t parties_fake_launcher_min_host_abi = 1;
+extern "C" const uint32_t parties_launcher_min_host_abi = 1;
 
-extern "C" int parties_fake_launcher_main(const PartiesHostApi* host) {
+extern "C" int parties_launcher_main(const PartiesHostApi* host) {
     Options o;
     for (int i = 0; i < host->argc; ++i) {
         const std::string_view arg = host->argv[i];

@@ -34,7 +34,7 @@ struct HostArgs {
     // Testing builds only.
     std::string test_namespace;
     std::vector<std::string> testing;  // roots, namespace, logs and feed, passed to every process this one starts
-    std::optional<std::string> self_test, fake_launcher, log_dir;
+    std::optional<std::string> self_test, log_dir;
 };
 
 // args excludes argv[0]. The launcher role takes the roots its booting front
