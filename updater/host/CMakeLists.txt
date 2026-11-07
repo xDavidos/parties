@@ -6,6 +6,7 @@ target_include_directories(parties_host_api INTERFACE include)
 add_executable(parties_host MACOSX_BUNDLE src/host_main.mm src/payload.cpp src/front_door_client.mm)
 target_include_directories(parties_host PRIVATE ${CMAKE_SOURCE_DIR}/client/include)
 target_compile_definitions(parties_host PRIVATE
+    $<$<BOOL:${BUILD_IN_RETAIL}>:PARTIES_RETAIL=1>
     $<$<BOOL:${PARTIES_UPDATE_TESTING}>:PARTIES_UPDATE_TESTING>)
 target_link_libraries(parties_host PRIVATE parties_host_api parties_update_link "-framework AppKit")
 

@@ -45,6 +45,16 @@ fs::path app_support() {
         .firstObject.fileSystemRepresentation;
 }
 
+// Where parties.db lives when no launcher assigns a place. A dev build keeps
+// its own, so its schema never migrates the database a release build reads.
+fs::path unmanaged_data_dir() {
+#ifdef PARTIES_RETAIL
+    return app_support() / "Parties";
+#else
+    return app_support() / "Parties Dev";
+#endif
+}
+
 #ifdef PARTIES_UPDATE_TESTING
 std::optional<std::string_view> flag(std::string_view arg, std::string_view name) {
     if (!arg.starts_with(name)) return std::nullopt;
@@ -116,7 +126,7 @@ void hold_data_lock(const fs::path& data_dir) {
 
 [[noreturn]] void run_unmanaged(const fs::path& bundle, const Args& args) {
     const fs::path build_dir = bundle / "Contents" / "Frameworks";
-    const fs::path data_dir = app_support() / "Parties";
+    const fs::path data_dir = unmanaged_data_dir();
     hold_data_lock(data_dir);
     const auto payload = parties::host::load(build_dir / "PartiesClient.dylib", std::nullopt, kClientEntry);
     if (!payload) door::exit_process(int(ExitCode::InitFailed));
