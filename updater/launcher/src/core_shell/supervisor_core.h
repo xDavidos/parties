@@ -63,6 +63,9 @@ public:
     void on_link(const std::vector<link::AppMessage>& messages);
     // The running app's process is gone.
     void on_app_exited(ExitKind kind);
+    // The app's process found its build's files missing or modified when it
+    // loaded them, so none of its code ran, and it is gone.
+    void on_app_corrupt();
     // The feed worker woke: with a finished job's outcome, or nullopt for progress.
     void on_worker(std::optional<JobOutcome> outcome);
     void on_timers();
@@ -97,6 +100,9 @@ private:
     };
 
     void dispatch(Event event);
+    void drain();
+    bool wait_for_data();
+    void after_app();
     bool execute(const Effect& effect);
     bool spawn(const BuildId& build);
     void on_request(const link::Request& request);
@@ -118,6 +124,8 @@ private:
     std::optional<AppRun> app_;
     std::optional<PendingRecovery> recovery_;
     std::optional<DataInfo> last_live_db_;
+    std::optional<Clock::time_point> data_retry_;       // the queue waits for data another process holds
+    std::optional<Clock::time_point> data_wait_since_;
     FeedView feed_view_;
     bool restart_requested_ = false;
     bool quitting_ = false;

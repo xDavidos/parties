@@ -14,6 +14,9 @@ constexpr auto kCheckInterval = std::chrono::hours(6);
 // How long a check or download may keep the launcher running after the app
 // exits: a full build over a slow link, but not a hidden process all day.
 constexpr auto kJobCapAfterExit = std::chrono::minutes(15);
+// How often, and how long, a decision waits for data another process holds.
+constexpr auto kDataRetry = std::chrono::milliseconds(250);
+constexpr auto kDataWaitCap = std::chrono::minutes(2);
 
 link::StatusNotice wire_notice(const Notice& n) {
     link::StatusNotice out;
@@ -57,17 +60,47 @@ std::optional<DataInfo> SupervisorCore::live_db() {
     if (app_) return last_live_db_;
     auto info = executor_.inspect_live_db();
     if (!info) {
-        log("cannot read the live database: {}", info.error());
+        log("cannot read the live database: {}", info.error().why);
         return last_live_db_ = std::nullopt;
     }
     return last_live_db_ = *info;
 }
 
+// Deciding on data another process may still be changing could restore the
+// wrong copy, or none, so the queue waits for it. A committed restore needs no
+// decision: its effect meets the held data itself and fails like any effect.
+bool SupervisorCore::wait_for_data() {
+    if (app_ || std::holds_alternative<Restoring>(state_.operation)) return false;
+    auto info = executor_.inspect_live_db();
+    if (info || !info.error().busy) {
+        data_wait_since_.reset();
+        return false;
+    }
+    const auto now = executor_.now();
+    if (!data_wait_since_) {
+        log("waiting to read the live database: {}", info.error().why);
+        data_wait_since_ = now;
+    }
+    if (now - *data_wait_since_ >= kDataWaitCap) {
+        log("gave up waiting for the live database; the next start decides again");
+        queue_.clear();
+        data_wait_since_.reset();
+        return true;
+    }
+    data_retry_ = now + kDataRetry;
+    return true;
+}
+
 void SupervisorCore::dispatch(Event event) {
     queue_.push_back(std::move(event));
-    if (draining_) return;
+    drain();
+}
+
+void SupervisorCore::drain() {
+    if (draining_ || data_retry_) return;
     draining_ = true;
     while (!queue_.empty()) {
+        if (wait_for_data()) break;
         Event next = std::move(queue_.front());
         queue_.pop_front();
         Context ctx{live_db(), config_.policy};
@@ -108,8 +141,9 @@ bool SupervisorCore::execute(const Effect& effect) {
                 if (restored) return true;
                 error = restored.error().why;
                 // A restore that cannot even start would otherwise stop every
-                // launch here; one that changed the live data is resumed instead.
-                if (!restored.error().live_changed) {
+                // launch here; one that changed the live data, or that an app
+                // still holding the data kept out, is resumed instead.
+                if (!restored.error().live_changed && !restored.error().data_busy) {
                     queue_.push_back(RestoreFailed{});
                     if (!recovery_) queue_.push_back(StartRequested{});
                 }
@@ -153,6 +187,18 @@ bool SupervisorCore::spawn(const BuildId& build) {
 void SupervisorCore::on_app_exited(ExitKind kind) {
     app_.reset();
     dispatch(AppExited{kind});
+    after_app();
+}
+
+void SupervisorCore::on_app_corrupt() {
+    if (!app_) return;
+    const BuildId build = app_->build;
+    app_.reset();
+    dispatch(BuildCorrupt{build});
+    after_app();
+}
+
+void SupervisorCore::after_app() {
     if (quitting_) {
         on_quit();
         return;
@@ -307,7 +353,7 @@ bool SupervisorCore::repairing() const {
 bool SupervisorCore::idle() const {
     // running_job_, not job_busy(): a job that just ended still has an
     // outcome to commit.
-    return !app_ && !running_job_ && jobs_.empty();
+    return !app_ && !running_job_ && jobs_.empty() && !data_retry_;
 }
 
 std::optional<Clock::time_point> SupervisorCore::next_deadline() const {
@@ -315,6 +361,7 @@ std::optional<Clock::time_point> SupervisorCore::next_deadline() const {
     auto consider = [&](Clock::time_point t) {
         if (!next || t < *next) next = t;
     };
+    if (data_retry_) consider(*data_retry_);
     if (!app_) {
         if (jobs_cut_off_) consider(*jobs_cut_off_);
         return next;
@@ -333,6 +380,10 @@ std::optional<Clock::time_point> SupervisorCore::next_deadline() const {
 
 void SupervisorCore::on_timers() {
     const auto now = executor_.now();
+    if (data_retry_ && now >= *data_retry_) {
+        data_retry_.reset();
+        drain();
+    }
     if (!app_) {
         if (jobs_cut_off_ && now >= *jobs_cut_off_) {
             jobs_cut_off_.reset();
@@ -402,7 +453,7 @@ void SupervisorCore::publish_status() {
 
 std::optional<RecoveryDue> SupervisorCore::take_recovery() {
     // A repair in flight may make the recovery dialog unnecessary.
-    if (!recovery_ || app_ || repairing() || quitting_) return std::nullopt;
+    if (!recovery_ || app_ || repairing() || quitting_ || data_retry_) return std::nullopt;
     PendingRecovery pending = *recovery_;
     recovery_.reset();
     std::optional<DataInfo> live = live_db();

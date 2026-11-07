@@ -100,6 +100,8 @@ public:
     std::optional<size_t> fail_slot;  // the effect in this slot fails
     std::optional<SpawnFailure> spawn_failure;
     std::optional<RestoreError> restore_failure;
+    bool data_busy = false;  // every restore finds an app process still holding the data
+    bool db_busy = false;    // reading the live database finds an app process still holding it
 
     std::vector<std::optional<Effect>> slots;
     std::vector<JobRequest> jobs;
@@ -126,6 +128,7 @@ public:
         std::string error;
         if (!carry(RestoreSnapshot{from, preserve_live_as}, error)) return std::unexpected(RestoreError{error, true});
         if (restore_failure) return std::unexpected(*std::exchange(restore_failure, std::nullopt));
+        if (data_busy) return std::unexpected(RestoreError{"data.lock is held", false, true});
         return {};
     }
     std::expected<std::unique_ptr<AppSession>, SpawnFailure> spawn(const BuildRecord& build) override {
@@ -141,7 +144,10 @@ public:
         std::string ignored;
         carry(SignalBootOk{}, ignored);
     }
-    std::expected<std::optional<DataInfo>, std::string> inspect_live_db() const override { return live; }
+    std::expected<std::optional<DataInfo>, LiveDbError> inspect_live_db() const override {
+        if (db_busy) return std::unexpected(LiveDbError{"data.lock is held", true});
+        return live;
+    }
     std::vector<Backup> list_backups() const override { return {}; }
     bool feed_available() const override { return feed; }
     bool job_busy() const override { return worker_busy; }
@@ -470,6 +476,72 @@ bool restore_that_cannot_start_falls_back_to_good() {
     return t.finish();
 }
 
+bool restore_kept_out_by_a_live_app_is_resumed_later() {
+    Scenario t("a restore an app process keeps out is retried on the next start, never given up");
+    SupervisorState restoring = steady();
+    restoring.operation = Restoring{Snapshot{SnapshotId{"pre-1.1.0.0"}, kV1}, SnapshotId{"live-1"}};
+    Mock mock;
+    mock.data_busy = true;
+    Oracle oracle(restoring);
+    SupervisorCore core(mock, restoring, config());
+
+    core.start(false);
+    auto restore_fails = [](const Effect& e) { return std::holds_alternative<RestoreSnapshot>(e); };
+    oracle.expect(Resumed{}, mock, restore_fails);
+    oracle.expect(StartRequested{}, mock, restore_fails);
+    t.same_effects(mock, oracle, core);
+    t.check(std::holds_alternative<Restoring>(core.state().operation), "the restore was given up");
+    t.check(!core.state().notice, "a notice was raised for a restore that is still owed");
+    t.check(!mock.session_alive, "an app started on data whose restore is unfinished");
+    return t.finish();
+}
+
+bool decisions_wait_for_data_another_process_holds() {
+    Scenario t("decisions wait while another process holds the data, then use what it left");
+    Mock mock;
+    mock.db_busy = true;
+    Oracle oracle(staged());
+    SupervisorCore core(mock, staged(), config());
+
+    core.start(false);
+    t.check(mock.slots.empty(), "a decision was made without the live data");
+    t.check(!core.idle() && core.next_deadline(), "the launcher stopped waiting for the data");
+    mock.clock += std::chrono::seconds(5);
+    core.on_timers();
+    t.check(mock.slots.empty(), "a decision was made while the data was still held");
+
+    mock.db_busy = false;
+    mock.clock += std::chrono::seconds(1);
+    core.on_timers();
+    oracle.expect(Resumed{}, mock);
+    oracle.expect(StartRequested{}, mock);
+    t.same_effects(mock, oracle, core);
+    t.check(has_effect<TakeSnapshot>(mock.slots), "the candidate started without a snapshot of the live data");
+    t.check(mock.session_alive, "the candidate did not start once the data was free");
+    return t.finish();
+}
+
+bool corrupt_load_is_redownloaded() {
+    Scenario t("an app whose load found its build corrupt redownloads it");
+    Mock mock;
+    Oracle oracle(steady());
+    SupervisorCore core(mock, steady(), config());
+
+    core.start(false);
+    oracle.expect(Resumed{}, mock);
+    oracle.expect(StartRequested{}, mock);
+    core.on_app_corrupt();
+    oracle.expect(BuildCorrupt{A.id}, mock);
+    t.same_effects(mock, oracle, core);
+    t.check(oracle.recoveries() == std::vector{RecoveryReason::Repairing},
+            "a corrupt good build does not show the repairing recovery");
+    t.check(!mock.session_alive, "the corrupt app's session is still held");
+    t.check(mock.jobs.size() == 1 && std::holds_alternative<RepairJob>(mock.jobs[0].job),
+            "the corrupt build was not queued for repair");
+    t.check(!core.take_recovery(), "recovery was shown while the repair runs");
+    return t.finish();
+}
+
 bool restart_to_update_applies_the_staged_build() {
     Scenario t("restart to update asks the app to exit, then starts the staged build");
     Mock mock;
@@ -604,6 +676,9 @@ int main() {
     ok &= a_failed_effect_ends_the_batch();
     ok &= corrupt_build_is_redownloaded();
     ok &= restore_that_cannot_start_falls_back_to_good();
+    ok &= restore_kept_out_by_a_live_app_is_resumed_later();
+    ok &= corrupt_load_is_redownloaded();
+    ok &= decisions_wait_for_data_another_process_holds();
     ok &= restart_to_update_applies_the_staged_build();
     ok &= quit_cancels_jobs_and_never_restarts();
     ok &= activate_brings_forward_or_starts();

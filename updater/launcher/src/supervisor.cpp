@@ -117,7 +117,11 @@ private:
         return builds_.remove(build, committed, error);
     }
     void signal_boot_ok() override;
-    std::expected<std::optional<DataInfo>, std::string> inspect_live_db() const override { return data_.inspect(); }
+    std::expected<std::optional<DataInfo>, LiveDbError> inspect_live_db() const override {
+        auto info = data_.inspect();
+        if (!info) return std::unexpected(LiveDbError{info.error()});
+        return *info;
+    }
     std::vector<Backup> list_backups() const override { return data_.list(); }
     bool feed_available() const override { return worker_.available(); }
     bool job_busy() const override { return worker_.busy(); }

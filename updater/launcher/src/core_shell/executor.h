@@ -30,6 +30,12 @@ struct Backup {
 struct RestoreError {
     std::string why;
     bool live_changed = false;  // false: the live database is exactly as it was
+    bool data_busy = false;     // an app process still holds the data: nothing was tried, retry on the next start
+};
+
+struct LiveDbError {
+    std::string why;
+    bool busy = false;  // an app process still holds the data, and may still be changing it
 };
 
 struct CheckJob {
@@ -111,7 +117,7 @@ public:
     virtual void signal_boot_ok() = 0;
 
     // The user's data, read only while no app runs.
-    virtual std::expected<std::optional<DataInfo>, std::string> inspect_live_db() const = 0;
+    virtual std::expected<std::optional<DataInfo>, LiveDbError> inspect_live_db() const = 0;
     // Intact backups, newest first.
     virtual std::vector<Backup> list_backups() const = 0;
 
