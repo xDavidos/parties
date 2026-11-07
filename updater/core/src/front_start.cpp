@@ -9,6 +9,9 @@ namespace parties::update::front_start {
 
 namespace {
 
+constexpr std::string_view kMoveFromDiskImage = "move_from_disk_image";
+constexpr std::string_view kMoveFromTranslocation = "move_from_translocation";
+
 front_door::RecoveryOption option(std::string_view id, std::string label, std::string detail = {}) {
     return {std::string(id), std::move(label), std::move(detail)};
 }
@@ -20,6 +23,10 @@ std::string explanation(std::string_view reason) {
     if (reason == "data_incompatible") return "Your data was saved by a newer version of Parties than the one installed.";
     if (reason == "repairing")
         return "Some Parties files are damaged or missing. Start another version, or download Parties again.";
+    if (reason == kMoveFromDiskImage || reason == kMoveFromTranslocation)
+        return "Parties is running from " +
+               std::string(reason == kMoveFromDiskImage ? "a disk image" : "a temporary location macOS chose for it") +
+               ". It works from here, but moving it keeps it in one place.";
     return "Choose how to start Parties.";
 }
 
@@ -123,9 +130,8 @@ std::optional<HostRecord> parse_host_record(std::string_view text) {
     if (!json::parse(doc, text)) return std::nullopt;
     auto seed = json::string(doc, "seed");
     auto failures = json::u32(doc, "install_failures");
-    auto declined = json::boolean(doc, "move_declined");
-    if (!seed || !failures || !declined) return std::nullopt;
-    return HostRecord{std::string(*seed), uint8_t(std::min<uint32_t>(*failures, 255)), *declined};
+    if (!seed || !failures) return std::nullopt;
+    return HostRecord{std::string(*seed), uint8_t(std::min<uint32_t>(*failures, 255))};
 }
 
 std::string write_host_record(const HostRecord& r) {
@@ -135,7 +141,6 @@ std::string write_host_record(const HostRecord& r) {
     json::key(w, "format"); w.Uint(1);
     json::key(w, "seed"); json::str(w, r.seed);
     json::key(w, "install_failures"); w.Uint(r.install_failures);
-    json::key(w, "move_declined"); w.Bool(r.move_declined);
     w.EndObject();
     return std::string(buf.GetString(), buf.GetSize()) + "\n";
 }
@@ -165,6 +170,8 @@ HostRecord record_seed_failure(HostRecord record, std::string_view seed) {
 }
 
 Alert recovery_alert(const front_door::Recovery& r) {
+    if (r.reason == kMoveFromDiskImage || r.reason == kMoveFromTranslocation)
+        return {"Move Parties to your Applications folder?", explanation(r.reason), r.options};
     Alert alert{"Parties needs your help to start", explanation(r.reason), r.options};
     for (const auto& o : r.options)
         if (!o.detail.empty()) alert.message += "\n\n" + o.label + ": " + o.detail;
@@ -188,11 +195,9 @@ Alert safe_mode_alert(bool can_start_last_good) {
     return alert;
 }
 
-Alert move_alert(Placement placement) {
-    const std::string where =
-        placement == Placement::ReadOnlyVolume ? "a disk image" : "a temporary location macOS chose for it";
-    return {"Move Parties to your Applications folder?",
-            "Parties is running from " + where + ". It works from here, but moving it keeps it in one place.",
+front_door::Recovery move_offer(Placement placement) {
+    return {std::string(placement == Placement::ReadOnlyVolume ? kMoveFromDiskImage : kMoveFromTranslocation),
+            {},
             {option(kMove, "Move to Applications"), option(kKeep, "Not Now")}};
 }
 

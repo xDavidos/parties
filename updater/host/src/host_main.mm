@@ -20,7 +20,6 @@
 #include <signal.h>
 #include <spawn.h>
 #include <sys/file.h>
-#include <sys/mount.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -130,10 +129,10 @@ void relaunch(const fs::path& bundle, std::vector<std::string> extra) {
 
 // The id of the option the user picked, or kQuit when the alert is closed.
 // Open the data folder and Download act here and show the alert again.
-// Testing builds answer with the variable `scripted` names, when it is set.
-std::string ask(const start::Alert& alert, const fs::path& data_dir, const char* scripted = "PARTIES_TEST_RECOVERY") {
-    std::fprintf(stderr, "[host] alert: %s\n", alert.title.c_str());
-    if (const char* answer = kTesting ? std::getenv(scripted) : nullptr) return answer;
+std::string ask(const start::Alert& alert, const fs::path& data_dir) {
+    const char* scripted = kTesting ? std::getenv("PARTIES_TEST_RECOVERY") : nullptr;
+    std::fprintf(stderr, "[host] alert %s: %s\n", scripted ? "answered by PARTIES_TEST_RECOVERY" : "shown", alert.title.c_str());
+    if (scripted) return scripted;
     [NSApplication sharedApplication];
     for (;;) {
         NSAlert* panel = [[NSAlert alloc] init];
@@ -157,31 +156,6 @@ std::string ask(const start::Alert& alert, const fs::path& data_dir, const char*
     std::fprintf(stderr, "[host] safe mode: %s\n", id.c_str());
     if (start_last_good) relaunch(own_bundle(), {"--safe-mode"});
     door::exit_process(start_last_good ? 0 : 1);
-}
-
-// Offered once and never required: declining keeps Parties running from here.
-void offer_move(start::HostRecord& record) {
-    const fs::path bundle = own_bundle();
-    struct statfs volume{};
-    const bool read_only = statfs(bundle.c_str(), &volume) == 0 && (volume.f_flags & MNT_RDONLY);
-    const start::Placement placement = start::classify_placement(bundle.string(), read_only);
-    std::fprintf(stderr, "[host] placement %d, move declined before: %d\n", int(placement), record.move_declined);
-    if (placement == start::Placement::Installed || record.move_declined) return;
-    if (ask(start::move_alert(placement), {}, "PARTIES_TEST_MOVE") == start::kMove) {
-        for (const fs::path& dir : {fs::path("/Applications"), fs::path(NSHomeDirectory().fileSystemRepresentation) / "Applications"}) {
-            NSURL* to = [NSURL fileURLWithPath:@((dir / "Parties.app").c_str())];
-            [NSFileManager.defaultManager trashItemAtURL:to resultingItemURL:nil error:nil];
-            if ([NSFileManager.defaultManager copyItemAtURL:[NSURL fileURLWithPath:@(bundle.c_str())] toURL:to error:nil]) {
-                relaunch(dir / "Parties.app", {});
-                door::exit_process(0);
-            }
-        }
-    }
-    record.move_declined = true;
-    persist(state_dir() / "host.json", start::write_host_record(record));
-    // This process showed host UI, so another one loads the payload.
-    relaunch(bundle, {});
-    door::exit_process(0);
 }
 
 void hold_data_lock(const fs::path& data_dir) {
@@ -385,7 +359,6 @@ bool reach_launcher(const std::string& socket) {
     for (int i = 0; g_args.after && kill(g_args.after, 0) == 0 && i < 400; ++i) std::this_thread::sleep_for(50ms);
     if (g_args.safe_mode) run_unsupervised();
     auto record = load(state_dir() / "host.json", start::parse_host_record).value_or(start::HostRecord{});
-    offer_move(record);
     for (int round = 0; round < 6; ++round) {
         const bool reachable = reach_launcher(socket);
         const auto seed = parties::host::digest_file(bundle / "Contents" / "Resources" / "seed" / "build.json");

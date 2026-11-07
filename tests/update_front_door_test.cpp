@@ -225,7 +225,7 @@ void test_plan_front_exhaustive() {
                     for (uint8_t failures : {0, 1, 2, 3, 255})
                         for (uint8_t round : {0, 1, 2, 3}) {
                             start::FrontFacts f{bool(flags & 1), bool(flags & 2), bundle, installed,
-                                                {counted.value_or(""), failures, false}, round};
+                                                {counted.value_or(""), failures}, round};
                             std::string label = "flags=" + std::to_string(flags) + " bundle=" + bundle.value_or("-") +
                                                 " installed=" + installed.value_or("-") +
                                                 " counted=" + counted.value_or("-") +
@@ -246,7 +246,7 @@ void test_plan_front_exhaustive() {
           "a broken seed never blocks the good build");
     start::FrontFacts newer_dmg{false, true, "c", "a", gave_up, 0};
     check(start::plan_front(newer_dmg) == start::FrontPlan::InstallSeed, "another seed starts its own count");
-    check(start::record_seed_failure(gave_up, "c") == start::HostRecord{"c", 1, false},
+    check(start::record_seed_failure(gave_up, "c") == start::HostRecord{"c", 1},
           "a failure of another seed restarts the count");
     start::FrontFacts dev_build{false, false, std::nullopt, std::nullopt, {}, 0};
     check(start::plan_front(dev_build) == start::FrontPlan::SafeMode, "nothing installed and no seed");
@@ -268,7 +268,7 @@ void test_placement_and_records() {
     check(start::classify_placement("/Users/u/AppTranslocationNotes/Parties.app", false) == Placement::Installed,
           "only the whole path component counts");
 
-    const start::HostRecord record{std::string(64, 'f'), 2, true};
+    const start::HostRecord record{std::string(64, 'f'), 2};
     check(start::parse_host_record(start::write_host_record(record)) == record, "host.json round-trips");
     check(start::parse_host_record(start::write_host_record({})) == start::HostRecord{},
           "an empty host.json round-trips");
@@ -289,7 +289,17 @@ void test_placement_and_records() {
           "safe mode offers the last good app first");
     for (const auto& o : start::safe_mode_alert(false).options)
         check(o.id != start::kStartLastGood, "no last good app to start without a contract");
-    check(start::move_alert(Placement::ReadOnlyVolume).options.front().id == start::kMove, "the move is the default");
+    for (Placement where : {Placement::ReadOnlyVolume, Placement::Translocated}) {
+        const Recovery offer = start::move_offer(where);
+        check(parse_launcher_message(write(LauncherMessage{offer})) == LauncherMessage{offer}, "a move offer round-trips");
+        const start::Alert move = start::recovery_alert(offer);
+        check(move.title.starts_with("Move Parties") && move.options.size() == 2 &&
+                  move.options.front().id == start::kMove && move.options.back().id == start::kKeep,
+              "a move offer shows only Move, the default, and Not Now");
+        check(move.message.find(where == Placement::ReadOnlyVolume ? "disk image" : "temporary location") !=
+                  std::string::npos,
+              "the move offer says where Parties runs from");
+    }
 }
 
 std::vector<const char*> argv_of(const std::vector<std::string>& args) {

@@ -90,7 +90,6 @@ Placement classify_placement(std::string_view bundle_path, bool volume_read_only
 struct HostRecord {
     std::string seed;  // the seed (SHA-256 of its build.json) install_failures counts for
     uint8_t install_failures = 0;
-    bool move_declined = false;
     friend bool operator==(const HostRecord&, const HostRecord&) = default;
 };
 
@@ -144,10 +143,13 @@ struct Alert {
     std::vector<front_door::RecoveryOption> options;  // one button each, the first is the default
 };
 
-// The launcher's options, its explanation of the reason, and Open the data folder and Quit.
+// The launcher's options, its explanation of the reason, and Open the data
+// folder and Quit. A move offer shows only its own two options.
 Alert recovery_alert(const front_door::Recovery& recovery);
 // No launcher starts: the twin of the boot stub's dialog.
 Alert safe_mode_alert(bool can_start_last_good);
-Alert move_alert(Placement placement);
+// What the launcher sends a front when the bundle runs from somewhere other
+// than an installed location. Not for Placement::Installed.
+front_door::Recovery move_offer(Placement placement);
 
 } // namespace parties::update::front_start

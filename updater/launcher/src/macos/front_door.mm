@@ -98,6 +98,27 @@ void launch_front(const std::string& bundle, const std::vector<std::string>& arg
     }];
 }
 
+std::optional<std::string> copy_to_applications(const std::string& bundle) {
+    NSArray<NSString*>* dirs = @[ @"/Applications", [NSHomeDirectory() stringByAppendingPathComponent:@"Applications"] ];
+    if (auto dir = testing::enabled() ? testing::env("PARTIES_TEST_APPLICATIONS_DIR") : std::nullopt) dirs = @[ @(dir->c_str()) ];
+    NSFileManager* files = NSFileManager.defaultManager;
+    NSURL* from = [NSURL fileURLWithPath:@(bundle.c_str()) isDirectory:YES];
+    for (NSString* dir in dirs) {
+        NSURL* to = [NSURL fileURLWithPath:[dir stringByAppendingPathComponent:@"Parties.app"] isDirectory:YES];
+        [files trashItemAtURL:to resultingItemURL:nil error:nil];
+        NSError* error = nil;
+        if (![files copyItemAtURL:from toURL:to error:&error]) {
+            std::fprintf(stderr, "[front-door] cannot copy Parties.app to %s: %s\n", dir.UTF8String,
+                         error.description.UTF8String);
+            continue;
+        }
+        // A quarantined copy is translocated again when it starts.
+        [to setResourceValue:[NSNull null] forKey:NSURLQuarantinePropertiesKey error:nil];
+        return std::string(to.fileSystemRepresentation);
+    }
+    return std::nullopt;
+}
+
 std::unique_ptr<FrontDoor> FrontDoor::listen(Options options) {
     const std::string& path = options.socket_path;
     sockaddr_un address;

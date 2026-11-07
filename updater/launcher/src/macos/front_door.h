@@ -30,6 +30,10 @@ namespace parties::update::launcher::macos {
 // answered is logged.
 void launch_front(const std::string& bundle, const std::vector<std::string>& arguments, bool new_instance);
 
+// Copies the bundle to /Applications, else ~/Applications, moving a
+// Parties.app already there to the Trash. The copy's path, or nullopt.
+std::optional<std::string> copy_to_applications(const std::string& bundle);
+
 const char* exit_kind_name(ExitKind kind);
 
 struct Assignment {

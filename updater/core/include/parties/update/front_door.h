@@ -83,7 +83,9 @@ struct RecoveryOption {
 // The executor of ShowRecovery: the front shows the options, answers with
 // recovery_choice and exits without loading a payload.
 struct Recovery {
-    std::string reason;  // "good_failed_to_start", "data_unavailable", "data_incompatible", "repairing" or "requested"
+    // "good_failed_to_start", "data_unavailable", "data_incompatible", "repairing", "requested", or a move
+    // offer (front_start::move_offer)
+    std::string reason;
     std::string data_dir;
     std::vector<RecoveryOption> options;
     friend bool operator==(const Recovery&, const Recovery&) = default;

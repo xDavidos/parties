@@ -14,11 +14,13 @@
 #include <parties/data_lock.h>
 #include <parties/front_door_socket.h>
 #include <parties/host_api.h>
+#include <parties/update/front_start.h>
 
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/event.h>
 #include <sys/file.h>
+#include <sys/mount.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -113,7 +115,9 @@ private:
     void terminate_app();
     void on_door(const Event& event);
     void drain_door();
+    std::optional<std::string> ask_front(front_door::Recovery recovery);
     void show_recovery(RecoveryDue due);
+    bool moved_to_applications(std::vector<std::string> front_arguments);
     void wake_loop();
     void write_session(bool clean);
     void end_session();
@@ -280,11 +284,9 @@ void Supervisor::drain_door() {
 // The host of a front draws the alert, so this waits for a front to show it,
 // for its answer and for that front to be gone: the next front LaunchServices
 // starts must be a new process. Like the Windows dialog, it waits as long as
-// the user does.
-void Supervisor::show_recovery(RecoveryDue due) {
-    log("recovery shown: {}", recovery_reason_name(due.why));
-    door_->offer_recovery({recovery_reason_name(due.why), options_.data_root.string(),
-                           recovery_options(core_->state(), due.live_db, due.backups)});
+// the user does. Before the core starts, other fronts wait for it.
+std::optional<std::string> Supervisor::ask_front(front_door::Recovery recovery) {
+    door_->offer_recovery(std::move(recovery));
     const auto give_up = Clock::now() + std::chrono::seconds(60);
     std::optional<int32_t> shown_to;
     std::optional<std::string> answer;
@@ -304,12 +306,22 @@ void Supervisor::show_recovery(RecoveryDue due) {
                        [&](const RecoveryAnswered& e) { answer = e.id; },
                        [&](const FrontExited& e) {
                            if (shown_to == e.pid) gone = true;
-                           else on_door(*event);
+                           else if (core_) on_door(*event);
                        },
-                       [&](const auto&) { on_door(*event); },
+                       [&](const auto&) {
+                           if (core_) on_door(*event);
+                       },
                    },
                    *event);
     }
+    return answer;
+}
+
+void Supervisor::show_recovery(RecoveryDue due) {
+    log("recovery shown: {}", recovery_reason_name(due.why));
+    const std::optional<std::string> answer =
+        ask_front({recovery_reason_name(due.why), options_.data_root.string(),
+                   recovery_options(core_->state(), due.live_db, due.backups)});
     log("recovery answered: {}", answer.value_or("nothing"));
     const RecoveryChoice choice =
         answer ? choice_for(*answer, core_->state(), due.live_db, due.backups) : RecoveryChoice{Quit{}};
@@ -318,6 +330,31 @@ void Supervisor::show_recovery(RecoveryDue due) {
         return;
     }
     core_->on_recovery_choice(choice);
+}
+
+// Offered once, through the front that booted this launcher, and never
+// required. The copy then boots its own launcher, so this one leaves.
+bool Supervisor::moved_to_applications(std::vector<std::string> front_arguments) {
+    const fs::path declined = options_.install.state() / "move-declined";
+    struct statfs volume{};
+    const bool read_only = statfs(options_.host_bundle.c_str(), &volume) == 0 && (volume.f_flags & MNT_RDONLY);
+    const auto placement = front_start::classify_placement(options_.host_bundle.string(), read_only);
+    if (placement == front_start::Placement::Installed || fs::exists(declined)) return false;
+    log("move offered: Parties runs from {}", options_.host_bundle.string());
+    const std::optional<std::string> answer = ask_front(front_start::move_offer(placement));
+    log("move answered: {}", answer.value_or("nothing"));
+    if (!answer) return false;
+    if (*answer == front_start::kMove) {
+        if (auto moved = copy_to_applications(options_.host_bundle.string())) {
+            log("moved to {}", *moved);
+            front_arguments.push_back("--after=" + std::to_string(getpid()));
+            launch_front(*moved, front_arguments, true);
+            return true;
+        }
+    }
+    std::string error;
+    if (!durable_replace(declined, "", error)) log("cannot record the declined move: {}", error);
+    return false;
 }
 
 // Logout, restart or shutdown. The front ends with the session too, so its
@@ -352,12 +389,19 @@ int Supervisor::run() {
         front_arguments.push_back("--install-root=" + options_.install.root.string());
         if (!options_.test_namespace.empty()) front_arguments.push_back("--test-namespace=" + options_.test_namespace);
         if (options_.log_dir) front_arguments.push_back("--log-dir=" + options_.log_dir->string());
+        // A front that boots its own launcher, after a move, passes these on.
+        front_arguments.push_back("--data-root=" + options_.data_root.string());
+        if (options_.feed_dir) front_arguments.push_back("--feed-dir=" + options_.feed_dir->string());
     }
     door_ = FrontDoor::listen({front_door::socket_path(options_.test_namespace), options_.host_bundle.string(),
-                               std::move(front_arguments)});
+                               front_arguments});
     if (!door_) {
         log("cannot open the front door");
         return 1;
+    }
+    if (moved_to_applications(front_arguments)) {
+        write_session(true);
+        return 0;
     }
 
     std::error_code ec;
