@@ -11,6 +11,7 @@
 #include <client/exit_codes.h>
 #include <parties/data_lock.h>
 #include <parties/front_door_socket.h>
+#include <parties/update/product.h>
 
 #include <chrono>
 #include <cstdio>
@@ -26,6 +27,7 @@ namespace fs = std::filesystem;
 namespace door = parties::host::front_door;
 namespace protocol = parties::update::front_door;
 using parties::client::ExitCode;
+using parties::update::kMacClient;
 
 namespace {
 
@@ -128,7 +130,7 @@ void hold_data_lock(const fs::path& data_dir) {
     const fs::path build_dir = bundle / "Contents" / "Frameworks";
     const fs::path data_dir = unmanaged_data_dir();
     hold_data_lock(data_dir);
-    const auto payload = parties::host::load(build_dir / "PartiesClient.dylib", std::nullopt, kClientEntry);
+    const auto payload = parties::host::load(build_dir / kMacClient.app_file, std::nullopt, kClientEntry);
     if (!payload) door::exit_process(int(ExitCode::InitFailed));
     run_payload(*payload, bundle, build_dir, data_dir, data_dir / "backups", -1, args);
 }
@@ -138,7 +140,7 @@ void hold_data_lock(const fs::path& data_dir) {
     // The codec admits only "builds\<plain name>".
     const fs::path build_dir = args.install_root / "builds" / assign.build.substr(sizeof("builds\\") - 1);
     hold_data_lock(assign.data_dir);
-    const auto payload = parties::host::load(build_dir / "PartiesClient.dylib", assign.app_sha256, kClientEntry);
+    const auto payload = parties::host::load(build_dir / kMacClient.app_file, assign.app_sha256, kClientEntry);
     if (!payload) {
         using parties::host::LoadError;
         if (payload.error() == LoadError::Missing || payload.error() == LoadError::DigestMismatch) {

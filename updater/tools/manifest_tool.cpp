@@ -216,7 +216,7 @@ std::string_view kind_name(ManifestError::Kind kind) {
 
 VerifiedManifest verified_envelope(const Args& args, const fs::path& path, Channel channel) {
     std::string envelope = read_file(path, kMaxEnvelopeBytes + 1);
-    auto m = verify_manifest(bytes_of(envelope), pinned_keyring(args), channel);
+    auto m = verify_manifest(bytes_of(envelope), pinned_keyring(args), channel, kWindowsClient);
     if (!m)
         throw Failure{path.string() + " does not verify: " + std::string(kind_name(m.error().kind)) + ": " +
                       m.error().detail};
@@ -358,7 +358,7 @@ int cmd_entry(const Args& args) {
         std::string data = read_file(path);
         files.push_back({spec.substr(0, eq), path.filename().string(), data.size(), sha256_of(bytes_of(data))});
     }
-    BuildEntry entry = must(release::make_entry(info, files, args.one("--url-base")));
+    BuildEntry entry = must(release::make_entry(kWindowsClient, info, files, args.one("--url-base")));
     std::string text = write_build_entry(entry);
     if (args.has("--out"))
         write_file(args.one("--out"), text);
@@ -370,18 +370,18 @@ int cmd_entry(const Args& args) {
 int cmd_merge(const Args& args) {
     Channel channel = channel_arg(args);
     auto base = optional_envelope(args, "--base", channel);
-    auto entry = parse_build_entry(read_file(args.one("--entry"), 1 << 20));
+    auto entry = parse_build_entry(read_file(args.one("--entry"), 1 << 20), kWindowsClient);
     if (!entry) throw Failure{"--entry: " + entry.error().detail};
-    emit_payload(args, must(release::add_build(base ? &base->payload() : nullptr, channel, *entry, issue_arg(args),
-                                               keep_arg(args))));
+    emit_payload(args, must(release::add_build(kWindowsClient, base ? &base->payload() : nullptr, channel, *entry,
+                                               issue_arg(args), keep_arg(args))));
     return 0;
 }
 
 int cmd_promote(const Args& args) {
     VerifiedManifest beta = verified_envelope(args, args.one("--from"), Channel::Beta);
     auto stable = optional_envelope(args, "--to", Channel::Stable);
-    emit_payload(args, must(release::promote(beta.payload(), stable ? &stable->payload() : nullptr, version_arg(args),
-                                             issue_arg(args), keep_arg(args))));
+    emit_payload(args, must(release::promote(kWindowsClient, beta.payload(), stable ? &stable->payload() : nullptr,
+                                             version_arg(args), issue_arg(args), keep_arg(args))));
     return 0;
 }
 
@@ -393,7 +393,8 @@ int cmd_revoke(const Args& args) {
     std::vector<std::pair<Channel, ManifestPayload>> next;
     for (Channel channel : {Channel::Beta, Channel::Stable}) {
         auto base = optional_envelope(args, "--" + std::string(channel_name(channel)), channel);
-        next.emplace_back(channel, must(release::revoke(base ? &base->payload() : nullptr, channel, version, issue)));
+        next.emplace_back(channel, must(release::revoke(kWindowsClient, base ? &base->payload() : nullptr, channel,
+                                                        version, issue)));
     }
     const fs::path dir = args.one("--out-dir");
     for (const auto& [channel, payload] : next) {

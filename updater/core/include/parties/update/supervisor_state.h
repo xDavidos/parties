@@ -51,7 +51,7 @@ struct BuildRecord {
     Sha256 app_sha256;
     Verdict verdict = Unproven{};
 
-    static BuildRecord from_entry(const BuildEntry& entry);
+    static BuildRecord from_entry(const BuildEntry& entry, const ProductSpec& product);
     bool quarantined() const { return std::holds_alternative<Quarantined>(verdict); }
     friend bool operator==(const BuildRecord&, const BuildRecord&) = default;
 };

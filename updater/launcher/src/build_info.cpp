@@ -81,7 +81,7 @@ std::optional<BuildEntry> parse_build_info(std::string_view text) {
         if (!digest) return std::nullopt;
         e.files.push_back({std::string(*name), size->value.GetUint64(), *digest, {}});
     }
-    if (!e.file(kLauncherFile) || !e.file(kAppFile)) return std::nullopt;
+    if (!e.file(kWindowsClient.launcher_file) || !e.file(kWindowsClient.app_file)) return std::nullopt;
     return e;
 }
 

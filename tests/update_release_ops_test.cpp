@@ -23,8 +23,8 @@ BuildEntry build(const char* version, uint32_t link = 1, uint32_t min_link = 1) 
     b.data_schema = 2;
     b.link_protocol = link;
     b.min_supported_launcher_link = min_link;
-    b.files = {{std::string(kLauncherFile), 10, *Sha256::from_hex(std::string(64, 'a')), {"https://h/l"}},
-               {std::string(kAppFile), 20, *Sha256::from_hex(std::string(64, 'b')), {"https://h/a"}}};
+    b.files = {{std::string(kWindowsClient.launcher_file), 10, *Sha256::from_hex(std::string(64, 'a')), {"https://h/l"}},
+               {std::string(kWindowsClient.app_file), 20, *Sha256::from_hex(std::string(64, 'b')), {"https://h/a"}}};
     return b;
 }
 
@@ -49,14 +49,14 @@ bool test_build_info() {
 }
 
 bool test_make_entry() {
-    StagedFile files[] = {{std::string(kLauncherFile), "PartiesLauncher-1.6.0.0.exe", 5, *Sha256::from_hex(std::string(64, 'c'))},
-                          {std::string(kAppFile), "parties_client-1.6.0.0.exe", 6, *Sha256::from_hex(std::string(64, 'd'))}};
+    StagedFile files[] = {{std::string(kWindowsClient.launcher_file), "PartiesLauncher-1.6.0.0.exe", 5, *Sha256::from_hex(std::string(64, 'c'))},
+                          {std::string(kWindowsClient.app_file), "parties_client-1.6.0.0.exe", 6, *Sha256::from_hex(std::string(64, 'd'))}};
     BuildInfo info{"1.6.0.0", 3, 2, 2, 1};
-    auto entry = make_entry(info, files, "https://github.com/o/r/releases/download/v1.6.0.0/");
+    auto entry = make_entry(kWindowsClient, info, files, "https://github.com/o/r/releases/download/v1.6.0.0/");
     if (!entry || entry->files[1].urls.front() != "https://github.com/o/r/releases/download/v1.6.0.0/parties_client-1.6.0.0.exe")
         return fail("the url is url_base + asset name");
-    if (make_entry(info, files, "http://github.com/o/r/")) return fail("a non-https url base must be refused");
-    if (make_entry(info, std::span(files, 1), "https://h/")) return fail("an entry without the app must be refused");
+    if (make_entry(kWindowsClient, info, files, "http://github.com/o/r/")) return fail("a non-https url base must be refused");
+    if (make_entry(kWindowsClient, info, std::span(files, 1), "https://h/")) return fail("an entry without the app must be refused");
     return true;
 }
 
@@ -71,48 +71,48 @@ bool test_retention() {
 }
 
 bool test_add_build() {
-    auto first = add_build(nullptr, Channel::Beta, build("1.4.0.0"), issue(5), 3);
+    auto first = add_build(kWindowsClient, nullptr, Channel::Beta, build("1.4.0.0"), issue(5), 3);
     if (!first || first->serial != 5 || first->channel != Channel::Beta || first->expires_at != kNow + days{45})
         return fail("add to an empty channel");
     BuildEntry rebuilt = build("1.4.0.0");
     rebuilt.files[1].size = 21;
-    auto replaced = add_build(&*first, Channel::Beta, rebuilt, issue(6), 3);
+    auto replaced = add_build(kWindowsClient, &*first, Channel::Beta, rebuilt, issue(6), 3);
     if (!replaced || replaced->builds.size() != 1 || replaced->builds[0] != rebuilt)
         return fail("the same version replaces its entry");
-    if (add_build(&*replaced, Channel::Beta, build("1.5.0.0"), issue(6), 3)) return fail("an equal serial must be refused");
-    if (add_build(&*replaced, Channel::Beta, build("1.5.0.0"), issue(2), 3)) return fail("a lower serial must be refused");
-    if (add_build(&*replaced, Channel::Stable, build("1.5.0.0"), issue(7), 3)) return fail("a base of another channel must be refused");
-    auto revoked = revoke(&*replaced, Channel::Beta, *Version::parse("1.4.0.0"), issue(7));
-    if (add_build(&*revoked, Channel::Beta, build("1.4.0.0"), issue(8), 3)) return fail("a revoked version must not come back");
-    auto two = add_build(&*revoked, Channel::Beta, build("1.6.0.0"), issue(8), 1);
-    if (add_build(&*two, Channel::Beta, build("1.5.0.0"), issue(9), 1))
+    if (add_build(kWindowsClient, &*replaced, Channel::Beta, build("1.5.0.0"), issue(6), 3)) return fail("an equal serial must be refused");
+    if (add_build(kWindowsClient, &*replaced, Channel::Beta, build("1.5.0.0"), issue(2), 3)) return fail("a lower serial must be refused");
+    if (add_build(kWindowsClient, &*replaced, Channel::Stable, build("1.5.0.0"), issue(7), 3)) return fail("a base of another channel must be refused");
+    auto revoked = revoke(kWindowsClient, &*replaced, Channel::Beta, *Version::parse("1.4.0.0"), issue(7));
+    if (add_build(kWindowsClient, &*revoked, Channel::Beta, build("1.4.0.0"), issue(8), 3)) return fail("a revoked version must not come back");
+    auto two = add_build(kWindowsClient, &*revoked, Channel::Beta, build("1.6.0.0"), issue(8), 1);
+    if (add_build(kWindowsClient, &*two, Channel::Beta, build("1.5.0.0"), issue(9), 1))
         return fail("an entry the retention drops at once must be refused");
     return true;
 }
 
 bool test_promote() {
-    auto beta = add_build(nullptr, Channel::Beta, build("1.5.0.0"), issue(5), 3);
-    beta = add_build(&*beta, Channel::Beta, build("1.6.0.0", 2, 1), issue(6), 3);
-    auto stable = promote(*beta, nullptr, *Version::parse("1.6.0.0"), issue(1), 3);
+    auto beta = add_build(kWindowsClient, nullptr, Channel::Beta, build("1.5.0.0"), issue(5), 3);
+    beta = add_build(kWindowsClient, &*beta, Channel::Beta, build("1.6.0.0", 2, 1), issue(6), 3);
+    auto stable = promote(kWindowsClient, *beta, nullptr, *Version::parse("1.6.0.0"), issue(1), 3);
     if (!stable || stable->channel != Channel::Stable || stable->builds.size() != 1 || stable->builds[0] != beta->builds[0])
         return fail("promotion copies beta's entry unchanged");
-    if (promote(*beta, &*stable, *Version::parse("1.7.0.0"), issue(2), 3)) return fail("a version not in beta must be refused");
-    auto beta_revoked = revoke(&*beta, Channel::Beta, *Version::parse("1.5.0.0"), issue(7));
-    if (promote(*beta_revoked, &*stable, *Version::parse("1.5.0.0"), issue(2), 3))
+    if (promote(kWindowsClient, *beta, &*stable, *Version::parse("1.7.0.0"), issue(2), 3)) return fail("a version not in beta must be refused");
+    auto beta_revoked = revoke(kWindowsClient, &*beta, Channel::Beta, *Version::parse("1.5.0.0"), issue(7));
+    if (promote(kWindowsClient, *beta_revoked, &*stable, *Version::parse("1.5.0.0"), issue(2), 3))
         return fail("a version revoked in beta must not be promoted");
     return true;
 }
 
 bool test_revoke_and_reissue() {
-    auto base = add_build(nullptr, Channel::Stable, build("1.5.0.0"), issue(5), 3);
-    base = add_build(&*base, Channel::Stable, build("1.6.0.0"), issue(6), 3);
-    auto once = revoke(&*base, Channel::Stable, *Version::parse("1.6.0.0"), issue(7));
+    auto base = add_build(kWindowsClient, nullptr, Channel::Stable, build("1.5.0.0"), issue(5), 3);
+    base = add_build(kWindowsClient, &*base, Channel::Stable, build("1.6.0.0"), issue(6), 3);
+    auto once = revoke(kWindowsClient, &*base, Channel::Stable, *Version::parse("1.6.0.0"), issue(7));
     if (!once || versions(once->builds) != "1.5.0.0 " || once->revoked != std::vector{*Version::parse("1.6.0.0")})
         return fail("revoke drops the build and lists it");
-    auto twice = revoke(&*once, Channel::Stable, *Version::parse("1.6.0.0"), issue(8));
+    auto twice = revoke(kWindowsClient, &*once, Channel::Stable, *Version::parse("1.6.0.0"), issue(8));
     if (!twice || twice->revoked.size() != 1 || twice->builds != once->builds) return fail("revoking again only reissues");
-    if (revoke(&*once, Channel::Beta, *Version::parse("1.6.0.0"), issue(9))) return fail("a base of another channel must be refused");
-    auto fresh = revoke(nullptr, Channel::Stable, *Version::parse("1.6.0.0"), issue(1));
+    if (revoke(kWindowsClient, &*once, Channel::Beta, *Version::parse("1.6.0.0"), issue(9))) return fail("a base of another channel must be refused");
+    auto fresh = revoke(kWindowsClient, nullptr, Channel::Stable, *Version::parse("1.6.0.0"), issue(1));
     if (!fresh || fresh->channel != Channel::Stable || !fresh->builds.empty() ||
         fresh->revoked != std::vector{*Version::parse("1.6.0.0")})
         return fail("revoking from a channel with no manifest lists the version in a new one");

@@ -99,7 +99,7 @@ std::vector<PinnedKey> keyring_from(const fs::path& pub_file) {
 
 std::optional<VerifiedManifest> load(const fs::path& envelope, const std::vector<PinnedKey>& ring, Channel channel) {
     std::string bytes = read(envelope);
-    auto m = verify_manifest({reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()}, ring, channel);
+    auto m = verify_manifest({reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()}, ring, channel, kWindowsClient);
     if (!m) return std::nullopt;
     return std::move(*m);
 }
@@ -137,10 +137,10 @@ bool test_release_life() {
             "entry"))
         return false;
     const std::string entry_bytes = read(g_dir / "entry.json");
-    auto entry = parse_build_entry(entry_bytes);
+    auto entry = parse_build_entry(entry_bytes, kWindowsClient);
     if (!entry || entry->version.to_string() != "1.2.3.4" || entry->data_schema != 2)
         return fail("entry carries the build info: " + entry_bytes);
-    const FileEntry* app_file = entry->file(kAppFile);
+    const FileEntry* app_file = entry->file(kWindowsClient.app_file);
     if (!app_file || app_file->size != app.size() || app_file->sha256.to_hex() != sha256_hex(app) ||
         app_file->urls != std::vector<std::string>{url_base + "parties_client-1.2.3.4.exe"})
         return fail("entry describes the app file and its release asset: " + entry_bytes);

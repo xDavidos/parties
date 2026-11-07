@@ -38,7 +38,8 @@ Result<BuildInfo> parse_build_info(std::string_view json) {
     return info;
 }
 
-Result<BuildEntry> make_entry(const BuildInfo& info, std::span<const StagedFile> files, std::string_view url_base) {
+Result<BuildEntry> make_entry(const ProductSpec& product, const BuildInfo& info, std::span<const StagedFile> files,
+                              std::string_view url_base) {
     if (!url_base.starts_with("https://") || !url_base.ends_with('/'))
         return fail("--url-base must start with https:// and end with /");
     auto version = Version::parse(info.version);
@@ -53,7 +54,7 @@ Result<BuildEntry> make_entry(const BuildInfo& info, std::span<const StagedFile>
         entry.files.push_back({f.name, f.size, f.sha256, {std::string(url_base) + f.asset_name}});
     // The same parser the launcher runs, so an entry the tool emits is one
     // verify_manifest accepts.
-    auto checked = parse_build_entry(write_build_entry(entry));
+    auto checked = parse_build_entry(write_build_entry(entry), product);
     if (!checked) return fail(checked.error().detail);
     return *checked;
 }
@@ -87,9 +88,10 @@ Result<ManifestPayload> reissue(const ManifestPayload& base, const Issue& issue)
     return next;
 }
 
-Result<ManifestPayload> add_build(const ManifestPayload* base, Channel channel, const BuildEntry& entry,
-                                  const Issue& issue, size_t keep) {
+Result<ManifestPayload> add_build(const ProductSpec& product, const ManifestPayload* base, Channel channel,
+                                  const BuildEntry& entry, const Issue& issue, size_t keep) {
     ManifestPayload empty;
+    empty.product = product.id;
     empty.channel = channel;
     const ManifestPayload& from = base ? *base : empty;
     if (from.channel != channel) return fail("the base manifest is not for channel " + std::string(channel_name(channel)));
@@ -106,18 +108,19 @@ Result<ManifestPayload> add_build(const ManifestPayload* base, Channel channel, 
     return next;
 }
 
-Result<ManifestPayload> promote(const ManifestPayload& beta, const ManifestPayload* stable, const Version& version,
-                                const Issue& issue, size_t keep) {
+Result<ManifestPayload> promote(const ProductSpec& product, const ManifestPayload& beta, const ManifestPayload* stable,
+                                const Version& version, const Issue& issue, size_t keep) {
     if (std::ranges::find(beta.revoked, version) != beta.revoked.end())
         return fail(version.to_string() + " is revoked in beta");
     auto entry = std::ranges::find(beta.builds, version, &BuildEntry::version);
     if (entry == beta.builds.end()) return fail(version.to_string() + " is not in the beta manifest");
-    return add_build(stable, Channel::Stable, *entry, issue, keep);
+    return add_build(product, stable, Channel::Stable, *entry, issue, keep);
 }
 
-Result<ManifestPayload> revoke(const ManifestPayload* base, Channel channel, const Version& version,
-                               const Issue& issue) {
+Result<ManifestPayload> revoke(const ProductSpec& product, const ManifestPayload* base, Channel channel,
+                               const Version& version, const Issue& issue) {
     ManifestPayload empty;
+    empty.product = product.id;
     empty.channel = channel;
     const ManifestPayload& from = base ? *base : empty;
     if (from.channel != channel) return fail("the base manifest is not for channel " + std::string(channel_name(channel)));

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <parties/update/product.h>
 #include <parties/update/sha256_digest.h>
 #include <parties/update/version.h>
 
@@ -23,9 +24,6 @@ std::string_view channel_name(Channel channel);
 
 using Timestamp = std::chrono::sys_seconds;
 
-inline constexpr std::string_view kProduct = "parties-client-windows";
-inline constexpr std::string_view kLauncherFile = "PartiesLauncher.exe";
-inline constexpr std::string_view kAppFile = "parties_client.exe";
 inline constexpr size_t kMaxEnvelopeBytes = 1 << 20;
 
 using Ed25519PublicKey = std::array<uint8_t, 32>;
@@ -53,7 +51,7 @@ struct FileEntry {
     friend bool operator==(const FileEntry&, const FileEntry&) = default;
 };
 
-// One build. Every build carries both kLauncherFile and kAppFile.
+// One build. Every build carries its product's launcher_file and app_file.
 struct BuildEntry {
     Version version;
     uint32_t data_schema = 1;
@@ -76,7 +74,7 @@ Sha256 sha256_of(std::span<const uint8_t> bytes);
 Sha256 build_digest(std::span<const FileEntry> files);
 
 struct ManifestPayload {
-    std::string product{kProduct};
+    std::string product;  // ProductSpec::id
     Channel channel = Channel::Stable;
     uint64_t serial = 0;  // strictly increasing per channel, >= 1
     Timestamp issued_at{};
@@ -115,7 +113,7 @@ struct ManifestError {
 // it, so an entry copied between channels stays byte for byte the same.
 std::string write_build_entry(const BuildEntry& entry);
 // Parses one entry with the rules verify_manifest applies to each build.
-std::expected<BuildEntry, ManifestError> parse_build_entry(std::string_view json);
+std::expected<BuildEntry, ManifestError> parse_build_entry(std::string_view json, const ProductSpec& product);
 
 // Holding one proves: a pinned key signed these payload bytes, the product and
 // channel match, and every field passed validation. Freshness is separate:
@@ -136,14 +134,15 @@ public:
 private:
     VerifiedManifest() = default;
     friend std::expected<VerifiedManifest, ManifestError>
-    verify_manifest(std::span<const uint8_t> envelope_bytes, Keyring keys, Channel expected);
+    verify_manifest(std::span<const uint8_t> envelope_bytes, Keyring keys, Channel expected,
+                    const ProductSpec& product);
 
     ManifestPayload payload_;
     Sha256 payload_digest_;
 };
 
 std::expected<VerifiedManifest, ManifestError>
-verify_manifest(std::span<const uint8_t> envelope_bytes, Keyring keys, Channel expected);
+verify_manifest(std::span<const uint8_t> envelope_bytes, Keyring keys, Channel expected, const ProductSpec& product);
 
 // Anti-replay and anti-freeze memory for one channel (trust.json).
 struct TrustState {

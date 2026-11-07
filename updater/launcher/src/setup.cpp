@@ -308,7 +308,7 @@ Outcome install(const SetupOptions& o, const Payload& payload) {
     StateStore store(o.install, utf8(o.data.data()));
     BuildStore builds(o.install);
     const LoadResult loaded = drop_unfinishable_restore(store.load(), DataGuard(o.data), builds, store);
-    const BuildRecord bundled = BuildRecord::from_entry(payload.entry);
+    const BuildRecord bundled = BuildRecord::from_entry(payload.entry, kWindowsClient);
     const InstallPlan plan = plan_install(loaded, bundled);
     std::string error;
     std::error_code ec;
@@ -410,7 +410,7 @@ std::optional<int> hand_over_to_temporary_copy(const SetupOptions& o) {
     std::error_code ec;
     const fs::path dir = fs::temp_directory_path(ec) /
                          std::format("Parties-uninstall-{}-{}", GetCurrentProcessId(), GetTickCount64());
-    const fs::path copy = dir / kLauncherFile;
+    const fs::path copy = dir / kWindowsClient.launcher_file;
     fs::create_directories(dir, ec);
     HANDLE me = nullptr;
     if (ec || !CopyFileW(self.c_str(), copy.c_str(), FALSE) ||

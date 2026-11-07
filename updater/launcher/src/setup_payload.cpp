@@ -35,9 +35,9 @@ std::optional<Bytes> resource(const wchar_t* name) {
 }
 
 std::expected<VerifiedManifest, ManifestError> verify_any_channel(Bytes envelope, Keyring keys) {
-    auto verified = verify_manifest(envelope, keys, Channel::Stable);
+    auto verified = verify_manifest(envelope, keys, Channel::Stable, kWindowsClient);
     if (!verified && verified.error().kind == ManifestError::Kind::WrongChannel)
-        verified = verify_manifest(envelope, keys, Channel::Beta);
+        verified = verify_manifest(envelope, keys, Channel::Beta, kWindowsClient);
     return verified;
 }
 
@@ -196,7 +196,7 @@ bool pack_payload(const fs::path& dir, const fs::path& out, Keyring keys, std::s
         DeleteFileW(out.c_str());
         return false;
     }
-    log("packed {} {} into {}", kAppFile, chosen->version.to_string(), utf8(out));
+    log("packed {} {} into {}", kWindowsClient.app_file, chosen->version.to_string(), utf8(out));
     return true;
 }
 

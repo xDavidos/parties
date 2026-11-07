@@ -82,7 +82,7 @@ std::expected<FileEntry, ManifestError> parse_file(const json::Value& v) {
     return f;
 }
 
-std::expected<BuildEntry, ManifestError> parse_build(const json::Value& v) {
+std::expected<BuildEntry, ManifestError> parse_build(const json::Value& v, const ProductSpec& product) {
     using K = ManifestError::Kind;
     auto version = json::string(v, "version");
     auto schema = json::u32(v, "data_schema");
@@ -114,7 +114,7 @@ std::expected<BuildEntry, ManifestError> parse_build(const json::Value& v) {
         seen.push_back(std::move(key));
         b.files.push_back(std::move(*f));
     }
-    if (!b.file(kLauncherFile) || !b.file(kAppFile))
+    if (!b.file(product.launcher_file) || !b.file(product.app_file))
         return error(K::InvalidField, "build lacks launcher or app");
     return b;
 }
@@ -143,7 +143,8 @@ void write_build(json::Writer& w, const BuildEntry& b) {
     w.EndObject();
 }
 
-std::expected<ManifestPayload, ManifestError> parse_payload(std::string_view text, Channel expected) {
+std::expected<ManifestPayload, ManifestError> parse_payload(std::string_view text, Channel expected,
+                                                            const ProductSpec& spec) {
     using K = ManifestError::Kind;
     rapidjson::Document doc;
     if (!json::parse(doc, text)) return error(K::Malformed, "payload is not a JSON object");
@@ -151,7 +152,7 @@ std::expected<ManifestPayload, ManifestError> parse_payload(std::string_view tex
     ManifestPayload p;
     auto product = json::string(doc, "product");
     if (!product) return error(K::Malformed, "product");
-    if (*product != kProduct) return error(K::WrongProduct, std::string(*product));
+    if (*product != spec.id) return error(K::WrongProduct, std::string(*product));
     p.product = *product;
     auto channel_text = json::string(doc, "channel");
     auto channel = channel_text ? parse_channel(*channel_text) : std::nullopt;
@@ -172,7 +173,7 @@ std::expected<ManifestPayload, ManifestError> parse_payload(std::string_view tex
     const json::Value* builds = json::array(doc, "builds");
     if (!builds) return error(K::Malformed, "builds");
     for (const auto& bv : builds->GetArray()) {
-        auto b = parse_build(bv);
+        auto b = parse_build(bv, spec);
         if (!b) return std::unexpected(b.error());
         p.builds.push_back(std::move(*b));
     }
@@ -230,10 +231,10 @@ std::string write_build_entry(const BuildEntry& entry) {
     return {buf.GetString(), buf.GetSize()};
 }
 
-std::expected<BuildEntry, ManifestError> parse_build_entry(std::string_view text) {
+std::expected<BuildEntry, ManifestError> parse_build_entry(std::string_view text, const ProductSpec& product) {
     rapidjson::Document doc;
     if (!json::parse(doc, text)) return error(ManifestError::Kind::Malformed, "entry is not a JSON object");
-    return parse_build(doc);
+    return parse_build(doc, product);
 }
 
 std::string write_payload(const ManifestPayload& p) {
@@ -290,7 +291,7 @@ std::optional<std::string> sign_manifest(std::span<const uint8_t> payload_bytes,
 }
 
 std::expected<VerifiedManifest, ManifestError>
-verify_manifest(std::span<const uint8_t> envelope_bytes, Keyring keys, Channel expected) {
+verify_manifest(std::span<const uint8_t> envelope_bytes, Keyring keys, Channel expected, const ProductSpec& product) {
     using K = ManifestError::Kind;
     if (keys.empty() || keys.size() > 2) return error(K::InvalidKeyring, "keyring must hold one or two keys");
     if (envelope_bytes.size() > kMaxEnvelopeBytes) return error(K::Malformed, "envelope too large");
@@ -321,7 +322,7 @@ verify_manifest(std::span<const uint8_t> envelope_bytes, Keyring keys, Channel e
     }
     if (!verified) return error(K::UnknownKey, "no signature by a pinned key");
 
-    auto parsed = parse_payload({reinterpret_cast<const char*>(payload->data()), payload->size()}, expected);
+    auto parsed = parse_payload({reinterpret_cast<const char*>(payload->data()), payload->size()}, expected, product);
     if (!parsed) return std::unexpected(parsed.error());
     VerifiedManifest m;
     m.payload_ = std::move(*parsed);

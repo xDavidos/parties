@@ -230,12 +230,12 @@ Release make_release(const fs::path& root, const fs::path& app_exe, const std::s
     Release r;
     r.dir = root / "releases" / version;
     fs::create_directories(r.dir);
-    fs::copy_file(g_launcher, r.dir / kLauncherFile);
-    fs::copy_file(app_exe, r.dir / kAppFile);
+    fs::copy_file(g_launcher, r.dir / kWindowsClient.launcher_file);
+    fs::copy_file(app_exe, r.dir / kWindowsClient.app_file);
     r.entry.version = *Version::parse(version);
     r.entry.data_schema = schema;
     r.entry.data_compat_floor = floor;
-    r.entry.files = {file_entry(r.dir / kLauncherFile), file_entry(r.dir / kAppFile)};
+    r.entry.files = {file_entry(r.dir / kWindowsClient.launcher_file), file_entry(r.dir / kWindowsClient.app_file)};
     if (fake) {
         std::ofstream(r.dir / "fake-build.json") << "{\"version\":\"" << version << "\",\"data_schema\":" << schema
                                                  << ",\"data_compat_floor\":" << floor << "}";
@@ -271,6 +271,7 @@ void publish(const fs::path& source, const std::vector<const Release*>& releases
              const Publish& how = {}) {
     fs::create_directories(source / "files");
     ManifestPayload p;
+    p.product = kWindowsClient.id;
     p.channel = how.channel;
     p.serial = serial;
     p.issued_at = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()) -
@@ -336,7 +337,7 @@ struct World {
         else publish(source, {&a}, 1);
     }
 
-    fs::path launcher_in(const Release& r) const { return install_root / "builds" / r.entry.id().dir_name() / kLauncherFile; }
+    fs::path launcher_in(const Release& r) const { return install_root / "builds" / r.entry.id().dir_name() / kWindowsClient.launcher_file; }
     fs::path db() const { return data_root / "data" / "parties_client.db"; }
     fs::path backups() const { return data_root / "backups"; }
     fs::path log_file() const { return data_root / "logs" / "launcher.log"; }
@@ -492,7 +493,7 @@ bool end_session(const World& w) {
            SendMessageTimeoutW(search.found, WM_ENDSESSION, TRUE, 0, SMTO_ABORTIFHUNG, 5000, &ignored) != 0;
 }
 
-std::string stalled_app_file(const World& w) { return "files/" + w.b.entry.file(kAppFile)->sha256.to_hex(); }
+std::string stalled_app_file(const World& w) { return "files/" + w.b.entry.file(kWindowsClient.app_file)->sha256.to_hex(); }
 
 RunResult run_short_session(World& w, const std::function<void()>& headless) {
     w.server->stall(stalled_app_file(w));
@@ -829,7 +830,7 @@ std::vector<Scenario> scenarios() {
     auto corrupt_a = [](World& w) {
         RunResult r = run_launcher(w, {{"PARTIES_TEST_TIMING", kTiming}, {"PARTIES_FAKE_RUN_MS", "300"}});
         if (r.exit_code != 0 || markers(w.db(), "1.0.0.0") != 1) fail(w.name, "the clean first run did not start A");
-        std::ofstream(w.build_dir(w.a) / kAppFile, std::ios::binary | std::ios::app).put('\0');
+        std::ofstream(w.build_dir(w.a) / kWindowsClient.app_file, std::ios::binary | std::ios::app).put('\0');
     };
     out.push_back({"corrupt-good-exe", "", 1, 1, false, corrupt_a,
                    [](const World& w) {
@@ -839,7 +840,7 @@ std::vector<Scenario> scenarios() {
                    [](const World& w, const std::string& label) {
                        auto s = w.state();
                        if (s->good != w.a.entry.id()) fail(label, "good changed");
-                       if (digest_file(w.build_dir(w.a) / kAppFile)->sha256 != w.a.entry.file(kAppFile)->sha256)
+                       if (digest_file(w.build_dir(w.a) / kWindowsClient.app_file)->sha256 != w.a.entry.file(kWindowsClient.app_file)->sha256)
                            fail(label, "the executable was not repaired");
                        if (w.full_log().find("recovery shown") != std::string::npos)
                            fail(label, "recovery was shown although the feed lists the build");
@@ -863,7 +864,7 @@ std::vector<Scenario> scenarios() {
                    false, false});
 
     out.push_back({"tampered-file", "", 1, 1, true,
-                   [](World& w) { w.server->tamper("files/" + w.b.entry.file(kAppFile)->sha256.to_hex()); },
+                   [](World& w) { w.server->tamper("files/" + w.b.entry.file(kWindowsClient.app_file)->sha256.to_hex()); },
                    [](const World& w) {
                        return w.last_run_log().find("SHA-256 does not match the manifest") != std::string::npos;
                    },
@@ -1237,7 +1238,7 @@ int smoke_real_client(const fs::path& client) {
                              static_cast<uint32_t>(parties::client::schema::kCurrent.compat_floor), false);
     fs::path dir = install(w.install_root, r);
     RunResult result = run_launcher(w, {{"PARTIES_TEST_EXIT_AFTER_HEALTHY_MS", "3000"}}, {L"--allow-multiple-instances"},
-                                    180000, dir / kLauncherFile);
+                                    180000, dir / kWindowsClient.launcher_file);
     std::string log = read_file(w.log_file()).value_or("");
     if (result.timed_out || result.exit_code != 0) fail(name, "the launcher did not exit cleanly");
     if (!result.boot_ok) fail(name, "boot_ok was not signalled");

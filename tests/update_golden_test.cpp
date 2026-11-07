@@ -134,8 +134,8 @@ BuildEntry entry(const char* version, uint32_t schema, uint32_t floor, uint32_t 
     b.min_supported_launcher_link = min_link;
     const std::string tag = kReleases + "v" + version + "/";
     b.files = {
-        {std::string(kLauncherFile), 2'412'544, sha(fill), {tag + "PartiesLauncher.exe", "https://mirror.example/l"}},
-        {std::string(kAppFile), 41'943'040, sha(char(fill + 1)), {tag + "parties_client.exe"}},
+        {std::string(kWindowsClient.launcher_file), 2'412'544, sha(fill), {tag + "PartiesLauncher.exe", "https://mirror.example/l"}},
+        {std::string(kWindowsClient.app_file), 41'943'040, sha(char(fill + 1)), {tag + "parties_client.exe"}},
     };
     return b;
 }
@@ -146,6 +146,7 @@ const BuildEntry k160 = entry("1.6.0.0", 3, 2, 4, 2, 'a');
 
 ManifestPayload payload() {
     ManifestPayload p;
+    p.product = kWindowsClient.id;
     p.channel = Channel::Beta;
     p.serial = 17;
     p.issued_at = sys_days{2026y / October / 31} + 12h;
@@ -156,14 +157,14 @@ ManifestPayload payload() {
 }
 
 SupervisorState state() {
-    SupervisorState s = initial_state(BuildRecord::from_entry(k152), Channel::Beta);
+    SupervisorState s = initial_state(BuildRecord::from_entry(k152, kWindowsClient), Channel::Beta);
     s.generation = 9;
-    BuildRecord previous = BuildRecord::from_entry(k151);
+    BuildRecord previous = BuildRecord::from_entry(k151, kWindowsClient);
     previous.verdict = Proven{};
     s.previous_good = previous.id;
     s.builds.push_back(previous);
-    s.builds.push_back(BuildRecord::from_entry(k160));
-    BuildRecord failed = BuildRecord::from_entry(entry("1.5.3.0", 2, 1, 2, 1, '5'));
+    s.builds.push_back(BuildRecord::from_entry(k160, kWindowsClient));
+    BuildRecord failed = BuildRecord::from_entry(entry("1.5.3.0", 2, 1, 2, 1, '5'), kWindowsClient);
     failed.verdict = Quarantined{FailureReason::CrashedBeforeHealthy};
     s.builds.push_back(failed);
     s.intent = PinnedUntilAtLeast{v("1.6.0.0")};
@@ -183,11 +184,11 @@ bool test_payload() {
     if (!parties::derive_pubkey(key.secret_key, key.public_key)) return false;
     const auto envelope = sign_manifest(bytes(text), std::vector{key});
     const PinnedKey pin{key.key_id, key.public_key};
-    const auto verified = verify_manifest(bytes(*envelope), {&pin, 1}, Channel::Beta);
+    const auto verified = verify_manifest(bytes(*envelope), {&pin, 1}, Channel::Beta, kWindowsClient);
     if (!verified) return fail("the golden manifest is rejected: " + verified.error().detail);
     ok &= same("a verified payload written again", write_payload(verified->payload()), kPayload);
     for (const BuildEntry& b : payload().builds) {
-        const auto parsed = parse_build_entry(write_build_entry(b));
+        const auto parsed = parse_build_entry(write_build_entry(b), kWindowsClient);
         if (!parsed || *parsed != b) ok &= fail(b.version.to_string() + " changed in a write and parse");
     }
     return ok;

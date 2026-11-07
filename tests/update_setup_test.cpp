@@ -229,12 +229,12 @@ public:
         Build b;
         b.dir = root_ / "releases" / version;
         fs::create_directories(b.dir);
-        fs::copy_file(g_launcher, b.dir / kLauncherFile, fs::copy_options::overwrite_existing);
-        fs::copy_file(app, b.dir / kAppFile, fs::copy_options::overwrite_existing);
+        fs::copy_file(g_launcher, b.dir / kWindowsClient.launcher_file, fs::copy_options::overwrite_existing);
+        fs::copy_file(app, b.dir / kWindowsClient.app_file, fs::copy_options::overwrite_existing);
         b.entry.version = *Version::parse(version);
         b.entry.data_schema = schema;
         b.entry.data_compat_floor = schema;
-        b.entry.files = {file_entry(b.dir / kLauncherFile), file_entry(b.dir / kAppFile)};
+        b.entry.files = {file_entry(b.dir / kWindowsClient.launcher_file), file_entry(b.dir / kWindowsClient.app_file)};
         if (fake) {
             std::ofstream(b.dir / "fake-build.json") << "{\"version\":\"" << version << "\",\"data_schema\":" << schema
                                                      << ",\"data_compat_floor\":" << schema << "}";
@@ -250,6 +250,7 @@ public:
             fs::copy_file(b.dir / f.name, payload / f.name, fs::copy_options::overwrite_existing);
         fs::copy_file(g_stub, payload / "Parties.exe", fs::copy_options::overwrite_existing);
         ManifestPayload p;
+        p.product = kWindowsClient.id;
         p.channel = Channel::Beta;
         p.serial = 1;
         p.issued_at = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()) - 60s;
@@ -480,7 +481,7 @@ long long markers(const World& w, const std::string& version) {
 }
 
 std::wstring expected_uninstall(const World& w, const Build& b) {
-    return L"\"" + (w.install / "builds" / b.id().dir_name() / kLauncherFile).wstring() +
+    return L"\"" + (w.install / "builds" / b.id().dir_name() / kWindowsClient.launcher_file).wstring() +
            L"\" --uninstall \"--install-root=" + w.install.wstring() + L"\"";
 }
 

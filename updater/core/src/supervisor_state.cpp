@@ -4,15 +4,15 @@
 
 namespace parties::update {
 
-BuildRecord BuildRecord::from_entry(const BuildEntry& entry) {
+BuildRecord BuildRecord::from_entry(const BuildEntry& entry, const ProductSpec& product) {
     BuildRecord r;
     r.id = entry.id();
     r.data_schema = entry.data_schema;
     r.data_compat_floor = entry.data_compat_floor;
     r.link_protocol = entry.link_protocol;
     r.min_supported_launcher_link = entry.min_supported_launcher_link;
-    if (const FileEntry* f = entry.file(kLauncherFile)) r.launcher_sha256 = f->sha256;
-    if (const FileEntry* f = entry.file(kAppFile)) r.app_sha256 = f->sha256;
+    if (const FileEntry* f = entry.file(product.launcher_file)) r.launcher_sha256 = f->sha256;
+    if (const FileEntry* f = entry.file(product.app_file)) r.app_sha256 = f->sha256;
     return r;
 }
 

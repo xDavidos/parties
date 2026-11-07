@@ -300,7 +300,7 @@ void remove_shortcuts(const InstallPaths& install) {
 }
 
 std::wstring uninstall_command(const InstallPaths& install, const BuildId& good) {
-    const fs::path launcher = install.builds() / good.dir_name() / kLauncherFile;
+    const fs::path launcher = install.builds() / good.dir_name() / kWindowsClient.launcher_file;
     return L"\"" + launcher.wstring() + L"\" --uninstall \"--install-root=" + install.root.wstring() + L"\"";
 }
 

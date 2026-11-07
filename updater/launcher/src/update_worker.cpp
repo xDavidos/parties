@@ -112,7 +112,7 @@ std::expected<VerifiedManifest, link::Phase> UpdateWorker::accepted(Channel chan
     };
     auto bytes = source_->fetch_manifest(channel, cancel_);
     if (!bytes) return error(bytes.error().detail);
-    auto manifest = verify_manifest(*bytes, keys_, channel);
+    auto manifest = verify_manifest(*bytes, keys_, channel, kWindowsClient);
     if (!manifest) return error("manifest rejected (" + std::to_string(static_cast<int>(manifest.error().kind)) +
                                 "): " + manifest.error().detail);
 

@@ -28,7 +28,7 @@ BuildEntry entry(const char* version, uint32_t schema, uint32_t floor, uint32_t 
     b.min_supported_launcher_link = min_link;
     // Distinct digests per version, so each version is its own build.
     size_t k = b.version.parts[1] * 7 + b.version.parts[2];
-    for (auto name : {kLauncherFile, kAppFile}) {
+    for (auto name : {kWindowsClient.launcher_file, kWindowsClient.app_file}) {
         char fill = "0123456789abcdef"[k++ % 16];
         b.files.push_back({std::string(name), 100, *Sha256::from_hex(std::string(64, fill)),
                            {"https://github.com/emcifuntik/parties/releases/download/x"}});
@@ -45,6 +45,7 @@ const SigningKey kKey = [] {
 
 VerifiedManifest manifest(Channel channel, std::vector<BuildEntry> builds, std::vector<Version> revoked = {}) {
     ManifestPayload p;
+    p.product = kWindowsClient.id;
     p.channel = channel;
     p.serial = 1;
     p.issued_at = sys_days{2026y / October / 31};
@@ -54,13 +55,13 @@ VerifiedManifest manifest(Channel channel, std::vector<BuildEntry> builds, std::
     std::string text = write_payload(p);
     auto env = sign_manifest({reinterpret_cast<const uint8_t*>(text.data()), text.size()}, std::vector{kKey});
     PinnedKey pin{kKey.key_id, kKey.public_key};
-    auto m = verify_manifest({reinterpret_cast<const uint8_t*>(env->data()), env->size()}, {&pin, 1}, channel);
+    auto m = verify_manifest({reinterpret_cast<const uint8_t*>(env->data()), env->size()}, {&pin, 1}, channel, kWindowsClient);
     if (!m) std::abort();
     return *m;
 }
 
 SupervisorState installed(const BuildEntry& good, Channel channel = Channel::Stable) {
-    return initial_state(BuildRecord::from_entry(good), channel);
+    return initial_state(BuildRecord::from_entry(good, kWindowsClient), channel);
 }
 
 const BuildEntry k152 = entry("1.5.2.0", 2, 1);
@@ -90,7 +91,7 @@ bool test_follow() {
     ok &= stages(plan_update(s, m, kProtocol, kData2), k160, StageReason::Newer, "newer build on the channel");
     if (!as<NothingToDo>(plan_update(installed(k160), m, kProtocol, kData3))) ok &= fail("up to date must do nothing");
     SupervisorState staged = s;
-    staged.builds.push_back(BuildRecord::from_entry(k160));
+    staged.builds.push_back(BuildRecord::from_entry(k160, kWindowsClient));
     staged.activation = Staged{k160.id(), std::nullopt};
     if (!as<NothingToDo>(plan_update(staged, m, kProtocol, kData2))) ok &= fail("an already staged build is staged again");
     auto newer = manifest(Channel::Stable, {k152, k160, k161});
@@ -144,7 +145,7 @@ bool test_switch_to_older_channel_pins() {
 bool test_wait_during_a_trial() {
     // Trying Beta's 1.6.1 over 1.6.0, the user picks Stable, which lists only 1.6.0.
     SupervisorState s = installed(k160, Channel::Beta);
-    s.builds.push_back(BuildRecord::from_entry(k161));
+    s.builds.push_back(BuildRecord::from_entry(k161, kWindowsClient));
     s.activation = Probation{k161.id(), k160.id(), std::nullopt, 0, false};
     s.operation = Running{k161.id(), true, 0};
     const Context ctx{kData3, Policy{}};
@@ -194,7 +195,7 @@ bool test_revoked_good_moves() {
     if (!none || none->reason != BlockReason::NoCompatibleBuild)
         ok &= fail("a revoked good with nothing else to run must block");
     SupervisorState on_disk = s;
-    on_disk.builds.push_back(BuildRecord::from_entry(k152));
+    on_disk.builds.push_back(BuildRecord::from_entry(k152, kWindowsClient));
     on_disk.builds.back().verdict = Proven{};
     on_disk.previous_good = k152.id();
     ok &= stages(plan_update(on_disk, manifest(Channel::Stable, {k152}, {k160.version}), kProtocol, kData3), k152,
@@ -226,7 +227,7 @@ bool test_launcher_protocol_gate() {
 bool test_quarantine_until_newer() {
     bool ok = true;
     SupervisorState s = installed(k152);
-    BuildRecord failed = BuildRecord::from_entry(k160);
+    BuildRecord failed = BuildRecord::from_entry(k160, kWindowsClient);
     failed.verdict = Quarantined{FailureReason::CrashedBeforeHealthy};
     s.builds.push_back(failed);
     if (!as<NothingToDo>(plan_update(s, manifest(Channel::Stable, {k152, k160}), kProtocol, kData2)))

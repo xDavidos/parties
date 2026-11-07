@@ -44,7 +44,7 @@ BuildEntry build(const char* version, uint32_t schema = 2) {
     b.data_compat_floor = 1;
     b.link_protocol = 2;
     b.min_supported_launcher_link = 1;
-    b.files = {file(std::string(kLauncherFile), 'a'), file(std::string(kAppFile), 'b')};
+    b.files = {file(std::string(kWindowsClient.launcher_file), 'a'), file(std::string(kWindowsClient.app_file), 'b')};
     return b;
 }
 
@@ -52,6 +52,7 @@ const Timestamp kIssued = sys_days{2026y / October / 31} + 12h;
 
 ManifestPayload payload(Channel channel = Channel::Beta) {
     ManifestPayload p;
+    p.product = kWindowsClient.id;
     p.channel = channel;
     p.serial = 10;
     p.issued_at = kIssued;
@@ -71,9 +72,10 @@ std::string sign(const std::string& payload_text, std::initializer_list<SigningK
 
 std::expected<VerifiedManifest, ManifestError> verify(const std::string& envelope,
                                                       std::initializer_list<PinnedKey> ring,
-                                                      Channel channel = Channel::Beta) {
+                                                      Channel channel = Channel::Beta,
+                                                      const ProductSpec& product = kWindowsClient) {
     std::vector<PinnedKey> keys(ring);
-    return verify_manifest(bytes(envelope), keys, channel);
+    return verify_manifest(bytes(envelope), keys, channel, product);
 }
 
 bool expect_error(const std::expected<VerifiedManifest, ManifestError>& r, Kind kind, const std::string& what) {
@@ -241,13 +243,38 @@ bool test_build_entry_codec() {
     std::string text = write_build_entry(p.builds[1]);
     if (write_payload(p).find(text) == std::string::npos)
         return fail("an entry must serialize to the same bytes it has inside a payload");
-    auto parsed = parse_build_entry(text);
+    auto parsed = parse_build_entry(text, kWindowsClient);
     if (!parsed || *parsed != p.builds[1]) return fail("entry round trip");
     BuildEntry no_app = p.builds[1];
     no_app.files.pop_back();
-    auto refused = parse_build_entry(write_build_entry(no_app));
+    auto refused = parse_build_entry(write_build_entry(no_app), kWindowsClient);
     if (refused || refused.error().kind != Kind::InvalidField) return fail("an entry without the app must be refused");
     return true;
+}
+
+// A manifest verifies only as the product it names, and each product's builds
+// must carry that product's launcher and app.
+bool test_products() {
+    bool ok = true;
+    ManifestPayload mac = payload();
+    mac.product = kMacClient.id;
+    for (BuildEntry& b : mac.builds)
+        b.files = {file(std::string(kMacClient.launcher_file), 'a'), file(std::string(kMacClient.app_file), 'b')};
+    const std::string mac_envelope = sign(write_payload(mac), {kA});
+    if (!verify(mac_envelope, {pin(kA)}, Channel::Beta, kMacClient)) ok &= fail("a macOS manifest verifies as macOS");
+    ok &= expect_error(verify(mac_envelope, {pin(kA)}, Channel::Beta, kWindowsClient), Kind::WrongProduct,
+                       "a macOS manifest read by Windows");
+    ok &= expect_error(verify(sign(write_payload(payload()), {kA}), {pin(kA)}, Channel::Beta, kMacClient),
+                       Kind::WrongProduct, "a Windows manifest read by macOS");
+    ManifestPayload windows_files = payload();
+    windows_files.product = kMacClient.id;
+    ok &= expect_error(verify(sign(write_payload(windows_files), {kA}), {pin(kA)}, Channel::Beta, kMacClient),
+                       Kind::InvalidField, "a macOS build of Windows files");
+    auto entry = parse_build_entry(write_build_entry(mac.builds[0]), kMacClient);
+    if (!entry || *entry != mac.builds[0]) ok &= fail("a macOS entry round trips");
+    auto refused = parse_build_entry(write_build_entry(mac.builds[0]), kWindowsClient);
+    if (refused || refused.error().kind != Kind::InvalidField) ok &= fail("Windows refuses an entry of dylibs");
+    return ok;
 }
 
 VerifiedManifest verified(const ManifestPayload& p) {
@@ -315,6 +342,7 @@ int main() {
     ok &= test_payload_validation();
     ok &= test_build_identity();
     ok &= test_build_entry_codec();
+    ok &= test_products();
     ok &= test_trust_ratchet();
     if (ok) std::cout << "update_manifest_test: all passed\n";
     return ok ? 0 : 1;

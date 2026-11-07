@@ -47,7 +47,7 @@ std::expected<BuildRecord, std::string> BuildStore::adopt(const fs::path& dir) c
     if (auto bad = verify_files(dir, *entry)) return std::unexpected(*bad + " in " + utf8(dir));
     if (entry->id().dir_name() != dir.filename().string())
         return std::unexpected(utf8(dir) + " should be named " + entry->id().dir_name());
-    return BuildRecord::from_entry(*entry);
+    return BuildRecord::from_entry(*entry, kWindowsClient);
 }
 
 std::expected<fs::path, std::string> BuildStore::download(const FileEntry& f, UpdateSource& source,
@@ -103,7 +103,7 @@ std::expected<BuildRecord, std::string> BuildStore::repair(const BuildEntry& ent
     if (read_file(dir / kBuildInfoFile) != info && !durable_replace(dir / kBuildInfoFile, info, error))
         return std::unexpected(error);
     if (auto bad = verify_files(dir, entry)) return std::unexpected("repair of " + utf8(dir) + " failed: " + *bad);
-    return BuildRecord::from_entry(entry);
+    return BuildRecord::from_entry(entry, kWindowsClient);
 }
 
 std::expected<BuildRecord, std::string> BuildStore::seal(const BuildEntry& entry, UpdateSource& source,
@@ -112,7 +112,7 @@ std::expected<BuildRecord, std::string> BuildStore::seal(const BuildEntry& entry
     const fs::path final_dir = dir_of(entry.id());
     std::error_code ec;
     if (fs::exists(final_dir, ec)) {
-        if (!verify_files(final_dir, entry)) return BuildRecord::from_entry(entry);
+        if (!verify_files(final_dir, entry)) return BuildRecord::from_entry(entry, kWindowsClient);
         return repair(entry, source, progress, cancel);
     }
 
@@ -145,11 +145,11 @@ std::expected<BuildRecord, std::string> BuildStore::seal(const BuildEntry& entry
     if (!MoveFileExW(staging.c_str(), final_dir.c_str(), MOVEFILE_WRITE_THROUGH))
         return fail("cannot seal " + utf8(final_dir) + ": " + last_error_text());
     log("sealed {}", entry.id().dir_name());
-    return BuildRecord::from_entry(entry);
+    return BuildRecord::from_entry(entry, kWindowsClient);
 }
 
 std::optional<ExecLease> BuildStore::lease_app(const BuildRecord& record) const {
-    fs::path exe = dir_of(record.id) / kAppFile;
+    fs::path exe = dir_of(record.id) / kWindowsClient.app_file;
     HANDLE h = CreateFileW(exe.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                            FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
