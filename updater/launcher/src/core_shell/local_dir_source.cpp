@@ -1,9 +1,9 @@
-#include "file_io.h"
+#include "durable_file.h"
 #include "update_source.h"
 
-#include <windows.h>
-
 namespace parties::update::launcher {
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -24,8 +24,9 @@ public:
                                                 const Progress& progress, const std::atomic<bool>& cancel) override {
         if (cancel.load()) return std::unexpected(SourceError{"cancelled"});
         fs::path from = dir_ / "files" / file.sha256.to_hex();
-        if (!CopyFileW(from.c_str(), dest.c_str(), TRUE))
-            return std::unexpected(SourceError{"cannot copy " + utf8(from) + ": " + last_error_text()});
+        std::error_code ec;
+        if (!fs::copy_file(from, dest, fs::copy_options::none, ec))
+            return std::unexpected(SourceError{"cannot copy " + utf8(from) + ": " + ec.message()});
         if (progress) progress(file.size);
         return {};
     }

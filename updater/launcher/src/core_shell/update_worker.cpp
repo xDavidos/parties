@@ -1,22 +1,16 @@
 #include "update_worker.h"
 
-#include "file_io.h"
+#include "durable_file.h"
 #include "log.h"
 
 #include <parties/update/state_codec.h>
-#include <parties/update/update_policy.h>
 
 #include <algorithm>
 #include <chrono>
 
-#include <windows.h>
-
 namespace parties::update::launcher {
 
 namespace {
-
-// Windows has no host to outgrow.
-constexpr Runner kRunner{.launcher_protocol = kLinkProtocol, .host_abi = 0};
 
 link::DowngradeEffect wire_effect(DataEffect effect) {
     switch (effect) {
@@ -43,22 +37,19 @@ link::DowngradeOffer wire_offer(const DowngradeOffer& offer, const std::vector<B
         out.data_effect = link::DowngradeEffect::Impossible;
         return out;
     }
-    out.backup_taken_at =
-        std::chrono::floor<std::chrono::seconds>(std::chrono::clock_cast<std::chrono::system_clock>(it->written));
+    // libc++ has no clock_cast, so the file time is moved over by the two clocks' distance now.
+    const auto since = it->written - std::filesystem::file_time_type::clock::now();
+    out.backup_taken_at = std::chrono::floor<std::chrono::seconds>(
+        std::chrono::system_clock::now() + std::chrono::duration_cast<std::chrono::system_clock::duration>(since));
     return out;
 }
 
 } // namespace
 
-UpdateWorker::UpdateWorker(std::unique_ptr<UpdateSource> source, Keyring keys, fs::path trust_file,
-                           BuildStore builds)
-    : source_(std::move(source)), keys_(keys), trust_file_(std::move(trust_file)), builds_(std::move(builds)),
-      event_(CreateEventW(nullptr, FALSE, FALSE, nullptr)) {}
+UpdateWorker::UpdateWorker(std::unique_ptr<UpdateSource> source, WorkerConfig config)
+    : source_(std::move(source)), config_(std::move(config)) {}
 
-UpdateWorker::~UpdateWorker() {
-    stop();
-    CloseHandle(event_);
-}
+UpdateWorker::~UpdateWorker() { stop(); }
 
 void UpdateWorker::cancel() {
     cancel_ = true;
@@ -93,7 +84,7 @@ bool UpdateWorker::start(JobRequest request) {
             download_.reset();
             running_ = false;
         }
-        SetEvent(event_);
+        config_.wake();
     });
     return true;
 }
@@ -115,12 +106,12 @@ std::expected<VerifiedManifest, link::Phase> UpdateWorker::accepted(Channel chan
     };
     auto bytes = source_->fetch_manifest(channel, cancel_);
     if (!bytes) return error(bytes.error().detail);
-    auto manifest = verify_manifest(*bytes, keys_, channel, kWindowsClient);
+    auto manifest = verify_manifest(*bytes, config_.keys, channel, config_.product);
     if (!manifest) return error("manifest rejected (" + std::to_string(static_cast<int>(manifest.error().kind)) +
                                 "): " + manifest.error().detail);
 
     TrustFile trust;
-    if (auto text = read_file(trust_file_)) {
+    if (auto text = read_file(config_.trust_file)) {
         auto parsed = parse_trust(*text);
         if (!parsed) {
             // A newer launcher's ratchet must not be replaced by ours.
@@ -141,9 +132,9 @@ std::expected<VerifiedManifest, link::Phase> UpdateWorker::accepted(Channel chan
     }
     trust.of(channel) = std::get<Accepted>(decision).next;
     std::error_code ec;
-    fs::create_directories(trust_file_.parent_path(), ec);
+    std::filesystem::create_directories(config_.trust_file.parent_path(), ec);
     std::string write_error;
-    if (!durable_replace(trust_file_, write_trust(trust), write_error)) return error(write_error);
+    if (!durable_replace(config_.trust_file, write_trust(trust), write_error)) return error(write_error);
     return std::move(*manifest);
 }
 
@@ -155,16 +146,16 @@ std::expected<BuildRecord, std::string> UpdateWorker::seal(const BuildEntry& ent
         std::lock_guard lock(mutex_);
         download_ = Download{entry.version, 0};
     }
-    SetEvent(event_);
+    config_.wake();
     auto progress = [&](uint64_t done) {
         uint8_t pct = total ? static_cast<uint8_t>(std::min<uint64_t>(100, done * 100 / total)) : 100;
         std::lock_guard lock(mutex_);
         if (download_ && download_->percent != pct) {
             download_->percent = pct;
-            SetEvent(event_);
+            config_.wake();
         }
     };
-    auto sealed = builds_.seal(entry, *source_, progress, cancel_);
+    auto sealed = config_.seal(entry, *source_, progress, cancel_);
     if (!sealed) log("fetching {} failed: {}", entry.version.to_string(), sealed.error());
     return sealed;
 }
@@ -196,7 +187,7 @@ JobOutcome UpdateWorker::run(const JobRequest& request) {
     }
 
     if (downgrade) {
-        ChannelSwitchPlan plan = plan_channel_switch(state, *manifest, kRunner, request.live_db);
+        ChannelSwitchPlan plan = plan_channel_switch(state, *manifest, config_.runner, request.live_db);
         auto* pinned = std::get_if<StayPinned>(&plan);
         if (pinned && pinned->downgrade) {
             const DowngradeOffer& offer = *pinned->downgrade;
@@ -225,7 +216,7 @@ JobOutcome UpdateWorker::run(const JobRequest& request) {
     }
 
     out.events.push_back(ManifestSeen{channel, manifest->payload().revoked});
-    UpdateDecision decision = plan_update(state, *manifest, kRunner, request.live_db);
+    UpdateDecision decision = plan_update(state, *manifest, config_.runner, request.live_db);
     if (decision.new_intent) out.events.push_back(ChannelIntentSet{channel, *decision.new_intent});
     out.ok = true;
     if (auto* stage = std::get_if<StageBuild>(&decision.plan)) {

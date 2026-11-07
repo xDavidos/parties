@@ -307,7 +307,7 @@ Outcome install(const SetupOptions& o, const Payload& payload) {
 
     StateStore store(o.install, utf8(o.data.data()));
     BuildStore builds(o.install);
-    const LoadResult loaded = drop_unfinishable_restore(store.load(), DataGuard(o.data), builds, store);
+    const LoadResult loaded = drop_unfinishable_restore(store.load(), DataGuard({o.data.db(), o.data.backups()}), builds, store);
     const BuildRecord bundled = BuildRecord::from_entry(payload.entry, kWindowsClient);
     const InstallPlan plan = plan_install(loaded, bundled);
     std::string error;
@@ -373,7 +373,7 @@ Outcome uninstall(const SetupOptions& o) {
     std::string error;
     std::error_code ec;
     if (fs::exists(o.data.db(), ec)) {
-        DataGuard data(o.data);
+        DataGuard data({o.data.db(), o.data.backups()});
         if (!data.snapshot({"pre-uninstall-" + utc_stamp()}, error))
             return failed("Parties could not back up your data, so nothing was removed: " + error);
     }

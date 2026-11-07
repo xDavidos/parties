@@ -1,12 +1,29 @@
 # What both launchers do around the update core: SupervisorCore drives step()
-# through a platform Executor, and StateStore owns the state files. Each
-# platform defines log_line, read_file and durable_replace.
+# through a platform Executor, StateStore owns the state files, DataGuard the
+# user's database and backups, and UpdateWorker the feed. Each platform defines
+# the calls in durable_file.h, log.h and test_hooks.h (end_process).
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
+
 add_library(parties_launcher_core STATIC
+    src/core_shell/data_guard.cpp
+    src/core_shell/install_plan.cpp
+    src/core_shell/local_dir_source.cpp
+    src/core_shell/recovery_choice.cpp
     src/core_shell/state_store.cpp
     src/core_shell/supervisor_core.cpp
+    src/core_shell/test_hooks.cpp
+    src/core_shell/update_worker.cpp
+    ${CMAKE_SOURCE_DIR}/client/src/sqlite_file.cpp
 )
-target_include_directories(parties_launcher_core PUBLIC src/core_shell)
-target_link_libraries(parties_launcher_core PUBLIC parties_update_core)
+target_include_directories(parties_launcher_core
+    PUBLIC src/core_shell
+    PRIVATE ${CMAKE_SOURCE_DIR}/client/include)
+target_link_libraries(parties_launcher_core
+    PUBLIC parties_update_core
+    PRIVATE parties_update_release_keys unofficial::sqlite3::sqlite3)
+if(PARTIES_UPDATE_TESTING)
+    target_compile_definitions(parties_launcher_core PRIVATE PARTIES_UPDATE_TESTING)
+endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     # The macOS launcher, so far only its end of the front door. The host's
@@ -19,7 +36,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     return()
 endif()
 
-find_package(unofficial-sqlite3 CONFIG REQUIRED)
 find_package(RapidJSON CONFIG REQUIRED)
 
 set(PARTIES_AUTHENTICODE_PUBLISHER "" CACHE STRING "Common name of the Authenticode signer every downloaded executable must carry")
@@ -29,13 +45,10 @@ add_library(parties_launcher_shell STATIC
     src/authenticode.cpp
     src/build_info.cpp
     src/build_store.cpp
-    src/data_guard.cpp
     src/file_io.cpp
     src/https_source.cpp
-    src/install_plan.cpp
     src/legacy_bridge.cpp
     src/link_server.cpp
-    src/local_dir_source.cpp
     src/log.cpp
     src/paths.cpp
     src/recovery_ui.cpp
@@ -44,8 +57,6 @@ add_library(parties_launcher_shell STATIC
     src/shell_integration.cpp
     src/supervisor.cpp
     src/testing.cpp
-    src/update_worker.cpp
-    ${CMAKE_SOURCE_DIR}/client/src/sqlite_file.cpp
     ${CMAKE_SOURCE_DIR}/client/src/windows/legacy_import.cpp
 )
 target_include_directories(parties_launcher_shell

@@ -124,6 +124,18 @@ bool flush_file(const fs::path& path, std::string& error) {
     return true;
 }
 
+bool durable_rename(const fs::path& from, const fs::path& to, std::string& error) {
+    if (MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+    error = "cannot move " + utf8(from) + " to " + utf8(to) + ": " + last_error_text();
+    return false;
+}
+
+bool copy_file(const fs::path& from, const fs::path& to, std::string& error) {
+    if (CopyFileW(from.c_str(), to.c_str(), FALSE)) return true;
+    error = "cannot copy " + utf8(from) + ": " + last_error_text();
+    return false;
+}
+
 std::optional<FileDigest> digest_handle(void* handle) {
     LARGE_INTEGER zero{};
     if (!SetFilePointerEx(handle, zero, nullptr, FILE_BEGIN)) return std::nullopt;

@@ -2,9 +2,8 @@
 
 #include "file_io.h"
 #include "log.h"
+#include "recovery_choice.h"
 #include "testing.h"
-
-#include <parties/update/update_policy.h>
 
 #include <algorithm>
 #include <format>
@@ -30,17 +29,6 @@ constexpr int kRetryBase = 200;
 
 std::wstring version_text(const BuildId& id) { return widen(id.version.to_string()); }
 
-const char* reason_name(const std::optional<RecoveryReason>& why) {
-    if (!why) return "requested";
-    switch (*why) {
-    case RecoveryReason::GoodFailedToStart: return "good_failed_to_start";
-    case RecoveryReason::DataUnavailable: return "data_unavailable";
-    case RecoveryReason::DataIncompatible: return "data_incompatible";
-    case RecoveryReason::Repairing: return "repairing";
-    }
-    return "unknown";
-}
-
 std::wstring explanation(const std::optional<RecoveryReason>& why) {
     if (!why) return L"Choose how to start Parties.";
     switch (*why) {
@@ -59,35 +47,6 @@ std::wstring backup_time(const Backup& b) {
     auto when = std::chrono::clock_cast<std::chrono::system_clock>(b.written);
     return widen(std::format("{:%Y-%m-%d %H:%M} UTC", std::chrono::floor<std::chrono::minutes>(when)));
 }
-
-// What "Start the previous version" does, or nullopt when it cannot start it.
-// A rollback under probation restores what the candidate changed by itself.
-// Otherwise a previous build that cannot read the live data starts on the
-// newest backup it can open.
-std::optional<StartBuild> start_previous(const RecoveryRequest& r) {
-    const SupervisorState& s = r.state;
-    if (auto* p = std::get_if<Probation>(&s.activation)) return StartBuild{p->fallback, std::nullopt};
-    if (!s.previous_good) return std::nullopt;
-    const BuildRecord* prev = s.find(*s.previous_good);
-    if (!prev || !std::holds_alternative<Proven>(prev->verdict) || s.revoked.contains(prev->id.version)) return std::nullopt;
-    if (!r.live_db || compatibility(prev->data_schema, *r.live_db) != Compatibility::Incompatible)
-        return StartBuild{prev->id, std::nullopt};
-    std::vector<Snapshot> newest_first;
-    for (const Backup& b : r.backups) newest_first.push_back({b.id, b.data});
-    auto point = restore_point(prev->data_schema, newest_first);
-    if (!point) return std::nullopt;
-    return StartBuild{prev->id, point};
-}
-
-std::vector<BuildId> retryable(const SupervisorState& s) {
-    std::vector<BuildId> out;
-    if (std::holds_alternative<Probation>(s.activation)) return out;
-    for (const BuildRecord& r : s.builds)
-        if (r.quarantined() && r.id != s.good && !s.revoked.contains(r.id.version)) out.push_back(r.id);
-    return out;
-}
-
-bool restorable(const SupervisorState& s) { return !std::holds_alternative<Probation>(s.activation); }
 
 HRESULT CALLBACK on_event(HWND, UINT notification, WPARAM, LPARAM, LONG_PTR data) {
     if (notification == TDN_CREATED) {
@@ -119,33 +78,18 @@ std::optional<Snapshot> choose_backup(const RecoveryRequest& r) {
     return Snapshot{r.backups[index].id, r.backups[index].data};
 }
 
-RecoveryChoice scripted(const RecoveryRequest& r, const std::string& answer) {
-    if (answer == "quit") return Quit{};
-    if (answer == "start") return StartAgain{};
-    if (answer == "previous") {
-        if (auto prev = start_previous(r)) return *prev;
-    }
-    if (answer == "retry") {
-        auto builds = retryable(r.state);
-        if (!builds.empty()) return RetryBuild{builds.front()};
-    }
-    if (answer == "restore" && restorable(r.state) && !r.backups.empty())
-        return RestoreBackup{Snapshot{r.backups.front().id, r.backups.front().data}};
-    return Quit{};
-}
-
 } // namespace
 
 RecoveryChoice show_recovery(const RecoveryRequest& r) {
-    log("recovery shown: {}", reason_name(r.why));
+    log("recovery shown: {}", recovery_reason_name(r.why));
     if (auto answer = testing::scripted_recovery()) {
         if (r.on_shown) r.on_shown();
-        RecoveryChoice choice = scripted(r, *answer);
+        RecoveryChoice choice = scripted_choice(r.state, r.live_db, r.backups, *answer);
         log("recovery answered by script: {}", *answer);
         return choice;
     }
 
-    const std::optional<StartBuild> previous = start_previous(r);
+    const std::optional<StartBuild> previous = start_previous(r.state, r.live_db, r.backups);
     const std::vector<BuildId> retry = retryable(r.state);
     std::vector<std::wstring> labels;
     std::vector<TASKDIALOG_BUTTON> buttons;

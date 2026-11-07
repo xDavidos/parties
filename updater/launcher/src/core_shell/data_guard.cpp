@@ -1,6 +1,6 @@
 #include "data_guard.h"
 
-#include "file_io.h"
+#include "durable_file.h"
 #include "log.h"
 
 #include <client/sqlite_file.h>
@@ -9,11 +9,10 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <vector>
-
-#include <windows.h>
 
 namespace parties::update::launcher {
 
@@ -153,10 +152,7 @@ bool raw_copy(const fs::path& source, const fs::path& dest, std::string& error) 
         if (!fs::exists(from, ec)) continue;
         fs::path partial = client::partial_path(to);
         fs::remove(partial, ec);
-        if (!CopyFileW(from.c_str(), partial.c_str(), FALSE)) {
-            error = "cannot copy " + utf8(from) + ": " + last_error_text();
-            return false;
-        }
+        if (!copy_file(from, partial, error)) return false;
         if (!client::commit_file(partial, to, error)) return false;
     }
     return true;
@@ -165,14 +161,14 @@ bool raw_copy(const fs::path& source, const fs::path& dest, std::string& error) 
 } // namespace
 
 fs::path DataGuard::backup_path(const SnapshotId& id) const {
-    return paths_.backups() / (id.stem + ".db");
+    return files_.backups / (id.stem + ".db");
 }
 
 std::expected<std::optional<DataInfo>, std::string> DataGuard::inspect() const {
     std::error_code ec;
-    if (!fs::exists(paths_.db(), ec)) return std::optional<DataInfo>{};
-    Db db(paths_.db(), false);
-    if (!db.get()) return std::unexpected("cannot open " + utf8(paths_.db()) + ": " + db.error());
+    if (!fs::exists(files_.db, ec)) return std::optional<DataInfo>{};
+    Db db(files_.db, false);
+    if (!db.get()) return std::unexpected("cannot open " + utf8(files_.db) + ": " + db.error());
     auto info = read_info(db.get());
     if (!info) return std::unexpected(info.error());
     return std::optional<DataInfo>(*info);
@@ -181,16 +177,17 @@ std::expected<std::optional<DataInfo>, std::string> DataGuard::inspect() const {
 bool DataGuard::snapshot(const SnapshotId& id, std::string& error) const {
     const fs::path dest = backup_path(id);
     std::error_code ec;
-    fs::create_directories(paths_.backups(), ec);
+    fs::create_directories(files_.backups, ec);
     if (fs::exists(dest, ec)) {
         if (copy_intact(dest)) return true;
-        fs::path aside = with_suffix(dest, (".damaged-" + std::to_string(GetTickCount64())).c_str());
-        if (!MoveFileExW(dest.c_str(), aside.c_str(), MOVEFILE_WRITE_THROUGH)) {
-            error = "cannot move the damaged " + utf8(dest) + " aside: " + last_error_text();
+        const auto ticks = std::chrono::steady_clock::now().time_since_epoch() / std::chrono::milliseconds(1);
+        fs::path aside = with_suffix(dest, (".damaged-" + std::to_string(ticks)).c_str());
+        if (!durable_rename(dest, aside, error)) {
+            error = "cannot move the damaged " + utf8(dest) + " aside: " + error;
             return false;
         }
     }
-    if (!consistent_copy(paths_.db(), dest, error)) return false;
+    if (!consistent_copy(files_.db, dest, error)) return false;
     log("snapshot {} written", id.stem);
     return true;
 }
@@ -199,7 +196,7 @@ bool DataGuard::snapshot(const SnapshotId& id, std::string& error) const {
 // its -wal is removed.
 std::expected<void, RestoreError> DataGuard::restore(const std::optional<SnapshotId>& from,
                                                      const SnapshotId& preserve_live_as) const {
-    const fs::path live = paths_.db();
+    const fs::path live = files_.db;
     auto untouched = [](std::string why) { return std::unexpected(RestoreError{std::move(why), false}); };
     std::error_code ec;
     std::string error;
@@ -212,7 +209,7 @@ std::expected<void, RestoreError> DataGuard::restore(const std::optional<Snapsho
     }
 
     const fs::path preserved = backup_path(preserve_live_as);
-    fs::create_directories(paths_.backups(), ec);
+    fs::create_directories(files_.backups, ec);
     if (fs::exists(live, ec) && !fs::exists(preserved, ec)) {
         std::string why;
         if (!consistent_copy(live, preserved, why)) {
@@ -222,29 +219,28 @@ std::expected<void, RestoreError> DataGuard::restore(const std::optional<Snapsho
         log("live database preserved as {}", preserve_live_as.stem);
     }
 
-    fs::create_directories(paths_.data(), ec);
+    fs::create_directories(live.parent_path(), ec);
     const fs::path partial = with_suffix(live, ".restore.partial");
     if (from) {
         fs::remove(partial, ec);
-        if (!CopyFileW(snap.c_str(), partial.c_str(), FALSE))
-            return untouched("cannot copy " + utf8(snap) + ": " + last_error_text());
+        if (!copy_file(snap, partial, error)) return untouched(error);
         if (!flush_file(partial, error)) return untouched(error);
     }
     for (const char* suffix : {"-wal", "-shm"}) {
         fs::path side = with_suffix(live, suffix);
-        if (fs::exists(side, ec) && !DeleteFileW(side.c_str())) {
+        if (fs::exists(side, ec) && !fs::remove(side, ec)) {
             const bool wal = std::string_view(suffix) == "-wal";
-            return std::unexpected(RestoreError{"cannot remove " + utf8(side) + ": " + last_error_text(), !wal});
+            return std::unexpected(RestoreError{"cannot remove " + utf8(side) + ": " + ec.message(), !wal});
         }
     }
     if (!from) {
-        if (!DeleteFileW(live.c_str()))
-            return std::unexpected(RestoreError{"cannot remove " + utf8(live) + ": " + last_error_text(), true});
+        if (!fs::remove(live, ec))
+            return std::unexpected(RestoreError{"cannot remove " + utf8(live) + ": " + ec.message(), true});
         log("live database set aside as {}", preserve_live_as.stem);
         return {};
     }
-    if (!MoveFileExW(partial.c_str(), live.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        return std::unexpected(RestoreError{"cannot put " + utf8(snap) + " in place: " + last_error_text(), true});
+    if (!durable_rename(partial, live, error))
+        return std::unexpected(RestoreError{"cannot put " + utf8(snap) + " in place: " + error, true});
     log("restored {} (live kept as {})", from->stem, preserve_live_as.stem);
     return {};
 }
@@ -254,7 +250,7 @@ bool DataGuard::intact(const SnapshotId& id) const { return copy_intact(backup_p
 std::vector<Backup> DataGuard::list() const {
     std::vector<Backup> out;
     std::error_code ec;
-    for (const auto& item : fs::directory_iterator(paths_.backups(), ec)) {
+    for (const auto& item : fs::directory_iterator(files_.backups, ec)) {
         if (!item.is_regular_file(ec) || item.path().extension() != ".db") continue;
         Db db(item.path(), true);
         if (!db.get() || !integrity_ok(db.get())) continue;
@@ -269,14 +265,14 @@ std::vector<Backup> DataGuard::list() const {
 void DataGuard::prune(const SupervisorState& committed) const {
     std::vector<BackupFile> files;
     std::error_code ec;
-    for (const auto& item : fs::directory_iterator(paths_.backups(), ec)) {
+    for (const auto& item : fs::directory_iterator(files_.backups, ec)) {
         if (!item.is_regular_file(ec) || item.path().extension() != ".db") continue;
         files.push_back({item.path().stem().string(), item.last_write_time(ec)});
     }
     for (const std::string& stem : backups_to_prune(files, committed)) {
         fs::path file = backup_path(SnapshotId{stem});
-        if (DeleteFileW(file.c_str())) log("retention deleted {}", stem);
-        else log("retention cannot delete {}: {}", stem, last_error_text());
+        if (fs::remove(file, ec)) log("retention deleted {}", stem);
+        else log("retention cannot delete {}: {}", stem, ec.message());
     }
 }
 

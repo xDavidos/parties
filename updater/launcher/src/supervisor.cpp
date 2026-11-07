@@ -43,6 +43,9 @@ void tell_user(const std::string& text) {
     if (!testing::enabled()) MessageBoxW(nullptr, widen(text).c_str(), L"Parties", MB_OK | MB_ICONERROR);
 }
 
+// Windows has no host to outgrow.
+constexpr Runner kRunner{.launcher_protocol = kLinkProtocol, .host_abi = 0};
+
 std::unique_ptr<UpdateSource> make_source(const LauncherOptions& o) {
     if (o.feed_dir) return make_local_dir_source(*o.feed_dir);
     if (o.feed_base) return make_https_source(*o.feed_base, true);
@@ -58,8 +61,19 @@ std::unique_ptr<UpdateSource> make_source(const LauncherOptions& o) {
 class Supervisor final : Executor {
 public:
     explicit Supervisor(const LauncherOptions& o)
-        : options_(o), store_(o.install, utf8(o.data.data())), builds_(o.install), data_(o.data),
-          worker_(make_source(o), testing::pinned_keys(), o.data.trust(), BuildStore(o.install)) {}
+        : options_(o), store_(o.install, utf8(o.data.data())), builds_(o.install),
+          data_({o.data.db(), o.data.backups()}),
+          worker_(make_source(o),
+                  WorkerConfig{kWindowsClient, kRunner, testing::pinned_keys(), o.data.trust(),
+                               [builds = builds_](const BuildEntry& entry, UpdateSource& source,
+                                                  const Progress& progress, const std::atomic<bool>& cancel) {
+                                   return builds.seal(entry, source, progress, cancel);
+                               },
+                               [event = worker_event_] { SetEvent(event); }}) {}
+    ~Supervisor() {
+        worker_.stop();
+        CloseHandle(worker_event_);
+    }
 
     int run();
 
@@ -126,6 +140,7 @@ private:
     StateStore store_;
     BuildStore builds_;
     DataGuard data_;
+    HANDLE worker_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     UpdateWorker worker_;
     AppJob job_;
 
@@ -308,7 +323,7 @@ int Supervisor::run() {
         if (core_->idle()) break;
 
         const bool with_app = app_ != nullptr;
-        std::vector<HANDLE> handles{activate, worker_.event(), quit};
+        std::vector<HANDLE> handles{activate, worker_event_, quit};
         if (with_app) handles.insert(handles.end(), {app_->link->event(), app_->process.handle()});
         DWORD timeout = INFINITE;
         if (auto deadline = core_->next_deadline()) {

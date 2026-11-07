@@ -1,42 +1,20 @@
 #pragma once
 
-// Hooks that exist only when PARTIES_UPDATE_TESTING is defined. In every
-// other build each function returns the production value.
+// The Windows launcher's testing hooks beyond the shared ones in
+// test_hooks.h. Each exists only when PARTIES_UPDATE_TESTING is defined; in
+// every other build each function returns the production value.
 
-#include <parties/update/manifest.h>
-#include <parties/update/probation.h>
+#include "test_hooks.h"
 
-#include <chrono>
 #include <filesystem>
 #include <optional>
 #include <string>
 
 namespace parties::update::launcher::testing {
 
-inline constexpr unsigned kKilledAtEffect = 0xDEAD;
-
-struct Timing {
-    std::chrono::milliseconds unit{1000};  // how long one Policy second lasts
-    Policy policy{};
-};
-
-Timing timing();
-
-void before_effect();
-
-std::optional<std::string> scripted_recovery();
-
 // PARTIES_TEST_IDENTITY_CHOICE=live|legacy: answer setup's identity question
 // without showing it, even with --silent.
 std::optional<std::string> identity_choice();
-
-// PARTIES_TEST_EXIT_AFTER_HEALTHY_MS=<n>: ask the app to exit n ms after it
-// reports healthy, so a harness can end a real client through its normal path.
-std::optional<std::chrono::milliseconds> exit_after_healthy();
-
-std::optional<std::chrono::milliseconds> job_cap();
-
-Keyring pinned_keys();
 
 // Setup's shell writes, redirected so a harness never touches the real ones:
 // PARTIES_TEST_UNINSTALL_KEY=<HKCU subkey> replaces the Apps entry's key,
@@ -55,7 +33,5 @@ std::optional<std::filesystem::path> recycle_log();
 std::optional<std::filesystem::path> desktop();
 std::optional<std::filesystem::path> taskbar();
 std::optional<std::wstring> legacy_image();
-
-bool enabled();
 
 } // namespace parties::update::launcher::testing
