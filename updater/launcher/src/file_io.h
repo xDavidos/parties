@@ -1,5 +1,7 @@
 #pragma once
 
+#include "durable_file.h"
+
 #include <parties/update/sha256_digest.h>
 
 #include <cstdint>
@@ -19,12 +21,6 @@ std::wstring widen(std::string_view s);
 std::string last_error_text();
 
 fs::path self_exe();
-
-std::optional<std::string> read_file(const fs::path& path);
-
-// Write <file>.tmp, flush it, then MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH):
-// a reader sees the old bytes or the new bytes, never a mix.
-bool durable_replace(const fs::path& file, std::string_view bytes, std::string& error);
 
 bool flush_file(const fs::path& path, std::string& error);
 

@@ -3,7 +3,7 @@
 // Sole writer of state\supervisor.json (+ .prev), state\boot-contract.json
 // and state\launcher-session.json.
 
-#include "paths.h"
+#include "install_paths.h"
 
 #include <parties/update/boot.h>
 #include <parties/update/supervisor_state.h>

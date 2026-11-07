@@ -1,3 +1,11 @@
+# What both launchers do around the update core: StateStore owns the state
+# files. Each platform defines log_line, read_file and durable_replace.
+add_library(parties_launcher_core STATIC
+    src/core_shell/state_store.cpp
+)
+target_include_directories(parties_launcher_core PUBLIC src/core_shell)
+target_link_libraries(parties_launcher_core PUBLIC parties_update_core)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     # The macOS launcher, so far only its end of the front door. The host's
     # shared headers (data_lock.h, front_door_socket.h) come with parties_host_api.
@@ -32,7 +40,6 @@ add_library(parties_launcher_shell STATIC
     src/setup.cpp
     src/setup_payload.cpp
     src/shell_integration.cpp
-    src/state_store.cpp
     src/supervisor.cpp
     src/testing.cpp
     src/update_worker.cpp
@@ -43,7 +50,7 @@ target_include_directories(parties_launcher_shell
     PUBLIC src
     PRIVATE ${CMAKE_SOURCE_DIR}/client/include)
 target_link_libraries(parties_launcher_shell
-    PUBLIC parties_update_core
+    PUBLIC parties_launcher_core
     PRIVATE parties_update_release_keys parties_common rapidjson unofficial::sqlite3::sqlite3 bcrypt comctl32
         shell32 winhttp wintrust crypt32 ole32 propsys)
 target_compile_definitions(parties_launcher_shell PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)

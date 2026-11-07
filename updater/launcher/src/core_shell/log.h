@@ -6,7 +6,8 @@
 
 namespace parties::update::launcher {
 
-// Until open_log runs, log_line writes to the debugger output only.
+// Each platform defines both. On Windows, until open_log runs, log_line
+// writes to the debugger output only.
 void open_log(const std::filesystem::path& file);
 void log_line(std::string_view text);
 

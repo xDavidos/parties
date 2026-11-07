@@ -1,6 +1,6 @@
 #include "state_store.h"
 
-#include "file_io.h"
+#include "durable_file.h"
 #include "log.h"
 
 #include <parties/update/state_codec.h>
