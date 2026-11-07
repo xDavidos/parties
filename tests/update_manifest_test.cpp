@@ -277,6 +277,26 @@ bool test_products() {
     return ok;
 }
 
+bool test_min_host_abi() {
+    bool ok = true;
+    ManifestPayload p = payload();
+    p.builds[1].min_host_abi = 3;
+    const std::string text = write_payload(p);
+    if (write_build_entry(p.builds[0]).find("min_host_abi") != std::string::npos)
+        ok &= fail("an entry for any host carries no min_host_abi");
+    if (write_build_entry(p.builds[1]).find("\"min_host_abi\":3") == std::string::npos)
+        ok &= fail("an entry that needs a newer host says which");
+    auto r = verify(sign(text, {kA}), {pin(kA)});
+    if (!r || r->builds()[0].min_host_abi != 3 || r->builds()[1].min_host_abi != 0)
+        ok &= fail("min_host_abi survives verification");
+    for (const char* bad : {"\"min_host_abi\":0", "\"min_host_abi\":\"3\"", "\"min_host_abi\":-1"}) {
+        std::string tampered = text;
+        tampered.replace(tampered.find("\"min_host_abi\":3"), 16, bad);
+        ok &= expect_error(verify(sign(tampered, {kA}), {pin(kA)}), Kind::InvalidField, std::string("entry with ") + bad);
+    }
+    return ok;
+}
+
 VerifiedManifest verified(const ManifestPayload& p) {
     auto r = verify(sign(write_payload(p), {kA}), {pin(kA)});
     if (!r) std::abort();
@@ -343,6 +363,7 @@ int main() {
     ok &= test_build_identity();
     ok &= test_build_entry_codec();
     ok &= test_products();
+    ok &= test_min_host_abi();
     ok &= test_trust_ratchet();
     if (ok) std::cout << "update_manifest_test: all passed\n";
     return ok ? 0 : 1;

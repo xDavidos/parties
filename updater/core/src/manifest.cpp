@@ -104,6 +104,12 @@ std::expected<BuildEntry, ManifestError> parse_build(const json::Value& v, const
     b.data_compat_floor = *floor;
     b.link_protocol = *link;
     b.min_supported_launcher_link = *min_link;
+    // Absent means 0, and 0 is never written, so every entry has one encoding
+    // and a promoted entry keeps its bytes.
+    if (const json::Value* host = json::member(v, "min_host_abi")) {
+        if (!host->IsUint() || host->GetUint() == 0) return error(K::InvalidField, "min_host_abi");
+        b.min_host_abi = host->GetUint();
+    }
     std::vector<std::string> seen;
     for (const auto& fv : files->GetArray()) {
         auto f = parse_file(fv);
@@ -126,6 +132,9 @@ void write_build(json::Writer& w, const BuildEntry& b) {
     json::key(w, "data_compat_floor"); w.Uint(b.data_compat_floor);
     json::key(w, "link_protocol"); w.Uint(b.link_protocol);
     json::key(w, "min_supported_launcher_link"); w.Uint(b.min_supported_launcher_link);
+    if (b.min_host_abi != 0) {
+        json::key(w, "min_host_abi"); w.Uint(b.min_host_abi);
+    }
     json::key(w, "files");
     w.StartArray();
     for (const auto& f : b.files) {

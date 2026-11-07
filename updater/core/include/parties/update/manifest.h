@@ -58,6 +58,7 @@ struct BuildEntry {
     uint32_t data_compat_floor = 1;
     uint32_t link_protocol = 1;                // newest launcher link protocol the app speaks
     uint32_t min_supported_launcher_link = 1;  // oldest launcher protocol the app negotiates down to
+    uint32_t min_host_abi = 0;                 // oldest macOS host the build loads into; 0: any host
     std::vector<FileEntry> files;
 
     // Version plus build_digest(files).
