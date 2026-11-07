@@ -1,5 +1,6 @@
 #include <parties/update/boot.h>
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 
