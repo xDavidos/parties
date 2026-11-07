@@ -21,7 +21,7 @@ bundle and output directory as the first and second arguments to override the
 defaults. Every state is independently reproducible with, for example:
 
 ```zsh
-build-macos/client/parties_client.app/Contents/MacOS/parties_client \
+build-macos/updater/host/Parties.app/Contents/MacOS/Parties \
   --ui-fixture native-user
 ```
 

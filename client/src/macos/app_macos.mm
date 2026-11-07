@@ -5,6 +5,7 @@
 
 #import "PartiesAppDelegate.h"
 #import "context_menu_macos.h"
+#include "mac_runtime.h"
 #import "PartiesStatusItemController.h"
 #import "screen_capture_macos.h"
 #import <encdec/apple/video_encoder_macos.h>
@@ -427,9 +428,7 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
     }
 
     // ── Settings path ─────────────────────────────────────────────────────
-    NSString* appSupport = [NSSearchPathForDirectoriesInDomains(
-        NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-    NSString* dir = [appSupport stringByAppendingPathComponent:@"Parties"];
+    NSString* dir = @(parties::client::macos::host().data_dir);
     [[NSFileManager defaultManager] createDirectoryAtPath:dir
                                 withIntermediateDirectories:YES
                                                  attributes:nil
@@ -624,7 +623,7 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
     } else {
         // ── Init AppCore ──────────────────────────────────────────────────
         const SettingsPaths dataPaths{std::filesystem::path(dbPath.UTF8String),
-                                      std::filesystem::path(dir.UTF8String) / "backups"};
+                                      std::filesystem::path(parties::client::macos::host().backups_dir)};
         const Settings::OpenResult opened = _core.settings_.open(dataPaths);
         if (opened.status != Settings::OpenStatus::Ready) {
             NSLog(@"[Parties] Cannot open data at %s: %s", dbPath.UTF8String, opened.reason.c_str());
