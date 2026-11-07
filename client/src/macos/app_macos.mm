@@ -72,6 +72,7 @@ extern void macos_updater_check_in_background();
 #include <vector>
 #include <cstring>
 #include <cstdio>
+#include <unistd.h>
 
 using namespace parties;
 using namespace parties::client;
@@ -735,7 +736,10 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
         };
 
         // ── Load identity and saved state ─────────────────────────────────
-        std::string hostname = NSProcessInfo.processInfo.hostName.UTF8String;
+        // The default display name. NSProcessInfo.hostName resolves it through
+        // DNS on the main thread, which stalled the first frame by 35 s on CI.
+        char hostname[256] = {};
+        gethostname(hostname, sizeof hostname - 1);
         _core.load_or_generate_identity(hostname);
         _core.load_saved_prefs();
         _core.refresh_server_list();
