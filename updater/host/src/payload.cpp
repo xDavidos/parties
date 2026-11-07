@@ -6,20 +6,11 @@
 #include <Security/Security.h>
 #endif
 
-#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <vector>
 
 namespace parties::host {
-
-namespace {
-
-double ms_since(std::chrono::steady_clock::time_point start) {
-    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-}
-
-} // namespace
 
 #ifdef PARTIES_RETAIL
 bool meets_requirement(const std::filesystem::path& file) {
@@ -63,9 +54,7 @@ std::expected<update::Sha256, LoadError> digest_file(const std::filesystem::path
 
 std::expected<LoadedPayload, LoadError>
 load(const std::filesystem::path& file, const std::optional<update::Sha256>& expected, const Entry& entry) {
-    const auto hash_start = std::chrono::steady_clock::now();
     const auto digest = digest_file(file);
-    const double hash_ms = ms_since(hash_start);
     if (!digest) {
         std::fprintf(stderr, "[host] payload missing: %s\n", file.c_str());
         return std::unexpected(digest.error());
@@ -76,9 +65,7 @@ load(const std::filesystem::path& file, const std::optional<update::Sha256>& exp
         return std::unexpected(LoadError::DigestMismatch);
     }
 
-    const auto dlopen_start = std::chrono::steady_clock::now();
     void* handle = dlopen(file.c_str(), RTLD_NOW | RTLD_LOCAL);
-    const double dlopen_ms = ms_since(dlopen_start);
     if (!handle) {
         std::fprintf(stderr, "[host] payload dlopen failed: %s\n", dlerror());
         return std::unexpected(LoadError::DlopenFailed);
@@ -95,8 +82,7 @@ load(const std::filesystem::path& file, const std::optional<update::Sha256>& exp
         return std::unexpected(LoadError::HostTooOld);
     }
 
-    std::fprintf(stderr, "[host] payload loaded: %s sha256=%s hash_ms=%.2f dlopen_ms=%.2f\n",
-                 file.c_str(), digest->to_hex().c_str(), hash_ms, dlopen_ms);
+    std::fprintf(stderr, "[host] payload loaded: %s sha256=%s\n", file.c_str(), digest->to_hex().c_str());
     return LoadedPayload{handle, run};
 }
 
