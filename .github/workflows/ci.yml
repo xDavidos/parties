@@ -165,8 +165,20 @@ jobs:
           otool -L "$app/Contents/Frameworks/PartiesClient.dylib" | grep -F '@rpath/Sparkle.framework/Versions/B/Sparkle'
           test -x "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
 
+      # iOS builds the same POSIX commit_file. No job builds the iOS app, so
+      # compile this file against the iOS SDK at the app's deployment target.
+      - name: Compile the POSIX data commit for iOS
+        if: matrix.preset == 'macos-arm64-debug'
+        run: >-
+          xcrun --sdk iphoneos clang++ -std=c++23 -arch arm64 -mios-version-min=16.3
+          -fsyntax-only -Werror -Iclient/include client/src/sqlite_file.cpp
+
       - name: Run update core and data safety tests
-        run: ctest --test-dir ${{ matrix.preset == 'macos-arm64-release' && 'build-macos-release' || 'build-macos' }} -R "^(update_|parties_data_)" -E "^update_front_door_e2e$" --output-on-failure --no-tests=error
+        run: ctest --test-dir ${{ matrix.preset == 'macos-arm64-release' && 'build-macos-release' || 'build-macos' }} -R "^(update_|parties_data_)" -E "^(update_front_door_e2e|parties_data_posix_commit)$" --output-on-failure --no-tests=error
+
+      # Verbose, so the log shows how many kill points landed on each side of the rename.
+      - name: Data commit under SIGKILL
+        run: ctest --test-dir ${{ matrix.preset == 'macos-arm64-release' && 'build-macos-release' || 'build-macos' }} -R "^parties_data_posix_commit$" --verbose --no-tests=error
 
       # Verbose, so the log shows each scenario's ExitKind and the front-door trace.
       - name: Front door end to end

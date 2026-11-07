@@ -2,6 +2,8 @@
 
 #include <sqlite3.h>
 
+#include <cerrno>
+#include <cstring>
 #include <ctime>
 #include <system_error>
 
@@ -9,6 +11,7 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <stdio.h>  // renameatx_np
 #include <unistd.h>
 #endif
 
@@ -64,6 +67,17 @@ bool vacuum_into(sqlite3* db, const fs::path& dest, std::string& error) {
 
 namespace {
 
+#ifndef _WIN32
+// fsync leaves the data in the drive's write cache on macOS. F_FULLFSYNC also
+// flushes the cache; a file system without it falls back to fsync.
+bool sync_fd(int fd) {
+#ifdef F_FULLFSYNC
+    if (::fcntl(fd, F_FULLFSYNC) == 0) return true;
+#endif
+    return ::fsync(fd) == 0;
+}
+#endif
+
 bool flush_to_disk(const fs::path& path, std::string& error) {
 #ifdef _WIN32
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
@@ -75,12 +89,12 @@ bool flush_to_disk(const fs::path& path, std::string& error) {
     const bool ok = FlushFileBuffers(file) != 0;
     CloseHandle(file);
 #else
-    const int fd = ::open(path.c_str(), O_RDONLY);
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         error = "cannot open " + utf8_path(path) + " to flush it";
         return false;
     }
-    const bool ok = ::fsync(fd) == 0;
+    const bool ok = sync_fd(fd);
     ::close(fd);
 #endif
     if (!ok) error = "cannot flush " + utf8_path(path);
@@ -99,14 +113,33 @@ bool commit_file(const fs::path& partial, const fs::path& final_path, std::strin
         return false;
     }
 #else
-    std::error_code ec;
-    if (fs::exists(final_path, ec)) {
-        error = utf8_path(final_path) + " already exists";
+    const fs::path dir = final_path.parent_path();
+    const int dir_fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd < 0) {
+        error = "cannot open " + utf8_path(dir) + ": " + std::strerror(errno);
         return false;
     }
-    fs::rename(partial, final_path, ec);
-    if (ec) {
-        error = "cannot rename " + utf8_path(partial) + ": " + ec.message();
+    // Exclusive and atomic: a copy never replaces a live database, and nothing
+    // can appear at final_path between a check and the rename. The new name is
+    // resolved in the directory that is flushed below.
+    const std::string name = final_path.filename().string();
+#ifdef __APPLE__
+    const bool moved = ::renameatx_np(AT_FDCWD, partial.c_str(), dir_fd, name.c_str(), RENAME_EXCL) == 0;
+#else
+    const bool moved = ::linkat(AT_FDCWD, partial.c_str(), dir_fd, name.c_str(), 0) == 0 &&
+                       ::unlink(partial.c_str()) == 0;
+#endif
+    const int rename_errno = errno;
+    // The rename is durable only once the directory entry is on disk.
+    const bool synced = moved && sync_fd(dir_fd);
+    ::close(dir_fd);
+    if (!moved) {
+        error = "cannot rename " + utf8_path(partial) + " to " + utf8_path(final_path) + ": " +
+                std::strerror(rename_errno);
+        return false;
+    }
+    if (!synced) {
+        error = "cannot flush " + utf8_path(dir) + " after renaming " + utf8_path(partial);
         return false;
     }
 #endif

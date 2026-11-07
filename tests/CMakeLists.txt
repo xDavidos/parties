@@ -246,6 +246,8 @@ if(BUILD_CLIENT)
         list(APPEND data_test_sources
             ../client/src/windows/data_location.cpp
             ../client/src/windows/legacy_import.cpp)
+    else()
+        list(APPEND data_tests posix_commit)
     endif()
     foreach(data_test ${data_tests})
         add_executable(parties_data_${data_test}_test data_${data_test}_test.cpp ${data_test_sources})
