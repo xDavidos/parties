@@ -1,0 +1,54 @@
+name: Build manifest tool
+
+# Builds parties_manifest_tool.exe from the calling run's commit, so it
+# verifies against the keys that commit pins. The signing jobs only download
+# the result and never run this job's toolchain next to the signing key.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/emcifuntik/index.json,readwrite"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Configure vcpkg NuGet binary caching
+        shell: pwsh
+        run: |
+          &(vcpkg fetch nuget | Select-Object -Last 1) sources add `
+            -Source "https://nuget.pkg.github.com/emcifuntik/index.json" `
+            -StorePasswordInClearText -Name GitHubPackages `
+            -UserName "emcifuntik" -Password "${{ secrets.GITHUB_TOKEN }}"
+          &(vcpkg fetch nuget | Select-Object -Last 1) setapikey `
+            "${{ secrets.GITHUB_TOKEN }}" `
+            -Source "https://nuget.pkg.github.com/emcifuntik/index.json"
+
+      - name: Install LLVM 22
+        run: |
+          choco install llvm --version=22.1.0 -y
+          echo "LLVMInstallDir=C:\Program Files\LLVM" >> $env:GITHUB_ENV
+          echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build the manifest tool
+        run: cmake --build --preset release --target parties_manifest_tool
+
+      - name: Upload the manifest tool
+        uses: actions/upload-artifact@v7
+        with:
+          name: manifest-tool
+          path: build-release/updater/tools/parties_manifest_tool.exe

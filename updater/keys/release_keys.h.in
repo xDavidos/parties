@@ -1,0 +1,18 @@
+#pragma once
+
+#include <parties/update/manifest.h>
+
+#include <vector>
+
+namespace parties::update {
+
+// The keys every retail build trusts for channel manifests. Empty when no
+// production key is committed: verify_manifest then refuses every manifest,
+// so the launcher fails closed and offers no update.
+inline Keyring production_keyring() {
+    static const std::vector<PinnedKey> keys{
+@RELEASE_KEY_ENTRIES@    };
+    return keys;
+}
+
+} // namespace parties::update

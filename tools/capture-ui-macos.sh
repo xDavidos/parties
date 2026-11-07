@@ -2,9 +2,9 @@
 set -euo pipefail
 
 repository="${0:A:h:h}"
-app="${1:-$repository/build-macos/client/parties_client.app}"
+app="${1:-$repository/build-macos/updater/host/Parties.app}"
 output="${2:-$repository/build/ui-screenshots-macos}"
-executable="$app/Contents/MacOS/parties_client"
+executable="$app/Contents/MacOS/Parties"
 window_helper="$repository/build/macos-window-id"
 log_file="$output/capture.log"
 
