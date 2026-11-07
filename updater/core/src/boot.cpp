@@ -39,19 +39,6 @@ bool eligible(const BootRecord& rec, const LauncherRef& ref, std::span<const Sha
     return it == rec.launchers.end() || it->confirmed || it->failed_boots < kMaxFailedBoots;
 }
 
-// Only "builds\<name>" with a plain name, so a damaged contract can never point
-// the stub outside the install root.
-bool is_build_dir(std::string_view dir) {
-    constexpr std::string_view prefix = "builds\\";
-    if (!dir.starts_with(prefix)) return false;
-    std::string_view name = dir.substr(prefix.size());
-    if (name.empty() || name.front() == '.' || name.find("..") != std::string_view::npos) return false;
-    return std::ranges::all_of(name, [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
-               c == '_' || c == '-';
-    });
-}
-
 std::optional<Sha256> digest(const json::Value& v, const char* name) {
     auto hex = json::string(v, name);
     return hex ? Sha256::from_hex(*hex) : std::nullopt;
@@ -84,6 +71,19 @@ std::optional<uint8_t> small_count(const json::Value& v, const char* name) {
 std::string finish(rapidjson::StringBuffer& buf) { return {buf.GetString(), buf.GetSize()}; }
 
 } // namespace
+
+// Only "builds\<name>" with a plain name, so a damaged contract can never point
+// the stub outside the install root.
+bool is_build_dir(std::string_view dir) {
+    constexpr std::string_view prefix = "builds\\";
+    if (!dir.starts_with(prefix)) return false;
+    std::string_view name = dir.substr(prefix.size());
+    if (name.empty() || name.front() == '.' || name.find("..") != std::string_view::npos) return false;
+    return std::ranges::all_of(name, [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
+               c == '_' || c == '-';
+    });
+}
 
 Decision choose(const std::optional<BootContract>& contract, const BootRecord& record,
                 const std::optional<SessionReport>& session, std::span<const Sha256> unusable) {

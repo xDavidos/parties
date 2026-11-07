@@ -55,22 +55,8 @@ std::optional<Version> version_at(const Value& obj, const char* name) {
     return text ? Version::parse(*text) : std::nullopt;
 }
 
-template <class F>
-std::string document(std::string_view type, F&& fields) {
-    rapidjson::StringBuffer buffer;
-    Writer w(buffer);
-    w.StartObject();
-    json::key(w, "type");
-    json::str(w, type);
-    fields(w);
-    w.EndObject();
-    std::string line(buffer.GetString(), buffer.GetSize());
-    line.push_back('\n');
-    return line;
-}
-
 std::string write_request(const Request& request) {
-    return document("request", [&](Writer& w) {
+    return json::message("request", [&](Writer& w) {
         std::visit(
             [&](const auto& r) {
                 using T = std::decay_t<decltype(r)>;
@@ -107,7 +93,7 @@ std::optional<Request> parse_request(const Value& doc) {
 }
 
 std::string write_status(const Status& s) {
-    return document("status", [&](Writer& w) {
+    return json::message("status", [&](Writer& w) {
         json::key(w, "phase");
         json::str(w, name_of(kPhases, s.phase));
         json::key(w, "channel");
@@ -182,14 +168,6 @@ std::optional<Status> parse_status(const Value& doc) {
     return s;
 }
 
-bool parse_document(rapidjson::Document& doc, std::string_view line, std::string_view& type) {
-    if (!json::parse(doc, line)) return false;
-    auto t = json::string(doc, "type");
-    if (!t) return false;
-    type = *t;
-    return true;
-}
-
 } // namespace
 
 std::optional<uint32_t> negotiate(const Hello& hello, uint32_t launcher_protocol) {
@@ -203,7 +181,7 @@ std::string write(const AppMessage& message) {
         [](const auto& m) -> std::string {
             using T = std::decay_t<decltype(m)>;
             if constexpr (std::is_same_v<T, Hello>) {
-                return document("hello", [&](Writer& w) {
+                return json::message("hello", [&](Writer& w) {
                     json::key(w, "link_protocol");
                     w.Uint(m.link_protocol);
                     json::key(w, "min_launcher_link");
@@ -211,7 +189,7 @@ std::string write(const AppMessage& message) {
                     write_version(w, "version", m.version);
                 });
             } else if constexpr (std::is_same_v<T, Healthy>) {
-                return document("healthy", [&](Writer& w) {
+                return json::message("healthy", [&](Writer& w) {
                     json::key(w, "data_schema");
                     w.Uint(m.data_schema);
                 });
@@ -227,14 +205,14 @@ std::string write(const LauncherMessage& message) {
         [](const auto& m) -> std::string {
             using T = std::decay_t<decltype(m)>;
             if constexpr (std::is_same_v<T, Welcome>) {
-                return document("welcome", [&](Writer& w) {
+                return json::message("welcome", [&](Writer& w) {
                     json::key(w, "link_protocol");
                     w.Uint(m.link_protocol);
                 });
             } else if constexpr (std::is_same_v<T, Status>) {
                 return write_status(m);
             } else {
-                return document("exit_requested", [](Writer&) {});
+                return json::message("exit_requested", [](Writer&) {});
             }
         },
         message);
@@ -243,7 +221,7 @@ std::string write(const LauncherMessage& message) {
 std::optional<AppMessage> parse_app_message(std::string_view line) {
     rapidjson::Document doc;
     std::string_view type;
-    if (!parse_document(doc, line, type)) return std::nullopt;
+    if (!json::parse_message(doc, line, type)) return std::nullopt;
     if (type == "hello") {
         auto protocol = json::u32(doc, "link_protocol");
         auto min_link = json::u32(doc, "min_launcher_link");
@@ -265,7 +243,7 @@ std::optional<AppMessage> parse_app_message(std::string_view line) {
 std::optional<LauncherMessage> parse_launcher_message(std::string_view line) {
     rapidjson::Document doc;
     std::string_view type;
-    if (!parse_document(doc, line, type)) return std::nullopt;
+    if (!json::parse_message(doc, line, type)) return std::nullopt;
     if (type == "welcome") {
         auto protocol = json::u32(doc, "link_protocol");
         if (!protocol) return std::nullopt;

@@ -26,6 +26,8 @@ namespace parties::update::boot {
 inline constexpr uint8_t kMaxFailedBoots = 2;
 inline constexpr uint8_t kCleanSessionsToConfirm = 2;
 
+bool is_build_dir(std::string_view dir);
+
 // dir is relative to the install root: "builds\<version>-<sha8>".
 struct LauncherRef {
     std::string dir;

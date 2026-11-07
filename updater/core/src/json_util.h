@@ -87,4 +87,27 @@ inline void str(Writer& w, std::string_view s) {
     w.String(s.data(), static_cast<rapidjson::SizeType>(s.size()));
 }
 
+// One protocol line: {"type":<type>, fields...} and a trailing '\n'.
+template <class F>
+std::string message(std::string_view type, F&& fields) {
+    rapidjson::StringBuffer buffer;
+    Writer w(buffer);
+    w.StartObject();
+    key(w, "type");
+    str(w, type);
+    fields(w);
+    w.EndObject();
+    std::string line(buffer.GetString(), buffer.GetSize());
+    line.push_back('\n');
+    return line;
+}
+
+inline bool parse_message(rapidjson::Document& doc, std::string_view line, std::string_view& type) {
+    if (!parse(doc, line)) return false;
+    auto t = string(doc, "type");
+    if (!t) return false;
+    type = *t;
+    return true;
+}
+
 } // namespace parties::update::json
