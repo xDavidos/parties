@@ -415,6 +415,14 @@ if(TARGET parties_update_core)
     endif()
     add_test(NAME update_golden COMMAND update_golden_test)
 
+    # SupervisorCore against a scripted Executor, so it builds and runs on
+    # every platform that has a launcher.
+    if(TARGET parties_launcher_core)
+        add_executable(update_supervisor_core_test update_supervisor_core_test.cpp)
+        target_link_libraries(update_supervisor_core_test PRIVATE parties_launcher_core)
+        add_test(NAME update_supervisor_core COMMAND update_supervisor_core_test)
+    endif()
+
     # Links only the boot library, which proves the boot stub's decisions build
     # without parties_common and OpenSSL.
     add_executable(update_boot_test update_boot_test.cpp)
