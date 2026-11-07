@@ -7,16 +7,17 @@
 
 extern "C" const uint32_t parties_client_min_host_abi = 1;
 
-static const PartiesHostApi* g_host = nullptr;
+static parties::client::macos::MacRuntime* g_runtime = nullptr;
 
-const PartiesHostApi& parties::client::macos::host()
+parties::client::macos::MacRuntime& parties::client::macos::runtime()
 {
-    return *g_host;
+    return *g_runtime;
 }
 
 extern "C" int parties_client_main(const PartiesHostApi* host)
 {
-    g_host = host;
+    // Never freed: the process ends through the host.
+    g_runtime = new parties::client::macos::MacRuntime(*host);
     @autoreleasepool {
         NSApplication* app = [NSApplication sharedApplication];
         PartiesAppDelegate* delegate = [[PartiesAppDelegate alloc] init];

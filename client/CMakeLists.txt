@@ -95,6 +95,7 @@ elseif(APPLE)
     set(CLIENT_PLATFORM_SOURCES
         # Payload entry point & window (AppKit / Metal)
         src/macos/payload_entry.mm
+        src/macos/mac_runtime.mm
         src/macos/app_macos.mm
         src/macos/context_menu_macos.mm
         src/macos/PartiesStatusItemController.mm
@@ -297,7 +298,8 @@ target_link_libraries(parties_client
         $<$<NOT:$<BOOL:${BUILD_IN_RETAIL}>>:RmlUi::Debugger>
         ${SPEEXDSP_LIBRARY}
 )
-if(WIN32)
+# The link to the launcher. iOS has no launcher.
+if(WIN32 OR (APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS"))
     target_link_libraries(parties_client PRIVATE parties_update_link)
 endif()
 

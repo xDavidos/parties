@@ -184,7 +184,7 @@ cat "$log"
 kill -0 "$front_pid" 2>/dev/null && fail "the front is still running"
 
 grep -q '^\[update-testing\] lobby loaded' "$log" || fail "the lobby document did not load"
-grep -Eq '^\[update-testing\] (frame presented|frames completed in a visible window, presentedTime unavailable|rendering suspended)$' "$log" \
+grep -Eq '^\[update-testing\] (frame presented|frames completed in a visible window, presentedTime unavailable|rendering suspended) at [0-9:.]+$' "$log" \
     || fail "no frame was presented and the view was not paused"
 grep -q '^\[host\] terminate: exiting 0$' "$log" || fail "the app did not quit through terminate:"
 crashes=$(find "$HOME/Library/Logs/DiagnosticReports" -name 'Parties*' -newer "$out/started" 2>/dev/null || true)
