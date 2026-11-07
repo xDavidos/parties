@@ -67,11 +67,27 @@ jobs:
       - name: Install Ninja
         run: choco install ninja -y
 
+      # Debug compiles the update testing hooks so the stub and launcher e2e tests run;
+      # release proves they compile out of shipped binaries.
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }} -DPARTIES_UPDATE_TESTING=${{ matrix.preset == 'default' && 'ON' || 'OFF' }}
 
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Check boot stub budget and links
+        run: pwsh -NoProfile -File tools/update/check_boot_stub.ps1 -BuildDir ${{ matrix.preset == 'release' && 'build-release' || 'build' }}
+
+      # Only the user-data tests: most other tests need a GPU or audio devices.
+      - name: Run data safety tests
+        run: ctest --test-dir ${{ matrix.preset == 'release' && 'build-release' || 'build' }} -R "^parties_data_" --output-on-failure --no-tests=error
+
+      - name: Run update core tests
+        run: ctest --test-dir ${{ matrix.preset == 'release' && 'build-release' || 'build' }} -R "^update_" -E "^update_e2e$" -LE gpu --output-on-failure --no-tests=error
+
+      - name: Run update launcher e2e
+        if: matrix.preset == 'default'
+        run: ctest --test-dir build -R "^update_e2e$" --output-on-failure --no-tests=error
 
       - name: Upload client artifact
         if: matrix.preset == 'release'
@@ -133,6 +149,9 @@ jobs:
 
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Run update core and data safety tests
+        run: ctest --test-dir ${{ matrix.preset == 'macos-arm64-release' && 'build-macos-release' || 'build-macos' }} -R "^(update_|parties_data_)" --output-on-failure --no-tests=error
 
       - name: Upload client artifact
         if: matrix.preset == 'macos-arm64-release'

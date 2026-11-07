@@ -16,9 +16,14 @@ jobs:
   # ── Windows retail build ────────────────────────────────────────────────────
   windows:
     runs-on: windows-latest
+    outputs:
+      update_layout: ${{ steps.layout.outputs.staged }}
+      version: ${{ steps.layout.outputs.version }}
     env:
       VCPKG_DOWNLOADS: ${{ github.workspace }}/.vcpkg-downloads
       VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/emcifuntik/index.json,readwrite"
+      LAUNCHER_EXE: build-retail/updater/launcher/PartiesLauncher.exe
+      STUB_EXE: build-retail/updater/boot/Parties.exe
     steps:
       - uses: actions/checkout@v6
         with:
@@ -66,7 +71,8 @@ jobs:
           cmake --preset retail `
             -DENABLE_SENTRY=ON `
             -DSENTRY_DSN_CLIENT="${{ secrets.SENTRY_DSN_WINDOWS }}" `
-            -DSENTRY_DSN_SERVER="${{ secrets.SENTRY_DSN_SERVER }}"
+            -DSENTRY_DSN_SERVER="${{ secrets.SENTRY_DSN_SERVER }}" `
+            -DPARTIES_AUTHENTICODE_PUBLISHER="${{ vars.PARTIES_AUTHENTICODE_PUBLISHER }}"
 
       - name: Build
         run: cmake --build --preset retail
@@ -89,10 +95,26 @@ jobs:
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 
+      # The setup job packs PartiesSetup.exe only after publish-beta has signed
+      # the manifest that setup embeds. Packing rewrites the resources and
+      # would break a signature, so it starts from the unsigned launcher. The
+      # packed setup is then signed on its own.
+      - name: Keep the unsigned launcher as the setup carrier
+        shell: pwsh
+        run: |
+          if (Test-Path $env:LAUNCHER_EXE) {
+            New-Item -ItemType Directory -Force dist-setup | Out-Null
+            Copy-Item $env:LAUNCHER_EXE dist-setup/PartiesSetup-carrier.exe
+          }
+
       - name: Sign executables
         shell: bash
         run: |
-          for exe in build-retail/client/parties_client.exe build-retail/server/parties_server.exe; do
+          exes=(build-retail/client/parties_client.exe build-retail/server/parties_server.exe)
+          for exe in "$LAUNCHER_EXE" "$STUB_EXE"; do
+            if [ -f "$exe" ]; then exes+=("$exe"); else echo "::warning::$exe was not built, so it is not signed"; fi
+          done
+          for exe in "${exes[@]}"; do
             echo "Signing $exe..."
             curl -sf -X POST \
               -H "X-Sign-Token: ${{ secrets.HOME_CODE_SIGN_TOKEN }}" \
@@ -108,16 +130,26 @@ jobs:
       - name: Verify signatures
         shell: pwsh
         run: |
-          foreach ($exe in @(
-            "build-retail/client/parties_client.exe",
-            "build-retail/server/parties_server.exe"
-          )) {
+          $exes = @("build-retail/client/parties_client.exe", "build-retail/server/parties_server.exe")
+          $exes += @($env:LAUNCHER_EXE, $env:STUB_EXE) | Where-Object { Test-Path $_ }
+          foreach ($exe in $exes) {
             $sig = Get-AuthenticodeSignature $exe
             if ($sig.Status -ne "Valid") {
               throw "Signature verification failed for $exe`: $($sig.Status)"
             }
             Write-Host "Verified $exe`: $($sig.SignerCertificate.Subject)"
           }
+
+      # The zip, server and macOS assets must publish even if this step fails;
+      # a failure here leaves the release without its Beta entry.
+      - name: Stage update layout
+        id: layout
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/release/stage-update-layout.ps1 `
+            -Tag "$env:GITHUB_REF_NAME" -Repository "$env:GITHUB_REPOSITORY" `
+            -BuildDir build-retail -OutDir dist-update -Launcher "$env:LAUNCHER_EXE" -Stub "$env:STUB_EXE"
 
       - name: Collect PDB files
         shell: pwsh
@@ -146,6 +178,29 @@ jobs:
         with:
           name: release-windows-pdb
           path: pdb-staging/
+
+      - name: Upload Windows update layout artifact
+        if: steps.layout.outputs.staged == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-update
+          path: dist-update/
+
+      - name: Upload setup carrier artifact
+        if: steps.layout.outputs.staged == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-setup-carrier
+          path: dist-setup/PartiesSetup-carrier.exe
+
+      # publish-beta.yml runs this exact binary, which pins the keys this
+      # build's launcher pins.
+      - name: Upload manifest tool artifact
+        if: steps.layout.outputs.staged == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-manifest-tool
+          path: build-retail/updater/tools/parties_manifest_tool.exe
 
   # ── macOS retail build ──────────────────────────────────────────────────────
   macos:
@@ -497,19 +552,145 @@ jobs:
           name: release-appcast
           path: dist/appcast
 
+      - name: Download Windows update layout
+        if: needs.windows.outputs.update_layout == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: release-windows-update
+          path: dist/update
+
       - name: Package release archives
         run: |
           cd dist/windows-client && zip -r ../../parties-client-windows-${{ github.ref_name }}.zip . && cd ../..
           cd dist/windows-server && zip -r ../../parties-server-windows-${{ github.ref_name }}.zip . && cd ../..
           cd dist/windows-pdb && zip -r ../../parties-pdb-windows-${{ github.ref_name }}.zip . && cd ../..
 
+      # Every tag starts as a prerelease, which /releases/latest never returns,
+      # so the legacy updater and Sparkle see it only after promote.yml.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: true
+          make_latest: false
           files: |
             parties-client-windows-${{ github.ref_name }}.zip
             parties-server-windows-${{ github.ref_name }}.zip
             parties-pdb-windows-${{ github.ref_name }}.zip
             dist/macos/parties-client-macos-${{ github.ref_name }}.dmg
             dist/appcast/appcast.xml
+            dist/update/assets/*
+
+  publish-beta:
+    needs: [windows, create-release]
+    if: needs.windows.outputs.update_layout == 'true'
+    uses: ./.github/workflows/publish-beta.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      version: ${{ needs.windows.outputs.version }}
+
+  # PartiesSetup.exe embeds the signed build and the Beta manifest that lists
+  # it, so it exists only once publish-beta has signed that manifest. Without
+  # a production key nothing is signed, and setup is skipped rather than
+  # shipped with a payload that no launcher could verify.
+  setup:
+    needs: [windows, create-release, publish-beta]
+    if: needs.windows.outputs.update_layout == 'true'
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.windows.outputs.version }}
+      SIGNED: ${{ needs.publish-beta.outputs.signed }}
+    steps:
+      - name: Skip without a signed manifest
+        if: env.SIGNED != 'true'
+        run: echo "::notice::No Beta manifest was signed for $env:VERSION, so this release has no PartiesSetup-$env:VERSION.exe. See 'Set up the signing key the first time' in docs/releasing.md."
+
+      - name: Download the build's update layout
+        if: env.SIGNED == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: release-windows-update
+          path: update
+
+      - name: Download the setup carrier
+        if: env.SIGNED == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: release-windows-setup-carrier
+          path: carrier
+
+      - name: Download the signed manifest
+        if: env.SIGNED == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: release-windows-setup-manifest
+          path: manifest
+
+      - name: Pack PartiesSetup.exe
+        if: env.SIGNED == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force payload | Out-Null
+          Copy-Item "update/assets/PartiesLauncher-$env:VERSION.exe" payload/PartiesLauncher.exe
+          Copy-Item "update/assets/parties_client-$env:VERSION.exe" payload/parties_client.exe
+          Copy-Item "update/assets/Parties-$env:VERSION.exe" payload/Parties.exe
+          Copy-Item manifest/beta.manifest.json payload/manifest.json
+          $out = "$PWD/PartiesSetup-$env:VERSION.exe"
+          $pack = Start-Process carrier/PartiesSetup-carrier.exe -Wait -PassThru -NoNewWindow `
+            -ArgumentList "--pack=$PWD\payload", "--out=$out" -RedirectStandardError pack.err
+          Get-Content pack.err
+          if ($pack.ExitCode -ne 0) { throw "--pack failed with exit code $($pack.ExitCode)" }
+
+      - name: Sign PartiesSetup.exe
+        if: env.SIGNED == 'true'
+        shell: bash
+        run: |
+          exe="PartiesSetup-$VERSION.exe"
+          curl -sf -X POST \
+            -H "X-Sign-Token: ${{ secrets.HOME_CODE_SIGN_TOKEN }}" \
+            -H "CF-Access-Client-Id: ${{ secrets.HOME_CF_ACCESS_CLIENT_ID }}" \
+            -H "CF-Access-Client-Secret: ${{ secrets.HOME_CF_ACCESS_CLIENT_SECRET }}" \
+            --data-binary @"$exe" \
+            -o "${exe}.signed" \
+            "${{ secrets.HOME_CODE_SIGN_URL }}"
+          mv "${exe}.signed" "$exe"
+
+      - name: Verify the setup signature
+        if: env.SIGNED == 'true'
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature "PartiesSetup-$env:VERSION.exe"
+          if ($sig.Status -ne "Valid") { throw "Signature verification failed for PartiesSetup-$env:VERSION.exe: $($sig.Status)" }
+          Write-Host "Verified PartiesSetup-$env:VERSION.exe: $($sig.SignerCertificate.Subject)"
+
+      - name: Publish PartiesSetup.exe
+        if: env.SIGNED == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "PartiesSetup-$VERSION.exe" -R "$GITHUB_REPOSITORY" --clobber
+
+      # The legacy in-app updater downloads this zip from /releases/latest,
+      # extracts it with Expand-Archive, requires a valid Authenticode
+      # signature on its parties_client.exe and starts that with
+      # --update-cleanup. Putting the signed setup there under that name moves
+      # portable users onto the installer.
+      - name: Replace the legacy zip's client with the setup
+        if: env.SIGNED == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force legacy-zip | Out-Null
+          Copy-Item "PartiesSetup-$env:VERSION.exe" legacy-zip/parties_client.exe
+          $zip = "parties-client-windows-$env:GITHUB_REF_NAME.zip"
+          Compress-Archive -Path legacy-zip/parties_client.exe -DestinationPath $zip -Force
+          Expand-Archive $zip legacy-zip-check -Force
+          $sig = Get-AuthenticodeSignature legacy-zip-check/parties_client.exe
+          if ($sig.Status -ne "Valid") { throw "The legacy zip's parties_client.exe is not validly signed: $($sig.Status)" }
+          if ((Get-FileHash legacy-zip-check/parties_client.exe).Hash -ne (Get-FileHash "PartiesSetup-$env:VERSION.exe").Hash) {
+            throw "The legacy zip's parties_client.exe is not PartiesSetup-$env:VERSION.exe"
+          }
+          gh release upload "$env:GITHUB_REF_NAME" $zip -R "$env:GITHUB_REPOSITORY" --clobber

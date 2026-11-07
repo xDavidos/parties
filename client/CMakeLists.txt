@@ -58,6 +58,7 @@ set(CLIENT_COMMON_SOURCES
     src/lobby_model.cpp
     src/server_list_model.cpp
     src/settings.cpp
+    src/sqlite_file.cpp
     src/audio_engine.cpp
     src/voice_mixer.cpp
     src/miniaudio_impl.cpp
@@ -114,16 +115,18 @@ else()
         # Platform specific
         src/windows/main.cpp
         src/windows/app.cpp
+        src/windows/data_location.cpp
+        src/windows/legacy_import.cpp
         src/windows/system_diagnostics.cpp
         src/windows/stream_audio_capture.cpp
         src/windows/ui_manager.cpp
         src/windows/context_window_manager.cpp
         src/windows/win32_tray.cpp
+        src/windows/supervisor_link.cpp
+        src/windows/shell_identity.cpp
+        src/update_view.cpp
 
         # Parties application adapter over RmlUi's upstream Win32/DX12 backend
-
-        # Auto-updater (WinHTTP)
-        src/windows/auto_updater.cpp
 
         # Screen capture — DXGI
         src/windows/screen_capture.cpp
@@ -285,6 +288,7 @@ target_link_libraries(parties_client
     PRIVATE
         parties_encdec
         parties_common
+        parties_update_data
         rnnoise::rnnoise
         unofficial::sqlite3::sqlite3
         RmlUi::RmlUi
@@ -292,6 +296,9 @@ target_link_libraries(parties_client
         $<$<NOT:$<BOOL:${BUILD_IN_RETAIL}>>:RmlUi::Debugger>
         ${SPEEXDSP_LIBRARY}
 )
+if(WIN32)
+    target_link_libraries(parties_client PRIVATE parties_update_link)
+endif()
 
 if(APPLE)
     # Shared Apple frameworks
@@ -323,7 +330,6 @@ else()
             mfplat mfreadwrite mfuuid mf
             windowsapp
             dwmapi gdi32 shell32
-            winhttp wintrust crypt32
     )
 endif()
 

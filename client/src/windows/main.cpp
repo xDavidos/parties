@@ -1,6 +1,12 @@
 #include <client/app.h>
-#include <client/auto_updater.h>
+#include <client/data_location.h>
+#include <client/exit_codes.h>
+#include <client/legacy_import.h>
+#include <client/settings_schema.h>
+#include <client/sqlite_file.h>
+#include <client/supervisor_link.h>
 #include <client/win32_single_instance.h>
+#include <parties/update/build_info.h>
 #include <parties/version.h>
 #include <parties/crypto.h>
 #include <parties/net_common.h>
@@ -12,9 +18,11 @@
 #include <parties/thread_scheduling.h>
 
 #include "RmlUi_Platform_Win32.h"
+#include "shell_identity.h"
 #include "system_diagnostics.h"
 
 #include <dwmapi.h>
+#include <shellapi.h>
 #include <windowsx.h>
 #ifndef PARTIES_RETAIL
 #include <RmlUi/Debugger.h>
@@ -22,6 +30,10 @@
 
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <string>
+#include <system_error>
+#include <vector>
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -275,6 +287,52 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+static std::wstring widen(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    const int length = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    std::wstring wide(static_cast<size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), wide.data(), length);
+    return wide;
+}
+
+// Running without persistence would silently lose everything the user does,
+// so a data failure stops startup with an exit code the launcher understands.
+static int refuse_to_start(ExitCode code, const std::filesystem::path& where, const std::string& reason) {
+    LOG_ERROR("Refusing to start (exit code {}): {} ({})", static_cast<int>(code),
+              reason, utf8_path(where));
+    std::wstring text = code == ExitCode::DataTooNew
+        ? L"Your Parties data was saved by a newer version of Parties. Install the latest version to open it."
+        : L"Parties cannot start because it cannot open its data.";
+    if (!where.empty()) text += L"\n\nLocation: " + where.wstring();
+    text += L"\n\nReason: " + widen(reason);
+    MessageBoxW(nullptr, text.c_str(), L"Parties", MB_OK | MB_ICONERROR);
+    return static_cast<int>(code);
+}
+
+static constexpr int kInitFailed = static_cast<int>(ExitCode::InitFailed);
+
+static std::unique_ptr<SupervisorLink> connect_supervisor() {
+    int argc = 0;
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    std::vector<std::wstring> args;
+    for (int i = 1; argv && i < argc; ++i) args.emplace_back(argv[i]);
+    LocalFree(argv);
+    const auto version = parties::update::Version::parse(parties::APP_VERSION);
+    return SupervisorLink::from_args(args, version.value_or(parties::update::Version{}));
+}
+
+static int write_build_info(const char* path) {
+    const parties::update::BuildInfo info{
+        .version = parties::APP_VERSION,
+        .data_schema = static_cast<uint32_t>(schema::kCurrent.version),
+        .data_compat_floor = static_cast<uint32_t>(schema::kCurrent.compat_floor),
+    };
+    std::ofstream out(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
+    out << parties::update::format_build_info(info);
+    out.close();
+    return out ? 0 : 1;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Entry point
 // ═══════════════════════════════════════════════════════════════════════
@@ -283,7 +341,8 @@ int main(int argc, char* argv[]) {
     // Must be first: if launched as crashpad handler subprocess, run handler and exit.
     parties::crash_reporter_is_crashpad_handler(argc, argv);
 
-    if (AutoUpdater::handle_update_args(argc, argv)) return 1;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (std::strcmp(argv[i], "--write-build-info") == 0) return write_build_info(argv[i + 1]);
 
     Win32SingleInstance instance;
     bool allow_multiple_instances = false;
@@ -308,7 +367,7 @@ int main(int argc, char* argv[]) {
     if (instance_result == Win32SingleInstance::Result::Error) {
         MessageBoxW(nullptr, L"Unable to access the running Parties client.",
                     L"Parties", MB_OK | MB_ICONERROR);
-        return 1;
+        return kInitFailed;
     }
 
     parties::TimerResolutionGuard timer_resolution(1);
@@ -322,13 +381,43 @@ int main(int argc, char* argv[]) {
         LOG_WARN("Failed to request 1 ms Windows timer resolution");
     if (!main_priority_set)
         LOG_WARN("Failed to set the main thread to highest priority");
+    const DataLocationResult resolved = resolve_process_data_location();
+    if (!resolved.location)
+        return refuse_to_start(ExitCode::DataUnavailable, {}, resolved.error);
+    const DataLocation& data = *resolved.location;
 #ifdef SENTRY_DSN_VALUE
-    parties::crash_reporter_init(SENTRY_DSN_VALUE, argv[0]);
+    parties::crash_reporter_init(SENTRY_DSN_VALUE, argv[0], data.sentry_dir());
 #else
-    parties::crash_reporter_init(nullptr);
+    parties::crash_reporter_init(nullptr, nullptr, data.sentry_dir());
 #endif
     LOG_INFO("{} Client v{}", parties::APP_NAME, parties::APP_VERSION);
+    LOG_INFO("Data directory: {}", utf8_path(data.data_dir));
+    std::unique_ptr<SupervisorLink> supervisor = connect_supervisor();
     parties::alloctrack::start_reporting(10);
+
+#ifdef PARTIES_RETAIL
+    {
+        // Portable zip builds kept the database next to the exe or in whatever
+        // folder they were started from.
+        std::error_code ec;
+        std::vector<std::filesystem::path> legacy_dirs{std::filesystem::current_path(ec)};
+        wchar_t exe_path[32768]{};
+        const DWORD exe_length = GetModuleFileNameW(nullptr, exe_path, 32768);
+        if (exe_length > 0 && exe_length < 32768)
+            legacy_dirs.push_back(std::filesystem::path(exe_path).parent_path());
+        const LegacyImportResult imported = import_legacy_data(data, legacy_dirs);
+        if (imported.status == LegacyImportResult::Status::Failed)
+            return refuse_to_start(ExitCode::DataUnavailable, data.db_path(), imported.error);
+    }
+#endif
+
+    App app;
+    app.attach_supervisor(std::move(supervisor));
+    const Settings::OpenResult opened = app.open_data(data.settings_paths());
+    if (opened.status != Settings::OpenStatus::Ready)
+        return refuse_to_start(opened.status == Settings::OpenStatus::TooNew
+                                   ? ExitCode::DataTooNew : ExitCode::DataUnavailable,
+                               data.db_path(), opened.reason);
 
     // Per-monitor DPI awareness (must be set before creating any windows)
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -336,20 +425,20 @@ int main(int argc, char* argv[]) {
 
     if (!parties::crypto_init()) {
         LOG_ERROR("Failed to initialize crypto");
-        return 1;
+        return kInitFailed;
     }
 
     if (!parties::net_init()) {
         LOG_ERROR("Failed to initialize networking");
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     if (!parties::quic_init()) {
         LOG_ERROR("Failed to initialize QUIC");
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     // Register window class
@@ -367,7 +456,7 @@ int main(int argc, char* argv[]) {
         LOG_ERROR("Failed to register window class");
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     // Create borderless window. WS_CAPTION enables DWM minimize/restore
@@ -386,7 +475,7 @@ int main(int argc, char* argv[]) {
         UnregisterClassW(window_class, wc.hInstance);
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
     // Enable DWM shadow on borderless window
@@ -394,7 +483,6 @@ int main(int argc, char* argv[]) {
     DwmExtendFrameIntoClientArea(hwnd, &margins);
 
     // Initialize application
-    App app;
     SetPropW(hwnd, L"App", &app);
 
     if (!app.init(hwnd)) {
@@ -404,9 +492,10 @@ int main(int argc, char* argv[]) {
         UnregisterClassW(window_class, wc.hInstance);
         parties::net_cleanup();
         parties::crypto_cleanup();
-        return 1;
+        return kInitFailed;
     }
 
+    apply_shell_identity(hwnd);
     ShowWindow(hwnd, SW_SHOW);
 
     // Force frame recalculation now that the app is initialized.
@@ -448,6 +537,7 @@ int main(int argc, char* argv[]) {
     // Cleanup (order matters: app before window destruction)
     SetPropW(hwnd, L"App", nullptr);
     app.shutdown();
+    clear_shell_identity(hwnd);
     DestroyWindow(hwnd);
     UnregisterClassW(window_class, wc.hInstance);
     parties::quic_cleanup();

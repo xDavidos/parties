@@ -21,16 +21,21 @@ if (-not (Test-Path -LiteralPath $designer)) {
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 
 $lobbyScenarios = @(
-    "onboarding", "recovery", "launcher", "party-modal", "room",
+    "onboarding", "recovery", "recovery-save-failed", "launcher", "party-modal", "room",
     "stream-single", "stream-fps-overflow", "streams", "member", "settings",
     "settings-select-open", "settings-screen-share", "settings-hotkeys",
-    "settings-account", "share", "audio-share", "chat", "chat-segment-churn"
+    "settings-account", "share", "audio-share", "chat", "chat-segment-churn",
+    "update-downloading", "update-ready", "update-rolled-back",
+    "update-data-restored", "update-withdrawn", "update-restore-failed", "settings-updates", "settings-updates-pinned",
+    "settings-updates-restore", "settings-updates-impossible", "settings-updates-feed-stale",
+    "settings-updates-blocked", "settings-updates-downloading"
 )
 if ($Profile -eq "iphone-17-pro") {
     # Sending a screen or application is unavailable on iOS, so those two
     # desktop-only picker fixtures intentionally do not belong in this profile.
     $lobbyScenarios = $lobbyScenarios | Where-Object {
-        $_ -ne "share" -and $_ -ne "audio-share"
+        $_ -ne "share" -and $_ -ne "audio-share" -and
+        -not $_.StartsWith("update-") -and -not $_.StartsWith("settings-updates")
     }
 }
 foreach ($scenario in $lobbyScenarios) {
