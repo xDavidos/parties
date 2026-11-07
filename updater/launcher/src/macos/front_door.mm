@@ -62,7 +62,8 @@ const char* exit_kind_name(ExitKind kind) {
     return "?";
 }
 
-void launch_front(const std::string& bundle, const std::vector<std::string>& arguments, bool new_instance) {
+void launch_front(const std::string& bundle, const std::vector<std::string>& arguments, bool new_instance,
+                  bool wait) {
     NSWorkspaceOpenConfiguration* configuration = [NSWorkspaceOpenConfiguration configuration];
     NSMutableArray<NSString*>* args = [NSMutableArray arrayWithCapacity:arguments.size()];
     for (const std::string& arg : arguments) [args addObject:@(arg.c_str())];
@@ -83,6 +84,7 @@ void launch_front(const std::string& bundle, const std::vector<std::string>& arg
     }
     NSURL* url = [NSURL fileURLWithPath:@(bundle.c_str()) isDirectory:YES];
     const auto started = std::chrono::steady_clock::now();
+    dispatch_semaphore_t answered = dispatch_semaphore_create(0);
     std::fprintf(stderr, "[front-door] NSWorkspace open createsNewApplicationInstance=%s %s\n",
                  new_instance ? "YES" : "NO", bundle.c_str());
     [NSWorkspace.sharedWorkspace openApplicationAtURL:url
@@ -95,7 +97,9 @@ void launch_front(const std::string& bundle, const std::vector<std::string>& arg
         else
             std::fprintf(stderr, "[front-door] NSWorkspace failed after %.0f ms: %s\n", ms,
                          error.description.UTF8String);
+        dispatch_semaphore_signal(answered);
     }];
+    if (wait) dispatch_semaphore_wait(answered, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
 }
 
 std::optional<std::string> copy_to_applications(const std::string& bundle) {

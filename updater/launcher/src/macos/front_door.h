@@ -26,9 +26,11 @@
 namespace parties::update::launcher::macos {
 
 // Asks LaunchServices to start the host bundle with these arguments. Returns
-// at once; the front announces itself on the front door. What LaunchServices
-// answered is logged.
-void launch_front(const std::string& bundle, const std::vector<std::string>& arguments, bool new_instance);
+// at once, or with `wait` once LaunchServices answered (10 s at most), which a
+// process about to exit needs: its request dies with it. The front announces
+// itself on the front door. What LaunchServices answered is logged.
+void launch_front(const std::string& bundle, const std::vector<std::string>& arguments, bool new_instance,
+                  bool wait = false);
 
 // Copies the bundle to /Applications, else ~/Applications, moving a
 // Parties.app already there to the Trash. The copy's path, or nullopt.

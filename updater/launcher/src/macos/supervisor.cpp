@@ -348,7 +348,7 @@ bool Supervisor::moved_to_applications(std::vector<std::string> front_arguments)
         if (auto moved = copy_to_applications(options_.host_bundle.string())) {
             log("moved to {}", *moved);
             front_arguments.push_back("--after=" + std::to_string(getpid()));
-            launch_front(*moved, front_arguments, true);
+            launch_front(*moved, front_arguments, true, true);
             return true;
         }
     }
