@@ -1280,13 +1280,14 @@ std::vector<BootScenario> boot_scenarios() {
                            }
                        });
                        if (!killed) return fail(label, "the app never loaded under a booted launcher");
+                       // The lost front may exit before LaunchServices answers its
+                       // relaunch, so the --boot-round=1 front is the proof.
                        const auto lost = fronts_with(w, "[host] launcher lost");
-                       if (lost.empty() || !has(lost.front().text, "[host] failed boot recorded") ||
-                           !has(lost.front().text, "relaunched with --boot-round=1"))
-                           fail(label, "the front did not count the lost launcher and relaunch itself with --boot-round=1");
+                       if (lost.empty() || !has(lost.front().text, "[host] failed boot recorded"))
+                           fail(label, "the front did not count the lost launcher as a failed boot");
                        const auto round_1 = fronts_with(w, "boot round 1");
                        if (round_1.empty() || !has(round_1.front().text, "[host] launcher pid="))
-                           fail(label, "the --boot-round=1 front did not boot a launcher");
+                           fail(label, "no --boot-round=1 front booted a launcher");
                        expect_supervised(w, label, w.a);
                    }});
 
