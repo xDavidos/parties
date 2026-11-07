@@ -67,11 +67,27 @@ jobs:
       - name: Install Ninja
         run: choco install ninja -y
 
+      # Debug compiles the update testing hooks so the stub and launcher e2e tests run;
+      # release proves they compile out of shipped binaries.
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }} -DPARTIES_UPDATE_TESTING=${{ matrix.preset == 'default' && 'ON' || 'OFF' }}
 
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Check boot stub budget and links
+        run: pwsh -NoProfile -File tools/update/check_boot_stub.ps1 -BuildDir ${{ matrix.preset == 'release' && 'build-release' || 'build' }}
+
+      # Only the user-data tests: most other tests need a GPU or audio devices.
+      - name: Run data safety tests
+        run: ctest --test-dir ${{ matrix.preset == 'release' && 'build-release' || 'build' }} -R "^parties_data_" --output-on-failure --no-tests=error
+
+      - name: Run update core tests
+        run: ctest --test-dir ${{ matrix.preset == 'release' && 'build-release' || 'build' }} -R "^update_" -E "^update_e2e$" -LE gpu --output-on-failure --no-tests=error
+
+      - name: Run update launcher e2e
+        if: matrix.preset == 'default'
+        run: ctest --test-dir build -R "^update_e2e$" --output-on-failure --no-tests=error
 
       - name: Upload client artifact
         if: matrix.preset == 'release'
@@ -128,18 +144,51 @@ jobs:
       - name: Install Ninja
         run: brew install ninja
 
+      # Debug compiles the update testing hooks and starts Sentry against a dead
+      # local DSN, so the probe runs the payload the way retail does. Release
+      # is the retail configuration, which links Sparkle.
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: >-
+          cmake --preset ${{ matrix.preset }} -DENABLE_SENTRY=ON
+          ${{ matrix.preset == 'macos-arm64-release' && '-DBUILD_IN_RETAIL=ON' || '-DPARTIES_UPDATE_TESTING=ON -DSENTRY_DSN_CLIENT=http://probe@127.0.0.1:9/1' }}
 
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Check host budget and payload loading
+        run: bash tools/update/check_host.sh
+
+      - name: Check the retail payload links Sparkle
+        if: matrix.preset == 'macos-arm64-release'
+        run: |
+          app=build-macos-release/updater/host/Parties.app
+          otool -L "$app/Contents/Frameworks/PartiesClient.dylib" | grep -F '@rpath/Sparkle.framework/Versions/B/Sparkle'
+          test -x "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
+
+      - name: Run update core and data safety tests
+        run: ctest --test-dir ${{ matrix.preset == 'macos-arm64-release' && 'build-macos-release' || 'build-macos' }} -R "^(update_|parties_data_)" --output-on-failure --no-tests=error
+
+      - name: Host payload probe
+        if: matrix.preset == 'macos-arm64-debug'
+        run: bash tools/update/host_payload_probe.sh build-macos/updater/host/Parties.app client/res/Parties.entitlements "$RUNNER_TEMP/host-payload-probe"
+
+      - name: Upload host payload probe logs
+        if: always() && matrix.preset == 'macos-arm64-debug'
+        uses: actions/upload-artifact@v7
+        with:
+          name: host-payload-probe
+          path: |
+            ${{ runner.temp }}/host-payload-probe/*.log
+            ${{ runner.temp }}/host-payload-probe/*.txt
+            ${{ runner.temp }}/host-payload-probe/*.png
+          if-no-files-found: ignore
 
       - name: Upload client artifact
         if: matrix.preset == 'macos-arm64-release'
         uses: actions/upload-artifact@v7
         with:
           name: parties-client-macos
-          path: build-macos-release/client/parties_client.app
+          path: build-macos-release/updater/host/Parties.app
 
   # ── Linux (server only, gcc) ────────────────────────────────────────────────
   linux:

@@ -5,6 +5,7 @@
 
 #import "PartiesAppDelegate.h"
 #import "context_menu_macos.h"
+#include "mac_runtime.h"
 #import "PartiesStatusItemController.h"
 #import "screen_capture_macos.h"
 #import <encdec/apple/video_encoder_macos.h>
@@ -75,6 +76,97 @@ extern void macos_updater_check_in_background();
 using namespace parties;
 using namespace parties::client;
 using namespace parties::protocol;
+
+#ifdef PARTIES_UPDATE_TESTING
+#include <cstdlib>
+#include <unistd.h>
+
+// Testing builds print the health milestones that tools/update/host_payload_probe.sh
+// asserts. With PARTIES_TEST_EXIT_AFTER_HEALTHY_MS set, the app quits through
+// terminate: that long after it first reports healthy.
+namespace test_health {
+
+bool g_lobby_loaded = false;
+bool g_rendered = false;  // a frame reached the screen, or the view was paused
+bool g_reported = false;
+uint64_t g_draws = 0;
+uint64_t g_presented = 0;
+uint64_t g_dropped = 0;
+uint64_t g_gpu_errors = 0;
+
+void report_if_healthy()
+{
+    if (g_reported || !g_lobby_loaded || !g_rendered) return;
+    g_reported = true;
+    std::fprintf(stderr, "[update-testing] healthy pid=%d\n", getpid());
+    if (const char* delay = std::getenv("PARTIES_TEST_EXIT_AFTER_HEALTHY_MS")) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, std::atoll(delay) * (int64_t)NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            std::fprintf(stderr, "[update-testing] quitting: draws=%llu presented=%llu dropped=%llu gpu_errors=%llu\n",
+                         (unsigned long long)g_draws, (unsigned long long)g_presented,
+                         (unsigned long long)g_dropped, (unsigned long long)g_gpu_errors);
+            [NSApp terminate:nil];
+        });
+    }
+}
+
+// Until healthy, says every 5 s whether the main thread runs, the view draws, and
+// the window server composites the window.
+void report_waiting(MTKView* view)
+{
+    if (g_reported) return;
+    NSWindow* window = view.window;
+    std::fprintf(stderr, "[update-testing] waiting: draws=%llu presented=%llu dropped=%llu gpu_errors=%llu paused=%d "
+                 "window_visible=%d occlusion_visible=%d app_active=%d display_asleep=%d drawable=%.0fx%.0f\n",
+                 (unsigned long long)g_draws, (unsigned long long)g_presented, (unsigned long long)g_dropped,
+                 (unsigned long long)g_gpu_errors,
+                 view.paused, window.visible, (window.occlusionState & NSWindowOcclusionStateVisible) != 0,
+                 NSApp.active, CGDisplayIsAsleep(CGMainDisplayID()), view.drawableSize.width,
+                 view.drawableSize.height);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * (int64_t)NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        report_waiting(view);
+    });
+}
+
+void lobby_loaded(MTKView* view)
+{
+    g_lobby_loaded = true;
+    std::fprintf(stderr, "[update-testing] lobby loaded gpu=\"%s\"\n", view.device.name.UTF8String);
+    report_if_healthy();
+    report_waiting(view);
+}
+
+void rendered(const char* how)
+{
+    if (g_rendered) return;
+    g_rendered = true;
+    std::fprintf(stderr, "[update-testing] %s\n", how);
+    report_if_healthy();
+}
+
+// presentedTime stays 0 for a drawable that never reached the screen, and also
+// for every drawable on the paravirtual GPU of CI runners, whose screen shows
+// them. A run of frames the GPU completed in an unoccluded window counts there.
+void drawable_finished(CFTimeInterval presented_time, bool window_visible)
+{
+    if (presented_time > 0) {
+        if (g_presented++ == 0) rendered("frame presented");
+        return;
+    }
+    if (g_dropped++ == 0)
+        std::fprintf(stderr, "[update-testing] first drawable dropped without presenting\n");
+    if (g_dropped >= 60 && g_presented == 0 && g_gpu_errors == 0 && window_visible)
+        rendered("frames completed in a visible window, presentedTime unavailable");
+}
+
+void command_buffer_finished(MTLCommandBufferStatus status)
+{
+    if (status != MTLCommandBufferStatusCompleted && g_gpu_errors++ == 0)
+        std::fprintf(stderr, "[update-testing] first command buffer failed: status=%d\n", (int)status);
+}
+
+} // namespace test_health
+#endif
 
 static std::string macos_ui_fixture_argument()
 {
@@ -427,9 +519,7 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
     }
 
     // ── Settings path ─────────────────────────────────────────────────────
-    NSString* appSupport = [NSSearchPathForDirectoriesInDomains(
-        NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-    NSString* dir = [appSupport stringByAppendingPathComponent:@"Parties"];
+    NSString* dir = @(parties::client::macos::host().data_dir);
     [[NSFileManager defaultManager] createDirectoryAtPath:dir
                                 withIntermediateDirectories:YES
                                                  attributes:nil
@@ -623,7 +713,14 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
         NSLog(@"[Parties] Loaded macOS UI fixture: %s", _previewScenario.c_str());
     } else {
         // ── Init AppCore ──────────────────────────────────────────────────
-        if (!_core.init(std::string(dbPath.UTF8String), std::move(bridge), _rmlContext)) {
+        const SettingsPaths dataPaths{std::filesystem::path(dbPath.UTF8String),
+                                      std::filesystem::path(parties::client::macos::host().backups_dir)};
+        const Settings::OpenResult opened = _core.settings_.open(dataPaths);
+        if (opened.status != Settings::OpenStatus::Ready) {
+            NSLog(@"[Parties] Cannot open data at %s: %s", dbPath.UTF8String, opened.reason.c_str());
+            return;
+        }
+        if (!_core.init(std::move(bridge), _rmlContext)) {
             NSLog(@"[Parties] AppCore init failed");
             return;
         }
@@ -659,6 +756,9 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
         _doc->SetClass("platform-macos", true);
         _doc->SetClass("platform-desktop", true);
         _doc->Show();
+#ifdef PARTIES_UPDATE_TESTING
+        test_health::lobby_loaded(_metalView);
+#endif
         if (_previewMode) {
             ApplyUIFixtureDocument(_doc, _previewScenario);
         }
@@ -758,11 +858,17 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
         _contextMenus->Close();
     if (_metalView.paused == visible)
         _metalView.paused = !visible;
+#ifdef PARTIES_UPDATE_TESTING
+    if (!visible) test_health::rendered("rendering suspended");
+#endif
 }
 
 - (void)drawInMTKView:(MTKView*)view
 {
     if (!_backendInitialized || !_rmlContext || !_commandQueue) return;
+#ifdef PARTIES_UPDATE_TESTING
+    test_health::g_draws++;
+#endif
 
     // Update FPS + ping in titlebar (once per second)
     _fpsFrameCount++;
@@ -803,6 +909,19 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
             dispatch_async(dispatch_get_main_queue(), ^{ [self showPreviewNativeUI]; });
         }];
     }
+#ifdef PARTIES_UPDATE_TESTING
+    [view.currentDrawable addPresentedHandler:^(id<MTLDrawable> drawable) {
+        const CFTimeInterval presented_time = drawable.presentedTime;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            test_health::drawable_finished(presented_time,
+                                           (view.window.occlusionState & NSWindowOcclusionStateVisible) != 0);
+        });
+    }];
+    [buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        const MTLCommandBufferStatus status = completed.status;
+        dispatch_async(dispatch_get_main_queue(), ^{ test_health::command_buffer_finished(status); });
+    }];
+#endif
     [buffer presentDrawable:view.currentDrawable];
     [buffer commit];
 }

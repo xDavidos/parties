@@ -27,6 +27,7 @@ enum class SettingsSection {
     Hotkeys,
     AccountKeys,
     Camera,
+    Updates,
 };
 
 class DocumentRouter {

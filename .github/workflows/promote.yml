@@ -1,0 +1,46 @@
+name: Promote to Stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to promote, A.B.C.D (its tag is vA.B.C.D)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  tool:
+    uses: ./.github/workflows/manifest-tool.yml
+    permissions:
+      contents: read
+      packages: write
+
+  promote:
+    needs: tool
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    environment: update-signing
+    concurrency:
+      group: update-channels
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: manifest-tool
+          path: tool
+
+      - name: Publish the Stable manifest and mark the release latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOL: tool/parties_manifest_tool.exe
+          VERSION: ${{ inputs.version }}
+          PARTIES_UPDATE_KEY: ${{ secrets.PARTIES_UPDATE_KEY }}
+          PARTIES_UPDATE_KEY_NEXT: ${{ secrets.PARTIES_UPDATE_KEY_NEXT }}
+        run: bash tools/release/channels.sh promote "$VERSION"
