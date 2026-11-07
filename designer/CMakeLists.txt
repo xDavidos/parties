@@ -18,6 +18,7 @@ set(DESIGNER_SOURCES
 	${CMAKE_SOURCE_DIR}/client/src/diagnostics_graph_element.cpp
 	${CMAKE_SOURCE_DIR}/client/src/diagnostics_model.cpp
 	${CMAKE_SOURCE_DIR}/client/src/video_element.cpp
+	${CMAKE_SOURCE_DIR}/client/src/update_view.cpp
 )
 
 add_executable(rmlui_designer ${DESIGNER_SOURCES})
@@ -32,6 +33,7 @@ target_link_libraries(rmlui_designer PRIVATE
     RmlUi::RmlUi
     RmlUi::Debugger
     parties_rmlui_dx12_backend
+    parties_update_link
     d3d12 dxgi d3dcompiler dcomp dwmapi
 )
 
@@ -83,6 +85,16 @@ if(BUILD_TESTING)
             --size 1440x900
             --frames 5
             --screenshot "${CMAKE_BINARY_DIR}/ui-designer-recovery.bmp"
+    )
+    add_test(
+        NAME parties_ui_designer_recovery_save_failed
+        COMMAND rmlui_designer
+            "${CMAKE_SOURCE_DIR}/client/ui/lobby.rml"
+            --asset-dir "${CMAKE_SOURCE_DIR}/client/ui"
+            --fixture recovery-save-failed
+            --size 1440x900
+            --frames 5
+            --screenshot "${CMAKE_BINARY_DIR}/ui-designer-recovery-save-failed.bmp"
     )
     add_test(
         NAME parties_ui_designer_member
@@ -264,4 +276,19 @@ if(BUILD_TESTING)
             --frames 5
             --screenshot "${CMAKE_BINARY_DIR}/ui-designer-stream-fps-overflow.bmp"
     )
+    foreach(scenario update-downloading update-ready update-rolled-back
+            update-data-restored update-withdrawn update-restore-failed settings-updates settings-updates-pinned settings-updates-restore
+            settings-updates-impossible settings-updates-feed-stale settings-updates-blocked
+            settings-updates-downloading)
+        add_test(
+            NAME parties_ui_designer_${scenario}
+            COMMAND rmlui_designer
+                "${CMAKE_SOURCE_DIR}/client/ui/lobby.rml"
+                --asset-dir "${CMAKE_SOURCE_DIR}/client/ui"
+                --fixture ${scenario}
+                --size 1440x900
+                --frames 5
+                --screenshot "${CMAKE_BINARY_DIR}/ui-designer-${scenario}.bmp"
+        )
+    endforeach()
 endif()

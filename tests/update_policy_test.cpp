@@ -1,0 +1,313 @@
+#include <parties/update/probation.h>
+#include <parties/update/update_policy.h>
+
+#include <parties/crypto.h>
+
+#include <chrono>
+#include <iostream>
+#include <string>
+
+using namespace parties::update;
+using namespace std::chrono;
+
+namespace {
+
+bool fail(const std::string& msg) {
+    std::cerr << "update_policy_test: " << msg << "\n";
+    return false;
+}
+
+Version v(const char* text) { return *Version::parse(text); }
+
+BuildEntry entry(const char* version, uint32_t schema, uint32_t floor, uint32_t min_link = 1, uint32_t link = 3) {
+    BuildEntry b;
+    b.version = v(version);
+    b.data_schema = schema;
+    b.data_compat_floor = floor;
+    b.link_protocol = link;
+    b.min_supported_launcher_link = min_link;
+    // Distinct digests per version, so each version is its own build.
+    size_t k = b.version.parts[1] * 7 + b.version.parts[2];
+    for (auto name : {kWindowsClient.launcher_file, kWindowsClient.app_file}) {
+        char fill = "0123456789abcdef"[k++ % 16];
+        b.files.push_back({std::string(name), 100, *Sha256::from_hex(std::string(64, fill)),
+                           {"https://github.com/emcifuntik/parties/releases/download/x"}});
+    }
+    return b;
+}
+
+const SigningKey kKey = [] {
+    SigningKey k{"test"};
+    if (!parties::random_bytes(k.secret_key.data(), 32) || !parties::derive_pubkey(k.secret_key, k.public_key))
+        std::abort();
+    return k;
+}();
+
+VerifiedManifest manifest(Channel channel, std::vector<BuildEntry> builds, std::vector<Version> revoked = {}) {
+    ManifestPayload p;
+    p.product = kWindowsClient.id;
+    p.channel = channel;
+    p.serial = 1;
+    p.issued_at = sys_days{2026y / October / 31};
+    p.expires_at = p.issued_at + days{45};
+    p.builds = std::move(builds);
+    p.revoked = std::move(revoked);
+    std::string text = write_payload(p);
+    auto env = sign_manifest({reinterpret_cast<const uint8_t*>(text.data()), text.size()}, std::vector{kKey});
+    PinnedKey pin{kKey.key_id, kKey.public_key};
+    auto m = verify_manifest({reinterpret_cast<const uint8_t*>(env->data()), env->size()}, {&pin, 1}, channel, kWindowsClient);
+    if (!m) std::abort();
+    return *m;
+}
+
+SupervisorState installed(const BuildEntry& good, Channel channel = Channel::Stable) {
+    return initial_state(BuildRecord::from_entry(good, kWindowsClient), channel);
+}
+
+const BuildEntry k152 = entry("1.5.2.0", 2, 1);
+const BuildEntry k160 = entry("1.6.0.0", 3, 1);
+const BuildEntry k161 = entry("1.6.1.0", 3, 1);
+const BuildEntry k170 = entry("1.7.0.0", 4, 4, 3);
+
+constexpr DataInfo kData2{2, 1};
+constexpr DataInfo kData3{3, 1};
+constexpr DataInfo kData3Floor3{3, 3};
+constexpr Runner kRunner{.launcher_protocol = 2, .host_abi = 0};
+
+template <class T>
+const T* as(const UpdateDecision& d) { return std::get_if<T>(&d.plan); }
+
+bool stages(const UpdateDecision& d, const BuildEntry& e, StageReason reason, const std::string& what) {
+    auto* s = as<StageBuild>(d);
+    if (!s) return fail(what + ": expected StageBuild, got plan #" + std::to_string(d.plan.index()));
+    if (s->entry.version != e.version || s->reason != reason) return fail(what + ": staged " + s->entry.version.to_string());
+    return true;
+}
+
+bool test_follow() {
+    bool ok = true;
+    auto s = installed(k152);
+    auto m = manifest(Channel::Stable, {k152, k160});
+    ok &= stages(plan_update(s, m, kRunner, kData2), k160, StageReason::Newer, "newer build on the channel");
+    if (!as<NothingToDo>(plan_update(installed(k160), m, kRunner, kData3))) ok &= fail("up to date must do nothing");
+    SupervisorState staged = s;
+    staged.builds.push_back(BuildRecord::from_entry(k160, kWindowsClient));
+    staged.activation = Staged{k160.id(), std::nullopt};
+    if (!as<NothingToDo>(plan_update(staged, m, kRunner, kData2))) ok &= fail("an already staged build is staged again");
+    auto newer = manifest(Channel::Stable, {k152, k160, k161});
+    ok &= stages(plan_update(staged, newer, kRunner, kData2), k161, StageReason::Newer,
+                 "a newer build replaces the staged one");
+    SupervisorState busy = staged;
+    busy.activation = Probation{k160.id(), k152.id(), std::nullopt, 0, false};
+    auto* blocked = as<Blocked>(plan_update(busy, newer, kRunner, kData2));
+    if (!blocked || blocked->reason != BlockReason::Busy) ok &= fail("nothing is staged during probation");
+    return ok;
+}
+
+bool test_switch_to_older_channel_pins() {
+    bool ok = true;
+    auto s = installed(k160, Channel::Beta);
+    auto stable = manifest(Channel::Stable, {k152});
+    auto plan = plan_channel_switch(s, stable, kRunner, kData3);
+    auto* pinned = std::get_if<StayPinned>(&plan);
+    if (!pinned || pinned->until != k160.version) return fail("switching to an older channel must pin at the installed build");
+    if (!pinned->downgrade || pinned->downgrade->entry.version != k152.version ||
+        pinned->downgrade->data_effect != DataEffect::ReadsAsIs)
+        ok &= fail("an additive schema makes the downgrade compatible");
+    if (intent_for(plan) != ChannelIntent{PinnedUntilAtLeast{k160.version}}) ok &= fail("pinned intent");
+
+    s.channel = Channel::Stable;
+    s.intent = intent_for(plan);
+    auto* report = as<ReportPinned>(plan_update(s, stable, kRunner, kData3));
+    if (!report || report->until != k160.version || report->channel_newest != k152.version)
+        ok &= fail("a pinned user is told what they wait for, and nothing is staged");
+    if (!report || !report->downgrade || report->downgrade->entry.version != k152.version ||
+        report->downgrade->data_effect != DataEffect::ReadsAsIs)
+        ok &= fail("a pinned user is offered switch now onto the channel's newest older build");
+    auto* restoring = as<ReportPinned>(plan_update(s, manifest(Channel::Stable, {entry("1.5.1.0", 1, 1)}), kRunner,
+                                                   DataInfo{3, 3}));
+    if (!restoring || !restoring->downgrade || restoring->downgrade->data_effect != DataEffect::NeedsRestore)
+        ok &= fail("switch now onto data the older build cannot read restores a backup");
+
+    auto caught_up = plan_update(s, manifest(Channel::Stable, {k152, k160}), kRunner, kData3);
+    if (!as<NothingToDo>(caught_up) || caught_up.new_intent != ChannelIntent{Follow{}})
+        ok &= fail("the pin lifts when the channel reaches it");
+    auto passed = plan_update(s, manifest(Channel::Stable, {k152, k160, k161}), kRunner, kData3);
+    ok &= stages(passed, k161, StageReason::Newer, "a pinned user follows once the channel passes the pin");
+    if (passed.new_intent != ChannelIntent{Follow{}}) ok &= fail("pin lift alongside staging");
+
+    if (!std::holds_alternative<FollowNow>(plan_channel_switch(installed(k152), manifest(Channel::Beta, {k152, k160}),
+                                                               kRunner, kData2)))
+        ok &= fail("switching to a newer channel follows at once");
+    return ok;
+}
+
+bool test_wait_during_a_trial() {
+    // Trying Beta's 1.6.1 over 1.6.0, the user picks Stable, which lists only 1.6.0.
+    SupervisorState s = installed(k160, Channel::Beta);
+    s.builds.push_back(BuildRecord::from_entry(k161, kWindowsClient));
+    s.activation = Probation{k161.id(), k160.id(), std::nullopt, 0, false};
+    s.operation = Running{k161.id(), true, 0};
+    const Context ctx{kData3, Policy{}};
+    s = step(s, ChannelIntentSet{Channel::Stable, wait_intent(s)}, ctx).next;
+    s = step(s, ConfirmTimerElapsed{Policy{}.confirm_uptime_s}, ctx).next;
+    if (s.good != k161.id()) return fail("the trial still passes after the pick");
+    auto* report = as<ReportPinned>(plan_update(s, manifest(Channel::Stable, {k160}), kRunner, kData3));
+    if (!report || report->until != k161.version)
+        return fail("picking a channel during a trial waits on the version under trial");
+    if (!report->downgrade || report->downgrade->entry.version != k160.version)
+        return fail("switch now still offers the channel's build");
+    return true;
+}
+
+bool test_downgrade_offers() {
+    bool ok = true;
+    auto s = installed(k170, Channel::Beta);
+    auto stable = manifest(Channel::Stable, {k152, k161});
+    auto incompatible = std::get<StayPinned>(plan_channel_switch(s, stable, Runner{3, 0}, DataInfo{4, 4}));
+    if (!incompatible.downgrade || incompatible.downgrade->data_effect != DataEffect::NeedsRestore)
+        ok &= fail("a raised floor makes the downgrade a backup restore");
+    auto compatible = std::get<StayPinned>(plan_channel_switch(installed(k161), manifest(Channel::Stable, {k152}),
+                                                               kRunner, kData3));
+    if (!compatible.downgrade || compatible.downgrade->data_effect != DataEffect::ReadsAsIs)
+        ok &= fail("floor 1 data is readable by the older build");
+    auto none = std::get<StayPinned>(plan_channel_switch(installed(k161), manifest(Channel::Stable, {}), kRunner, kData3));
+    if (none.downgrade) ok &= fail("an empty channel offers nothing");
+
+    auto offer = plan_update(installed(k161), manifest(Channel::Stable, {k152}), kRunner, kData3Floor3);
+    auto* o = as<OfferDowngrade>(offer);
+    if (!o || o->offer.data_effect != DataEffect::NeedsRestore) ok &= fail("an older channel is only an offer");
+    return ok;
+}
+
+bool test_revoked_good_moves() {
+    bool ok = true;
+    auto s = installed(k160);
+    ok &= stages(plan_update(s, manifest(Channel::Stable, {k152, k160}, {k160.version}), kRunner, kData3), k152,
+                 StageReason::LeaveRevoked, "revoked good moves to the newest compatible older build");
+    ok &= stages(plan_update(s, manifest(Channel::Stable, {k152, k160, k161}, {k160.version}), kRunner, kData3),
+                 k161, StageReason::LeaveRevoked, "revoked good prefers a newer fix");
+    auto* restore = as<OfferDowngrade>(plan_update(s, manifest(Channel::Stable, {k152, k160}, {k160.version}),
+                                                   kRunner, kData3Floor3));
+    if (!restore || restore->offer.entry.version != k152.version || restore->offer.data_effect != DataEffect::NeedsRestore)
+        ok &= fail("leaving a revoked good by restoring a backup is only offered");
+    auto* none = as<Blocked>(plan_update(s, manifest(Channel::Stable, {k160}, {k160.version}), kRunner, kData3));
+    if (!none || none->reason != BlockReason::NoCompatibleBuild)
+        ok &= fail("a revoked good with nothing else to run must block");
+    SupervisorState on_disk = s;
+    on_disk.builds.push_back(BuildRecord::from_entry(k152, kWindowsClient));
+    on_disk.builds.back().verdict = Proven{};
+    on_disk.previous_good = k152.id();
+    ok &= stages(plan_update(on_disk, manifest(Channel::Stable, {k152}, {k160.version}), kRunner, kData3), k152,
+                 StageReason::LeaveRevoked, "revoked good moves to previous_good, which is already on disk");
+    SupervisorState pinned = s;
+    pinned.intent = PinnedUntilAtLeast{v("1.9.0.0")};
+    ok &= stages(plan_update(pinned, manifest(Channel::Stable, {k152, k160}, {k160.version}), kRunner, kData3), k152,
+                 StageReason::LeaveRevoked, "revocation overrides a pin");
+    ok &= stages(plan_update(installed(k152), manifest(Channel::Stable, {k152, k160, k161}, {k161.version}), kRunner,
+                             kData2),
+                 k160, StageReason::Newer, "a revoked newer build is skipped");
+    return ok;
+}
+
+bool test_launcher_protocol_gate() {
+    bool ok = true;
+    auto s = installed(k161);
+    auto m = manifest(Channel::Stable, {k161, k170});
+    auto* blocked = as<Blocked>(plan_update(s, m, kRunner, kData3));
+    if (!blocked || blocked->reason != BlockReason::LauncherTooOld || blocked->waiting_for != k170.version)
+        ok &= fail("a build the running launcher cannot host must not be staged");
+    ok &= stages(plan_update(s, m, Runner{3, 0}, kData3), k170, StageReason::Newer, "a capable launcher stages it");
+    auto between = entry("1.6.5.0", 3, 1);
+    ok &= stages(plan_update(s, manifest(Channel::Stable, {k161, between, k170}), kRunner, kData3), between,
+                 StageReason::Newer, "the newest hostable build is staged instead");
+    return ok;
+}
+
+bool test_host_abi_gate() {
+    bool ok = true;
+    constexpr Runner kHost1{.launcher_protocol = 2, .host_abi = 1};
+    constexpr Runner kHost2{.launcher_protocol = 2, .host_abi = 2};
+    BuildEntry needs_host2 = entry("1.7.1.0", 3, 1);
+    needs_host2.min_host_abi = 2;
+    auto s = installed(k161);
+    auto m = manifest(Channel::Stable, {k161, needs_host2});
+    auto* blocked = as<Blocked>(plan_update(s, m, kHost1, kData3));
+    if (!blocked || blocked->reason != BlockReason::HostTooOld || blocked->waiting_for != needs_host2.version)
+        ok &= fail("a build the installed host cannot load must not be staged");
+    ok &= stages(plan_update(s, m, kHost2, kData3), needs_host2, StageReason::Newer, "a new enough host stages it");
+    auto between = entry("1.6.5.0", 3, 1);
+    ok &= stages(plan_update(s, manifest(Channel::Stable, {k161, between, needs_host2}), kHost1, kData3), between,
+                 StageReason::Newer, "the newest loadable build is staged instead");
+
+    BuildEntry needs_both = entry("1.8.0.0", 3, 1, 3);
+    needs_both.min_host_abi = 2;
+    auto* both = as<Blocked>(plan_update(s, manifest(Channel::Stable, {k161, needs_both}), kHost1, kData3));
+    if (!both || both->reason != BlockReason::HostTooOld)
+        ok &= fail("a build that needs a newer host and launcher waits for the host");
+
+    auto beta = installed(k161, Channel::Beta);
+    auto stable = manifest(Channel::Stable, {k152, needs_host2});
+    auto plan = plan_channel_switch(beta, stable, kHost1, kData3);
+    auto* pinned = std::get_if<StayPinned>(&plan);
+    if (!pinned || pinned->until != k161.version || !pinned->downgrade || pinned->downgrade->entry.version != k152.version)
+        ok &= fail("a channel whose newer build needs a newer host pins, and offers only what loads");
+    if (!std::holds_alternative<FollowNow>(plan_channel_switch(beta, stable, kHost2, kData3)))
+        ok &= fail("with a new enough host the switch follows at once");
+    BuildEntry old_needs_host2 = entry("1.5.5.0", 2, 1);
+    old_needs_host2.min_host_abi = 2;
+    auto none = std::get<StayPinned>(plan_channel_switch(beta, manifest(Channel::Stable, {old_needs_host2}), kHost1,
+                                                         kData3));
+    if (none.downgrade) ok &= fail("a downgrade the host cannot load is never offered");
+    return ok;
+}
+
+bool test_quarantine_until_newer() {
+    bool ok = true;
+    SupervisorState s = installed(k152);
+    BuildRecord failed = BuildRecord::from_entry(k160, kWindowsClient);
+    failed.verdict = Quarantined{FailureReason::CrashedBeforeHealthy};
+    s.builds.push_back(failed);
+    if (!as<NothingToDo>(plan_update(s, manifest(Channel::Stable, {k152, k160}), kRunner, kData2)))
+        ok &= fail("a rolled-back build is re-offered");
+    ok &= stages(plan_update(s, manifest(Channel::Stable, {k152, k160, k161}), kRunner, kData2), k161,
+                 StageReason::Newer, "a newer build lifts the quarantine");
+    return ok;
+}
+
+bool test_data_gate_on_newer_builds() {
+    auto s = installed(k161);
+    auto m = manifest(Channel::Stable, {k152, k161, entry("1.6.2.0", 3, 1)});
+    auto* nothing = as<NothingToDo>(plan_update(s, m, kRunner, DataInfo{5, 5}));
+    if (!nothing) return fail("a build that cannot open the data must not be staged");
+    return true;
+}
+
+bool test_restore_point() {
+    const BuildEntry old = entry("1.5.0.0", 1, 1);
+    std::vector<Snapshot> newest_first{{{"rolled-back-x"}, DataInfo{3, 3}},
+                                       {{"pre-b"}, DataInfo{2, 1}},
+                                       {{"pre-a"}, DataInfo{1, 1}}};
+    auto chosen = restore_point(old.data_schema, newest_first);
+    if (!chosen || chosen->id.stem != "pre-b") return fail("the newest backup the build can open is restored");
+    if (restore_point(old.data_schema, std::span(newest_first).first(1))) return fail("no backup the build can open means none");
+    return true;
+}
+
+} // namespace
+
+int main() {
+    bool ok = true;
+    ok &= test_follow();
+    ok &= test_switch_to_older_channel_pins();
+    ok &= test_wait_during_a_trial();
+    ok &= test_downgrade_offers();
+    ok &= test_revoked_good_moves();
+    ok &= test_launcher_protocol_gate();
+    ok &= test_host_abi_gate();
+    ok &= test_quarantine_until_newer();
+    ok &= test_data_gate_on_newer_builds();
+    ok &= test_restore_point();
+    if (ok) std::cout << "update_policy_test: all passed\n";
+    return ok ? 0 : 1;
+}
