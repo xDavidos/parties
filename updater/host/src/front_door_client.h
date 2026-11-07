@@ -17,8 +17,12 @@ namespace protocol = update::front_door;
 bool connect(const std::string& socket_path);
 
 // Sends front{...}, then reads until the launcher assigns a build, sends this
-// front away, or quits for a seed install. nullopt: the launcher closed first.
-std::optional<protocol::LauncherMessage> introduce(const protocol::Front& front);
+// front away, asks it to show recovery, or quits for a seed install.
+// nullopt: the launcher closed first, or timeout_ms (0: none) passed.
+std::optional<protocol::LauncherMessage> introduce(const protocol::Front& front, int timeout_ms);
+
+// Returns once the launcher has closed the connection.
+void wait_closed();
 
 // A second connection whose first line is attach{ticket}: the payload's link.
 // -1 when it cannot connect.
@@ -32,8 +36,9 @@ void send(const protocol::HostMessage& message);
 [[noreturn]] void exit_process(int code);
 
 // Reads the connection on a background thread for the rest of the process.
-// activate brings the app forward. EOF means the launcher is gone: the app is
-// asked to quit, and the process exits 1 after 15 s at the latest.
-void watch_launcher();
+// activate brings the app forward. EOF means the launcher is gone: on_lost
+// runs, the app is asked to quit, and the process exits 1 after 15 s at the
+// latest.
+void watch_launcher(void (*on_lost)());
 
 } // namespace parties::host::front_door

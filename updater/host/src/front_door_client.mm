@@ -66,13 +66,24 @@ bool connect(const std::string& socket_path) {
     return g_fd >= 0;
 }
 
-std::optional<protocol::LauncherMessage> introduce(const protocol::Front& front) {
+std::optional<protocol::LauncherMessage> introduce(const protocol::Front& front, int timeout_ms) {
+    const timeval wait{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+    setsockopt(g_fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof wait);
     send(front);
+    std::optional<protocol::LauncherMessage> message;
     while (auto line = read_line()) {
-        auto message = protocol::parse_launcher_message(*line);
-        if (message && !std::holds_alternative<protocol::Activate>(*message)) return message;
+        message = protocol::parse_launcher_message(*line);
+        if (message && !std::holds_alternative<protocol::Activate>(*message)) break;
+        message.reset();
     }
-    return std::nullopt;
+    const timeval none{};
+    setsockopt(g_fd, SOL_SOCKET, SO_RCVTIMEO, &none, sizeof none);
+    return message;
+}
+
+void wait_closed() {
+    while (read_line()) {
+    }
 }
 
 int attach_link(const std::string& socket_path, uint64_t ticket) {
@@ -93,8 +104,8 @@ void exit_process(int code) {
     _exit(code);
 }
 
-void watch_launcher() {
-    std::thread([] {
+void watch_launcher(void (*on_lost)()) {
+    std::thread([on_lost] {
         while (auto line = read_line()) {
             auto message = protocol::parse_launcher_message(*line);
             if (!message || !std::holds_alternative<protocol::Activate>(*message)) continue;
@@ -104,6 +115,7 @@ void watch_launcher() {
             });
         }
         std::fprintf(stderr, "[host] launcher lost: asking the app to quit\n");
+        on_lost();
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSApp terminate:nil];
         });
