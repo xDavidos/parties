@@ -11,7 +11,7 @@
 // with PARTIES_FAKE_RUN_MS and PARTIES_FAKE_STATUS_LOG from the file
 // "fake-env" in data_dir, because LaunchServices starts this process without
 // the harness's environment. Every status the launcher sends is appended to
-// the status log.
+// the status log. With no link (host safe mode) it runs without a launcher.
 
 #import <AppKit/AppKit.h>
 
@@ -214,17 +214,23 @@ void play_build(const update::BuildEntry& build) {
     const std::string fault = fault_for(env["PARTIES_FAKE_FAULT"], version);
     const int run_ms = std::atoi(env["PARTIES_FAKE_RUN_MS"].c_str());
     const std::string status_log = env["PARTIES_FAKE_STATUS_LOG"];
-    std::fprintf(stderr, "[fake-client] pid=%d build=%s fault=%s\n", getpid(), version.c_str(), fault.c_str());
+    // PARTIES_TEST_ENV_PROBE reaches a front only through the environment
+    // LaunchServices was given for it.
+    const char* probe = std::getenv("PARTIES_TEST_ENV_PROBE");
+    std::fprintf(stderr, "[fake-client] pid=%d build=%s fault=%s %s env_probe=%s\n", getpid(), version.c_str(),
+                 fault.c_str(), g_host->link_fd >= 0 ? "supervised" : "unsupervised", probe ? probe : "-");
 
     Link peer;
-    send_link(link::Hello{update::kLinkProtocol, update::kMinLauncherLink, build.version});
-    bool welcomed = false;
-    for (auto until = std::chrono::steady_clock::now() + 10s; !welcomed && std::chrono::steady_clock::now() < until;) {
-        auto m = peer.poll_for(100ms);
-        welcomed = m && std::holds_alternative<link::Welcome>(*m);
-        if (peer.lost()) break;
+    if (g_host->link_fd >= 0) {
+        send_link(link::Hello{update::kLinkProtocol, update::kMinLauncherLink, build.version});
+        bool welcomed = false;
+        for (auto until = std::chrono::steady_clock::now() + 10s; !welcomed && std::chrono::steady_clock::now() < until;) {
+            auto m = peer.poll_for(100ms);
+            welcomed = m && std::holds_alternative<link::Welcome>(*m);
+            if (peer.lost()) break;
+        }
+        if (!welcomed) g_host->exit_process(2);
     }
-    if (!welcomed) g_host->exit_process(2);
 
     if (fault == "exit-init-failed") g_host->exit_process(2);
     if (fault == "exit-data-unavailable") g_host->exit_process(3);
@@ -244,7 +250,9 @@ void play_build(const update::BuildEntry& build) {
         crash();
     }
 
+    if (fault == "slow-health") std::this_thread::sleep_for(2s);
     send_link(link::Healthy{build.data_schema});
+    std::fprintf(stderr, "[fake-client] healthy\n");
     if (fault == "crash-after-health") {
         std::this_thread::sleep_for(100ms);
         crash();
