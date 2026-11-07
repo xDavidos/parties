@@ -58,6 +58,7 @@ set(CLIENT_COMMON_SOURCES
     src/lobby_model.cpp
     src/server_list_model.cpp
     src/settings.cpp
+    src/sqlite_file.cpp
     src/audio_engine.cpp
     src/voice_mixer.cpp
     src/miniaudio_impl.cpp
@@ -92,8 +93,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     )
 elseif(APPLE)
     set(CLIENT_PLATFORM_SOURCES
-        # Entry point & window (AppKit / Metal)
-        src/macos/main.mm
+        # Payload entry point & window (AppKit / Metal)
+        src/macos/payload_entry.mm
         src/macos/app_macos.mm
         src/macos/context_menu_macos.mm
         src/macos/PartiesStatusItemController.mm
@@ -114,16 +115,18 @@ else()
         # Platform specific
         src/windows/main.cpp
         src/windows/app.cpp
+        src/windows/data_location.cpp
+        src/windows/legacy_import.cpp
         src/windows/system_diagnostics.cpp
         src/windows/stream_audio_capture.cpp
         src/windows/ui_manager.cpp
         src/windows/context_window_manager.cpp
         src/windows/win32_tray.cpp
+        src/windows/supervisor_link.cpp
+        src/windows/shell_identity.cpp
+        src/update_view.cpp
 
         # Parties application adapter over RmlUi's upstream Win32/DX12 backend
-
-        # Auto-updater (WinHTTP)
-        src/windows/auto_updater.cpp
 
         # Screen capture — DXGI
         src/windows/screen_capture.cpp
@@ -164,6 +167,21 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         MACOSX_PACKAGE_LOCATION Resources)
     set_source_files_properties(${IOS_PRIVACY_MANIFEST} PROPERTIES
         MACOSX_PACKAGE_LOCATION Resources)
+elseif(APPLE)
+    # PartiesClient.dylib, which the host executable (updater/host) loads and
+    # runs. The bundle, its Info.plist and its icon belong to the host.
+    add_library(parties_client SHARED
+        ${CLIENT_COMMON_SOURCES}
+        ${CLIENT_PLATFORM_SOURCES}
+    )
+    set_target_properties(parties_client PROPERTIES OUTPUT_NAME PartiesClient PREFIX "")
+    target_link_libraries(parties_client PRIVATE parties_host_api)
+    target_link_options(parties_client PRIVATE
+        "LINKER:-exported_symbol,_parties_client_main"
+        "LINKER:-exported_symbol,_parties_client_min_host_abi"
+    )
+    target_compile_definitions(parties_client PRIVATE
+        $<$<BOOL:${PARTIES_UPDATE_TESTING}>:PARTIES_UPDATE_TESTING>)
 else()
     add_executable(parties_client
         ${CLIENT_COMMON_SOURCES}
@@ -218,8 +236,8 @@ if(NOT APPLE AND BUILD_IN_RETAIL)
     target_link_options(parties_client PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
 endif()
 
-# ── Apple bundle properties (shared + platform-specific) ─────────────────────
-if(APPLE)
+# ── iOS bundle properties (the macOS bundle belongs to updater/host) ─────────
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set_target_properties(parties_client PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_BUNDLE_NAME "Parties"
@@ -238,46 +256,32 @@ if(APPLE)
         XCODE_ATTRIBUTE_GENERATE_INFOPLIST_FILE "NO"
     )
 
-    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set_target_properties(parties_client PROPERTIES
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.parties.ios"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/ios/Info.plist"
+        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.parties.ios"
+        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1"    # iPhone only
+        XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "16.3"
+        XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
+        XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/src/ios/Parties.entitlements"
+        XCODE_ATTRIBUTE_SKIP_INSTALL "NO"
+        XCODE_ATTRIBUTE_INSTALL_PATH "$(LOCAL_APPS_DIR)"
+    )
+    # Keep local/CI compile checks usable without a provisioning profile.
+    # Supplying APPLE_DEVELOPMENT_TEAM opts back into automatic signing for
+    # device installation and archives.
+    if(APPLE_DEVELOPMENT_TEAM STREQUAL "")
         set_target_properties(parties_client PROPERTIES
-            MACOSX_BUNDLE_GUI_IDENTIFIER "com.parties.ios"
-            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/ios/Info.plist"
-            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.parties.ios"
-            XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1"    # iPhone only
-            XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "16.3"
-            XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
-            XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/src/ios/Parties.entitlements"
-            XCODE_ATTRIBUTE_SKIP_INSTALL "NO"
-            XCODE_ATTRIBUTE_INSTALL_PATH "$(LOCAL_APPS_DIR)"
+            XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
+            XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO"
         )
-        # Keep local/CI compile checks usable without a provisioning profile.
-        # Supplying APPLE_DEVELOPMENT_TEAM opts back into automatic signing for
-        # device installation and archives.
-        if(APPLE_DEVELOPMENT_TEAM STREQUAL "")
-            set_target_properties(parties_client PROPERTIES
-                XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
-                XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO"
-            )
-        else()
-            set_target_properties(parties_client PROPERTIES
-                XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${APPLE_DEVELOPMENT_TEAM}"
-                XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic"
-                XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "YES"
-                XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "YES"
-            )
-        endif()
     else()
         set_target_properties(parties_client PROPERTIES
-            MACOSX_BUNDLE_GUI_IDENTIFIER "org.parties.client"
-            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/res/Info.plist.in"
-            MACOSX_BUNDLE_ICON_FILE "AppIcon"
-            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "org.parties.client"
+            XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${APPLE_DEVELOPMENT_TEAM}"
+            XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic"
+            XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "YES"
+            XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "YES"
         )
-        # Copy .icns into the app bundle Resources folder
-        set(MACOS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/res/AppIcon.icns")
-        set_source_files_properties(${MACOS_ICON} PROPERTIES
-            MACOSX_PACKAGE_LOCATION Resources)
-        target_sources(parties_client PRIVATE ${MACOS_ICON})
     endif()
 endif()
 
@@ -285,6 +289,7 @@ target_link_libraries(parties_client
     PRIVATE
         parties_encdec
         parties_common
+        parties_update_data
         rnnoise::rnnoise
         unofficial::sqlite3::sqlite3
         RmlUi::RmlUi
@@ -292,6 +297,9 @@ target_link_libraries(parties_client
         $<$<NOT:$<BOOL:${BUILD_IN_RETAIL}>>:RmlUi::Debugger>
         ${SPEEXDSP_LIBRARY}
 )
+if(WIN32)
+    target_link_libraries(parties_client PRIVATE parties_update_link)
+endif()
 
 if(APPLE)
     # Shared Apple frameworks
@@ -323,7 +331,6 @@ else()
             mfplat mfreadwrite mfuuid mf
             windowsapp
             dwmapi gdi32 shell32
-            winhttp wintrust crypt32
     )
 endif()
 
@@ -399,15 +406,8 @@ if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND BUILD_IN_RETAIL)
     target_link_libraries(parties_client PRIVATE "-F${sparkle_SOURCE_DIR}" "-framework Sparkle")
     target_compile_definitions(parties_client PRIVATE SPARKLE_ENABLED)
 
-    # Set rpath so the dynamic linker finds Sparkle.framework in the app bundle
+    # The host executable's bundle embeds Sparkle.framework (updater/host).
     target_link_options(parties_client PRIVATE "LINKER:-rpath,@executable_path/../Frameworks")
-
-    # Embed Sparkle.framework in the app bundle (ditto preserves symlinks, unlike cmake -E copy_directory)
-    add_custom_command(TARGET parties_client POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:parties_client>/Contents/Frameworks"
-        COMMAND ditto "${sparkle_SOURCE_DIR}/Sparkle.framework"
-            "$<TARGET_BUNDLE_DIR:parties_client>/Contents/Frameworks/Sparkle.framework"
-    )
 endif()
 
 # Copy client exe to additional test folders for multi-instance testing (Windows only)

@@ -71,6 +71,8 @@ struct WatchedStream {
     bool mirror = false;     // our own camera: shown as a mirror image
 };
 
+enum class UpdateAction { ClickPill, ChooseStable, ChooseBeta, SwitchNow, DismissNotice };
+
 class LobbyModel : public rml::Model {
 public:
     // Return to the joined channel's viewer, or show the room when joining another.
@@ -197,6 +199,17 @@ public:
     rml::Prop<bool>        update_downloading{false};
     rml::Prop<bool>        update_ready{false};
     rml::Prop<Rml::String> update_version;
+    rml::Prop<int>         update_percent{-1};
+
+    rml::Prop<bool>        update_managed{false};
+    rml::Prop<Rml::String> update_current;
+    rml::Prop<int>         update_channel{0};
+    rml::Prop<Rml::String> update_status_line;
+    rml::Prop<Rml::String> update_hold;
+    rml::Prop<bool>        update_can_switch{false};
+    rml::Prop<Rml::String> update_switch_note;
+    rml::Prop<Rml::String> update_notice;
+    rml::Prop<Rml::String> update_notice_detail;
 
     // Admin / permissions
     rml::Prop<int>         my_role{3};                  // current user's role (0=Owner..3=User)
@@ -284,6 +297,7 @@ public:
 
     // Auto-update
     std::function<void()>      on_apply_update;
+    std::function<void(UpdateAction)> on_update_action;
 
     // Identity
     std::function<void()>      on_show_seed_phrase;

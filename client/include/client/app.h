@@ -9,6 +9,7 @@
 #include <client/rml_elements.h>
 #include <client/stream_audio_capture.h>
 #include <client/context_window_manager.h>
+#include <client/supervisor_link.h>
 #include <client/win32_power_request.h>
 #include <client/win32_tray.h>
 #include <client/video_decode_gate.h>
@@ -54,6 +55,8 @@ public:
     App();
     ~App();
 
+    Settings::OpenResult open_data(const SettingsPaths& paths) { return core_.settings_.open(paths); }
+    void attach_supervisor(std::unique_ptr<SupervisorLink> link);
     bool init(HWND hwnd);
     void shutdown();
 
@@ -405,6 +408,11 @@ private:
 
     // UI document
     Rml::ElementDocument* doc_ = nullptr;
+
+    void poll_supervisor();
+    std::unique_ptr<SupervisorLink> supervisor_;
+    std::atomic<bool> first_frame_presented_{false};
+    bool exit_posted_ = false;
 };
 
 } // namespace parties::client
