@@ -5,6 +5,7 @@
 
 #import "PartiesAppDelegate.h"
 #import "context_menu_macos.h"
+#include "mac_runtime.h"
 #import "PartiesStatusItemController.h"
 #import "screen_capture_macos.h"
 #import <encdec/apple/video_encoder_macos.h>
@@ -71,6 +72,7 @@ extern void macos_updater_check_in_background();
 #include <vector>
 #include <cstring>
 #include <cstdio>
+#include <unistd.h>
 
 using namespace parties;
 using namespace parties::client;
@@ -262,6 +264,8 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
 @interface PartiesViewController : NSViewController <MTKViewDelegate>
 // Called by the app delegate before quic_cleanup() to close all MsQuic handles.
 - (void)shutdown;
+// Opens parties.db. The app delegate calls it before the window exists.
+- (Settings::OpenResult)openData;
 - (void)showPreviewNativeUI;
 - (BOOL)trayModeEnabled;
 - (BOOL)saveTrayModeEnabled:(BOOL)enabled;
@@ -329,7 +333,7 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
 - (void)loadView
 {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-    NSAssert(device, @"No Metal device found");
+    if (!device) macos::runtime().init_failed("no Metal device");
 
     _metalView = [[PartiesView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 720)
                                              device:device];
@@ -345,6 +349,14 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
     [device release];
 }
 
+- (Settings::OpenResult)openData
+{
+    macos::MacRuntime& runtime = macos::runtime();
+    std::error_code ignored;
+    std::filesystem::create_directories(runtime.data_dir(), ignored);
+    return _core.settings_.open({runtime.db_path(), runtime.backups_dir()});
+}
+
 - (void)viewDidLoad
 {
     [super viewDidLoad];
@@ -358,24 +370,15 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
 
     // ── Metal + RmlUi ─────────────────────────────────────────────────────
     _commandQueue = [device newCommandQueue];
-    if (!_commandQueue || !Backend::Initialize(device, _metalView)) {
-        NSLog(@"[Parties] Failed to initialize the Metal renderer");
-        _metalView.paused = YES;
-        return;
-    }
+    if (!_commandQueue || !Backend::Initialize(device, _metalView))
+        macos::runtime().init_failed("cannot initialize the Metal renderer");
     _backendInitialized = true;
 
     Rml::SetFileInterface(&_fileInterface);
     Rml::SetSystemInterface(Backend::GetSystemInterface());
     Rml::SetRenderInterface(Backend::GetRenderInterface());
 
-    if (!Rml::Initialise()) {
-        NSLog(@"[Parties] Failed to initialize RmlUi");
-        Backend::Shutdown();
-        _backendInitialized = false;
-        _metalView.paused = YES;
-        return;
-    }
+    if (!Rml::Initialise()) macos::runtime().init_failed("cannot initialize RmlUi");
     _rmlInitialized = true;
 
     // Register window-action as no-op to suppress warnings (used on Windows for caption hit-testing)
@@ -391,11 +394,7 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
 
     _rmlContext = Rml::CreateContext("main",
         Rml::Vector2i((int)physical.width, (int)physical.height));
-    if (!_rmlContext) {
-        NSLog(@"[Parties] Failed to create the RmlUi context");
-        _metalView.paused = YES;
-        return;
-    }
+    if (!_rmlContext) macos::runtime().init_failed("cannot create the RmlUi context");
     _rmlContext->SetDensityIndependentPixelRatio(dpRatio);
     _metalView.rmlContext = _rmlContext;
     _contextMenus = std::make_unique<MacOSContextMenuController>(_metalView);
@@ -425,16 +424,6 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
         _soundPlayer.init();
         _soundInitialized = true;
     }
-
-    // ── Settings path ─────────────────────────────────────────────────────
-    NSString* appSupport = [NSSearchPathForDirectoriesInDomains(
-        NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-    NSString* dir = [appSupport stringByAppendingPathComponent:@"Parties"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir
-                                withIntermediateDirectories:YES
-                                                 attributes:nil
-                                                      error:nil];
-    NSString* dbPath = [dir stringByAppendingPathComponent:@"parties.db"];
 
     // ── Build PlatformBridge ──────────────────────────────────────────────
     PartiesViewController* bself = self;
@@ -615,18 +604,14 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
         if (!_core.server_model_.init(_rmlContext) ||
             !_core.model_.init(_rmlContext) ||
             !_core.chat_model_.init(_rmlContext) ||
-            !_core.diag_model_.init(_rmlContext)) {
-            NSLog(@"[Parties] Failed to initialize macOS UI fixture models");
-            return;
-        }
+            !_core.diag_model_.init(_rmlContext))
+            macos::runtime().init_failed("cannot initialize the UI fixture models");
         PopulateUIFixture(_core, _previewScenario, true);
         NSLog(@"[Parties] Loaded macOS UI fixture: %s", _previewScenario.c_str());
     } else {
-        // ── Init AppCore ──────────────────────────────────────────────────
-        if (!_core.init(std::string(dbPath.UTF8String), std::move(bridge), _rmlContext)) {
-            NSLog(@"[Parties] AppCore init failed");
-            return;
-        }
+        // ── Init AppCore over the database openData opened ───────────────
+        if (!_core.init(std::move(bridge), _rmlContext))
+            macos::runtime().init_failed("cannot initialize AppCore");
         _coreInitialized = true;
 
         // ── Wire macOS-specific model callbacks on top of AppCore defaults ─
@@ -638,7 +623,10 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
         };
 
         // ── Load identity and saved state ─────────────────────────────────
-        std::string hostname = NSProcessInfo.processInfo.hostName.UTF8String;
+        // The default display name. NSProcessInfo.hostName resolves it through
+        // DNS on the main thread, which stalled the first frame by 35 s on CI.
+        char hostname[256] = {};
+        gethostname(hostname, sizeof hostname - 1);
         _core.load_or_generate_identity(hostname);
         _core.load_saved_prefs();
         _core.refresh_server_list();
@@ -653,15 +641,15 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
 
     // ── UI document ───────────────────────────────────────────────────────
     _doc = _rmlContext->LoadDocument("ui/lobby.rml");
-    if (_doc) {
-        // Mark document as macOS platform so RCSS hides Win32 controls and
-        // centres the branding, leaving space for native traffic-light buttons.
-        _doc->SetClass("platform-macos", true);
-        _doc->SetClass("platform-desktop", true);
-        _doc->Show();
-        if (_previewMode) {
-            ApplyUIFixtureDocument(_doc, _previewScenario);
-        }
+    if (!_doc) macos::runtime().init_failed("cannot load ui/lobby.rml");
+    // Mark document as macOS platform so RCSS hides Win32 controls and
+    // centres the branding, leaving space for native traffic-light buttons.
+    _doc->SetClass("platform-macos", true);
+    _doc->SetClass("platform-desktop", true);
+    _doc->Show();
+    macos::runtime().health().lobby_loaded(_metalView);
+    if (_previewMode) {
+        ApplyUIFixtureDocument(_doc, _previewScenario);
     }
 
     // ── Mouse tracking area ───────────────────────────────────────────────
@@ -758,6 +746,8 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
         _contextMenus->Close();
     if (_metalView.paused == visible)
         _metalView.paused = !visible;
+    if (!visible) macos::runtime().health().rendering_suspended();
+    if (macos::runtime().link().poll_exit_requested()) [NSApp terminate:nil];
 }
 
 - (void)drawInMTKView:(MTKView*)view
@@ -803,6 +793,7 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
             dispatch_async(dispatch_get_main_queue(), ^{ [self showPreviewNativeUI]; });
         }];
     }
+    macos::runtime().health().watch_frame(buffer, view);
     [buffer presentDrawable:view.currentDrawable];
     [buffer commit];
 }
@@ -1313,15 +1304,18 @@ static int macos_modifiers_to_rml(NSEventModifierFlags flags)
 
     const std::string fixture = macos_ui_fixture_argument();
     _previewMode = !fixture.empty() && IsUIFixtureScenario(fixture);
-    if (!_previewMode) {
-        if (!parties::quic_init()) {
-            NSLog(@"[Parties] Failed to initialize MsQuic");
-        } else {
-            _quicInitialized = true;
-        }
-    }
-
     _viewController = [[PartiesViewController alloc] init];
+    if (!_previewMode) {
+        // Before any window: a build that cannot use its data shows no blank
+        // window, whose missing health report the launcher would blame on it.
+        const Settings::OpenResult opened = [_viewController openData];
+        if (opened.status != Settings::OpenStatus::Ready)
+            macos::runtime().refuse_to_start(
+                opened.status == Settings::OpenStatus::TooNew ? ExitCode::DataTooNew : ExitCode::DataUnavailable,
+                macos::runtime().db_path(), opened.reason);
+        if (!parties::quic_init()) macos::runtime().init_failed("cannot initialize MsQuic");
+        _quicInitialized = true;
+    }
 
     NSRect frame = NSMakeRect(0, 0, 1280, 720);
     if (_previewMode) {

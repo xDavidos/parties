@@ -1,0 +1,84 @@
+name: Publish to Beta
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to publish, A.B.C.D"
+        required: true
+        type: string
+      run-id:
+        description: "ID of the Release run that built the version; empty for the calling run"
+        required: false
+        type: string
+        default: ""
+    outputs:
+      signed:
+        description: "true when a Beta manifest was signed and published; it is then the release-windows-setup-manifest artifact"
+        value: ${{ jobs.publish.outputs.signed }}
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, A.B.C.D"
+        required: true
+        type: string
+      run-id:
+        description: "ID of the Release run that built the version (the number in its URL)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    environment: update-signing
+    outputs:
+      signed: ${{ steps.publish.outputs.signed }}
+    concurrency:
+      group: update-channels
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+
+      # The entry and the tool come from the Release run's artifacts, not from
+      # release assets, which anyone with release write access can replace.
+      - name: Download the build's update layout
+        uses: actions/download-artifact@v7
+        with:
+          name: release-windows-update
+          path: update
+          run-id: ${{ inputs.run-id || github.run_id }}
+          github-token: ${{ inputs.run-id != '' && github.token || '' }}
+
+      - name: Download the manifest tool
+        uses: actions/download-artifact@v7
+        with:
+          name: release-windows-manifest-tool
+          path: tool
+          run-id: ${{ inputs.run-id || github.run_id }}
+          github-token: ${{ inputs.run-id != '' && github.token || '' }}
+
+      - name: Sign, verify and publish the Beta manifest
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOL: tool/parties_manifest_tool.exe
+          VERSION: ${{ inputs.version }}
+          PARTIES_UPDATE_KEY: ${{ secrets.PARTIES_UPDATE_KEY }}
+          PARTIES_UPDATE_KEY_NEXT: ${{ secrets.PARTIES_UPDATE_KEY_NEXT }}
+          SIGNED_MANIFEST_OUT: signed/beta.manifest.json
+        run: |
+          mkdir -p signed
+          bash tools/release/channels.sh publish-beta "$VERSION" update/entry.json
+          if [ -f "$SIGNED_MANIFEST_OUT" ]; then echo "signed=true" >> "$GITHUB_OUTPUT"; else echo "signed=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Upload the signed manifest for setup
+        if: steps.publish.outputs.signed == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-setup-manifest
+          path: signed/beta.manifest.json

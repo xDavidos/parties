@@ -2,3 +2,5 @@
 *.entitlements text eol=lf
 *.plist        text eol=lf
 *.plist.in     text eol=lf
+# Workflows run these with bash on Windows runners, where checkout converts to CRLF.
+tools/release/*.sh text eol=lf

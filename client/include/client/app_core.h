@@ -17,6 +17,9 @@
 #include <parties/video_common.h>
 #include <parties/video_receive_router.h>
 #include <parties/video_send_controller.h>
+#ifdef _WIN32
+#include <parties/update/link.h>
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -100,8 +103,12 @@ public:
     AppCore();
     ~AppCore();
 
-    bool init(const std::string& settings_path, PlatformBridge bridge, Rml::Context* rml_context);
+    bool init(PlatformBridge bridge, Rml::Context* rml_context);
     void shutdown();
+#ifdef _WIN32
+    void supervise_updates(std::function<void(const update::link::Request&)> send);
+    void apply_update_status(const update::link::Status& status);
+#endif
     void tick();
     void load_saved_prefs();
 
@@ -405,7 +412,9 @@ private:
     uint64_t datagram_drops_logged_ = 0;
 
 #ifdef _WIN32
-    std::unique_ptr<class AutoUpdater> updater_;
+    std::function<void(const update::link::Request&)> send_update_request_;
+    std::optional<update::link::Status> update_status_;
+    void on_update_action(UpdateAction action);
 #endif
 
     // Pending file uploads: file data cached until CHAT_MESSAGE assigns attachment IDs
@@ -444,7 +453,6 @@ private:
     void on_chat_file_ready(const uint8_t* data, size_t len);
 
     void update_speaking_state();
-    void generate_identity();
 
     IdleSleepInhibitor sleep_inhibitor_;
     void apply_sleep_inhibit(bool wanted);

@@ -13,7 +13,8 @@ bool crash_reporter_is_crashpad_handler([[maybe_unused]] int argc, [[maybe_unuse
     return false;
 }
 
-void crash_reporter_init(const char* dsn, [[maybe_unused]] const char* exe_path) {
+void crash_reporter_init(const char* dsn, [[maybe_unused]] const char* exe_path,
+                         [[maybe_unused]] const std::filesystem::path& database_path) {
 #ifdef SENTRY_ENABLED
     if (!dsn || dsn[0] == '\0') return;
     sentry_options_t* options = sentry_options_new();
@@ -24,7 +25,15 @@ void crash_reporter_init(const char* dsn, [[maybe_unused]] const char* exe_path)
 #else
     sentry_options_set_environment(options, "development");
 #endif
-    sentry_options_set_database_path(options, ".sentry-native");
+    if (database_path.empty()) {
+        sentry_options_set_database_path(options, ".sentry-native");
+    } else {
+#ifdef _WIN32
+        sentry_options_set_database_pathw(options, database_path.c_str());
+#else
+        sentry_options_set_database_path(options, database_path.c_str());
+#endif
+    }
     sentry_options_set_auto_session_tracking(options, 1);
     const std::string persistent_log = log_file_path();
     if (!persistent_log.empty())
