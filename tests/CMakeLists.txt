@@ -473,7 +473,7 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND PARTIES_UPDATE_TESTING AND TARGET parties_host)
     add_library(update_front_door_fake_client SHARED update_front_door_fake_client.mm)
     target_link_libraries(update_front_door_fake_client PRIVATE
-        parties_host_api parties_update_link "-framework AppKit")
+        parties_host_api parties_update_core unofficial::sqlite3::sqlite3 "-framework AppKit")
     add_library(update_front_door_fake_launcher SHARED update_front_door_fake_launcher.mm)
     target_link_libraries(update_front_door_fake_launcher PRIVATE parties_launcher_macos "-framework Foundation")
     add_test(NAME update_front_door_e2e COMMAND bash ${CMAKE_SOURCE_DIR}/tools/update/front_door_e2e.sh
@@ -481,11 +481,22 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND PARTIES_UPDATE_TESTING AND TARGET par
         $<TARGET_FILE:update_front_door_fake_client> $<TARGET_FILE:update_front_door_fake_launcher>
         ${CMAKE_CURRENT_BINARY_DIR}/front_door_e2e)
     set_tests_properties(update_front_door_e2e PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
+
+    # The real host and PartiesLauncher.dylib supervising fake builds, with a
+    # kill at every effect of every scenario (update_macos_e2e_test.cpp).
+    add_executable(update_macos_e2e_test update_macos_e2e_test.cpp)
+    target_link_libraries(update_macos_e2e_test PRIVATE
+        parties_update_core parties_common parties_host_api unofficial::sqlite3::sqlite3)
+    add_dependencies(update_macos_e2e_test parties_host PartiesLauncher update_front_door_fake_client)
+    add_test(NAME update_macos_e2e COMMAND update_macos_e2e_test
+        --app $<TARGET_BUNDLE_DIR:parties_host> --entitlements ${CMAKE_SOURCE_DIR}/client/res/Parties.entitlements
+        --fake-client $<TARGET_FILE:update_front_door_fake_client> --launcher $<TARGET_FILE:PartiesLauncher>)
+    set_tests_properties(update_macos_e2e PROPERTIES TIMEOUT 5400 RUN_SERIAL TRUE)
 endif()
 
 # ── Update launcher end to end (testing builds only) ─────────────────────────
 # Drives the real PartiesLauncher.exe over fake builds in a temp install root.
-if(TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
+if(WIN32 AND TARGET PartiesLauncher AND PARTIES_UPDATE_TESTING)
     find_package(RapidJSON CONFIG REQUIRED)
     add_executable(update_fake_app WIN32 update_fake_app.cpp ../client/src/windows/shell_identity.cpp)
     target_link_libraries(update_fake_app PRIVATE parties_update_link rapidjson unofficial::sqlite3::sqlite3)

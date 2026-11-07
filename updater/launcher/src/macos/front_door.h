@@ -54,6 +54,7 @@ struct FrontCorrupt {
 };
 // One line from the app's link connection, unparsed.
 struct LinkLine {
+    int32_t pid = 0;
     std::string line;
 };
 struct FrontExited {
@@ -83,14 +84,25 @@ public:
     FrontDoor(const FrontDoor&) = delete;
     FrontDoor& operator=(const FrontDoor&) = delete;
 
-    // The next event, or nullopt when `timeout` passes first.
+    // The next event, or nullopt when `timeout` passes first. Looks at the
+    // kernel at least once, so a zero timeout polls.
     std::optional<Event> next(std::chrono::milliseconds timeout);
+    // A kqueue that is readable while next() has something to return, for a
+    // loop that waits on more than the front door.
+    int fd() const { return kq_; }
 
     // Spawn: assign to a waiting front, else launch one through LaunchServices
     // once the previous app front has exited, and assign when it connects.
     void deliver(Assignment assignment);
     // TerminateApp: SIGKILL the app front. False when there is none.
     bool kill_app();
+    // A Spawn whose front never connected is given up: a front that comes
+    // later is not handed it.
+    void withdraw() { pending_.reset(); }
+    std::optional<int32_t> app_pid() const { return app_; }
+    // The user's session is ending: a front that dies from now on without
+    // reporting a code ended with it, not by crashing.
+    void session_ending();
     // One line to the app on its link. False when it has no link.
     bool send_link(const link::LauncherMessage& message);
     void activate_app();

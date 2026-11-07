@@ -12,6 +12,13 @@ target_compile_definitions(parties_host PRIVATE
     $<$<BOOL:${BUILD_IN_RETAIL}>:PARTIES_RETAIL=1>
     $<$<BOOL:${PARTIES_UPDATE_TESTING}>:PARTIES_UPDATE_TESTING>)
 target_link_libraries(parties_host PRIVATE parties_host_api parties_update_link "-framework AppKit")
+if(BUILD_IN_RETAIL)
+    target_link_libraries(parties_host PRIVATE "-framework Security")
+    if(PARTIES_APPLE_TEAM_ID)
+        set_property(SOURCE src/payload.cpp APPEND PROPERTY
+            COMPILE_DEFINITIONS "PARTIES_APPLE_TEAM_ID=\"${PARTIES_APPLE_TEAM_ID}\"")
+    endif()
+endif()
 
 set(MACOS_ICON "${CMAKE_SOURCE_DIR}/client/res/AppIcon.icns")
 set_source_files_properties(${MACOS_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
@@ -38,7 +45,12 @@ add_custom_command(OUTPUT "${frameworks}/PartiesClient.dylib"
     COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:parties_client>" "${frameworks}/PartiesClient.dylib"
     DEPENDS parties_client
 )
-add_custom_target(parties_host_payload DEPENDS "${frameworks}/PartiesClient.dylib")
+add_custom_command(OUTPUT "${frameworks}/PartiesLauncher.dylib"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${frameworks}"
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:PartiesLauncher>" "${frameworks}/PartiesLauncher.dylib"
+    DEPENDS PartiesLauncher
+)
+add_custom_target(parties_host_payload DEPENDS "${frameworks}/PartiesClient.dylib" "${frameworks}/PartiesLauncher.dylib")
 add_dependencies(parties_host parties_host_payload)
 if(BUILD_IN_RETAIL)
     include(FetchContent)

@@ -2,6 +2,9 @@
 
 #include <CommonCrypto/CommonDigest.h>
 #include <dlfcn.h>
+#ifdef PARTIES_RETAIL
+#include <Security/Security.h>
+#endif
 
 #include <chrono>
 #include <cstdio>
@@ -17,6 +20,30 @@ double ms_since(std::chrono::steady_clock::time_point start) {
 }
 
 } // namespace
+
+#ifdef PARTIES_RETAIL
+bool meets_requirement(const std::filesystem::path& file) {
+#ifndef PARTIES_APPLE_TEAM_ID
+#define PARTIES_APPLE_TEAM_ID ""
+#endif
+    const std::string team = PARTIES_APPLE_TEAM_ID;
+    const std::string text = "anchor apple generic and certificate leaf[subject.OU] = \"" + team + "\"";
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr, reinterpret_cast<const UInt8*>(file.c_str()),
+                                                           CFIndex(file.native().size()), false);
+    CFStringRef string = CFStringCreateWithCString(nullptr, text.c_str(), kCFStringEncodingUTF8);
+    SecStaticCodeRef code = nullptr;
+    SecRequirementRef requirement = nullptr;
+    const bool ok = !team.empty() && SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code) == errSecSuccess &&
+                    SecRequirementCreateWithString(string, kSecCSDefaultFlags, &requirement) == errSecSuccess &&
+                    SecStaticCodeCheckValidity(code, kSecCSStrictValidate, requirement) == errSecSuccess;
+    for (CFTypeRef ref : {CFTypeRef(url), CFTypeRef(string), CFTypeRef(code), CFTypeRef(requirement)})
+        if (ref) CFRelease(ref);
+    if (!ok) std::fprintf(stderr, "[host] %s fails the pinned code requirement\n", file.c_str());
+    return ok;
+}
+#else
+bool meets_requirement(const std::filesystem::path&) { return true; }
+#endif
 
 std::expected<update::Sha256, LoadError> digest_file(const std::filesystem::path& file) {
     std::ifstream in(file, std::ios::binary);

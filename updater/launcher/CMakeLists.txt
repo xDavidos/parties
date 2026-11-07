@@ -33,7 +33,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         src/macos/code_signing.cpp
         src/macos/file_io.cpp
         src/macos/front_door.mm
+        src/macos/install_seed.cpp
         src/macos/log.cpp
+        src/macos/supervisor.cpp
     )
     target_include_directories(parties_launcher_macos PUBLIC src/macos)
     target_link_libraries(parties_launcher_macos
@@ -45,6 +47,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         set_property(SOURCE src/macos/code_signing.cpp APPEND PROPERTY
             COMPILE_DEFINITIONS "PARTIES_APPLE_TEAM_ID=\"${PARTIES_APPLE_TEAM_ID}\"")
     endif()
+
+    # What the host loads in a process it started with --role=launcher.
+    add_library(PartiesLauncher SHARED src/macos/launcher_main.mm)
+    target_link_libraries(PartiesLauncher PRIVATE parties_launcher_macos "-framework Foundation")
+    set_target_properties(PartiesLauncher PROPERTIES PREFIX "" SUFFIX ".dylib")
     return()
 endif()
 

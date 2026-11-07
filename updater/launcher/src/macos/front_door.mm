@@ -1,5 +1,7 @@
 #include "front_door.h"
 
+#include "code_signing.h"
+
 #import <AppKit/AppKit.h>
 
 #include <parties/front_door_socket.h>
@@ -121,9 +123,12 @@ double FrontDoor::now_ms() const {
 
 std::optional<Event> FrontDoor::next(std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (events_.empty()) {
-        const auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - std::chrono::steady_clock::now());
-        if (left.count() <= 0) return std::nullopt;
+    for (bool first = true; events_.empty(); first = false) {
+        auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - std::chrono::steady_clock::now());
+        if (left.count() <= 0) {
+            if (!first) return std::nullopt;
+            left = {};
+        }
         const timespec until{time_t(left.count() / 1'000'000'000), long(left.count() % 1'000'000'000)};
         struct kevent event;
         int n = kevent(kq_, nullptr, 0, &event, 1, &until);
@@ -169,6 +174,11 @@ void FrontDoor::accept_all() {
             close(fd);
             continue;
         }
+        if (auto why = peer_requirement_failure(fd)) {
+            trace(now_ms(), "refused pid=%d: %s", pid, why->c_str());
+            close(fd);
+            continue;
+        }
         fcntl(fd, F_SETFL, O_NONBLOCK);
         add_filter(kq_, uintptr_t(fd), EVFILT_READ, EV_ADD, 0, 0);
         conns_[fd].pid = pid;
@@ -193,7 +203,7 @@ void FrontDoor::drain(int fd) {
 
 bool FrontDoor::on_line(int fd, Conn& conn, const std::string& line) {
     if (conn.role == Conn::Role::Link) {
-        events_.push_back(LinkLine{line});
+        events_.push_back(LinkLine{conn.pid, line});
         return true;
     }
     const auto message = front_door::parse_host_message(line);
@@ -353,6 +363,10 @@ void FrontDoor::assign(int32_t pid) {
     trace(now_ms(), "pid=%d assign %s (ticket %llu)", pid, pending_->build.c_str(),
         static_cast<unsigned long long>(pending_ticket_));
     pending_.reset();
+}
+
+void FrontDoor::session_ending() {
+    for (auto& [pid, front] : fronts_) front.outcome.session_ending = true;
 }
 
 bool FrontDoor::kill_app() {

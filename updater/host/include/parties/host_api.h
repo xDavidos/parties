@@ -46,6 +46,12 @@ extern const uint32_t parties_client_min_host_abi;
 // Runs the app. Returns only if the run loop ends without terminate:.
 int parties_client_main(const PartiesHostApi* host);
 
+// Exported by PartiesLauncher.dylib, run in a process started with
+// --role=launcher. argv holds that process's arguments after argv[0], and
+// build_dir the directory the dylib was loaded from. Returns the exit code.
+extern const uint32_t parties_launcher_min_host_abi;
+int parties_launcher_main(const PartiesHostApi* host);
+
 #ifdef __cplusplus
 }
 #endif

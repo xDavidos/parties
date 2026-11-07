@@ -30,6 +30,10 @@ enum class LoadError : uint8_t {
     HostTooOld,
 };
 
+// Retail: the file carries a Developer ID signature of the Team ID the build
+// pins (PARTIES_APPLE_TEAM_ID). Other builds are ad-hoc signed and pass.
+bool meets_requirement(const std::filesystem::path& file);
+
 // SHA-256 of the file, read in 1 MiB chunks.
 std::expected<update::Sha256, LoadError> digest_file(const std::filesystem::path& file);
 

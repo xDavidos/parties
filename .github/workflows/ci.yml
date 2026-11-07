@@ -174,7 +174,7 @@ jobs:
           -fsyntax-only -Werror -Iclient/include client/src/sqlite_file.cpp
 
       - name: Run update core and data safety tests
-        run: ctest --test-dir ${{ matrix.preset == 'macos-arm64-release' && 'build-macos-release' || 'build-macos' }} -R "^(update_|parties_data_)" -E "^(update_front_door_e2e|parties_data_posix_commit)$" --output-on-failure --no-tests=error
+        run: ctest --test-dir ${{ matrix.preset == 'macos-arm64-release' && 'build-macos-release' || 'build-macos' }} -R "^(update_|parties_data_)" -E "^(update_front_door_e2e|update_macos_e2e|parties_data_posix_commit)$" --output-on-failure --no-tests=error
 
       # Verbose, so the log shows how many kill points landed on each side of the rename.
       - name: Data commit under SIGKILL
@@ -188,6 +188,11 @@ jobs:
       - name: Host payload probe
         if: matrix.preset == 'macos-arm64-debug'
         run: bash tools/update/host_payload_probe.sh build-macos/updater/host/Parties.app client/res/Parties.entitlements "$RUNNER_TEMP/host-payload-probe"
+
+      # Verbose, so the log shows each scenario's decisions and how many kill points it replayed.
+      - name: Launcher end to end
+        if: matrix.preset == 'macos-arm64-debug'
+        run: ctest --test-dir build-macos -R "^update_macos_e2e$" --verbose --no-tests=error
 
       - name: Upload host payload probe logs
         if: always() && matrix.preset == 'macos-arm64-debug'

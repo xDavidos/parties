@@ -12,11 +12,14 @@
 #include <parties/data_lock.h>
 #include <parties/front_door_socket.h>
 #include <parties/macos_layout.h>
+#include <parties/update/boot.h>
 #include <parties/update/product.h>
 
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -33,10 +36,23 @@ using parties::update::kMacClient;
 
 namespace {
 
+#ifdef PARTIES_UPDATE_TESTING
+constexpr bool kTesting = true;
+#else
+constexpr bool kTesting = false;
+#endif
+
 constexpr parties::host::Entry kClientEntry{"parties_client_min_host_abi", "parties_client_main"};
+constexpr parties::host::Entry kLauncherEntry{"parties_launcher_min_host_abi", "parties_launcher_main"};
+// The booting front reads it as "this launcher is unusable", not as a failed boot.
+constexpr int kLauncherUnusable = 70;
 
 struct Args {
     fs::path install_root;
+    bool launcher = false;                  // --role=launcher
+    std::string build;                      // --build=builds\<dir>
+    std::optional<fs::path> install_seed;   // --install-seed=<this Parties.app>
+    bool ticketed = false;                  // --ticket=<n>: a front a launcher started
     std::string test_namespace;
     std::vector<std::string> forwarded;  // after "--"; every other unknown flag is dropped
 #ifdef PARTIES_UPDATE_TESTING
@@ -52,29 +68,35 @@ fs::path app_support() {
 // Where parties.db lives when no launcher assigns a place.
 fs::path unmanaged_data_dir() { return app_support() / layout::kDataRoot; }
 
-#ifdef PARTIES_UPDATE_TESTING
 std::optional<std::string_view> flag(std::string_view arg, std::string_view name) {
     if (!arg.starts_with(name)) return std::nullopt;
     return arg.substr(name.size());
 }
-#endif
 
 Args parse_args(int argc, const char* argv[]) {
     Args args{.install_root = app_support() / layout::kRuntimeRoot};
+    std::optional<fs::path> install_root;
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
         if (arg == "--") {
             args.forwarded.assign(argv + i + 1, argv + argc);
             break;
         }
+        if (arg == "--role=launcher") args.launcher = true;
+        if (arg.starts_with("--ticket=")) args.ticketed = true;
+        if (auto v = flag(arg, "--build=")) args.build = *v;
+        if (auto v = flag(arg, "--install-seed=")) args.install_seed = *v;
+        if (auto v = flag(arg, "--install-root=")) install_root = *v;
 #ifdef PARTIES_UPDATE_TESTING
-        if (auto v = flag(arg, "--install-root=")) args.install_root = *v;
         if (auto v = flag(arg, "--test-namespace=")) args.test_namespace = *v;
         if (auto v = flag(arg, "--self-test=")) args.self_test = *v;
         if (auto v = flag(arg, "--role=fake-launcher=")) args.fake_launcher = *v;
         if (auto v = flag(arg, "--log-dir=")) args.log_dir = *v;
 #endif
     }
+    // The launcher role is passed its roots by the booting front. A front
+    // takes one only in testing builds.
+    if (install_root && (args.launcher || kTesting)) args.install_root = *install_root;
     return args;
 }
 
@@ -154,7 +176,11 @@ void hold_data_lock(const fs::path& data_dir) {
     const std::string socket = protocol::socket_path(args.test_namespace);
     std::fprintf(stderr, "[host] front pid=%d bundle=%s\n", getpid(), bundle.c_str());
     for (int round = 0; round < 3; ++round) {
-        if (!door::connect(socket)) run_unmanaged(bundle, args);
+        if (!door::connect(socket)) {
+            // Its launcher died after asking for it: nothing may run unsupervised in its name.
+            if (args.ticketed) door::exit_process(0);
+            run_unmanaged(bundle, args);
+        }
         const auto reply = door::introduce({getpid(), PARTIES_HOST_ABI, bundle.string(), false, false, args.forwarded});
         if (!reply) continue;
         if (const auto* assign = std::get_if<protocol::Assign>(&*reply)) run_assigned(bundle, args, socket, *assign);
@@ -166,15 +192,10 @@ void hold_data_lock(const fs::path& data_dir) {
     door::exit_process(1);
 }
 
-#ifdef PARTIES_UPDATE_TESTING
-// The front-door e2e test's launcher: a dylib that a host process runs the way
-// the real launcher will run, without LaunchServices ever starting it.
-int run_fake_launcher(const fs::path& dylib, int argc, const char* argv[]) {
-    constexpr parties::host::Entry entry{"parties_fake_launcher_min_host_abi", "parties_fake_launcher_main"};
-    const auto payload = parties::host::load(dylib, std::nullopt, entry);
-    if (!payload) return 1;
+// A launcher dylib gets this process's arguments after argv[0].
+int run_launcher_payload(const parties::host::LoadedPayload& payload, const fs::path& dir, int argc,
+                         const char* argv[]) {
     const std::string bundle = NSBundle.mainBundle.bundlePath.fileSystemRepresentation;
-    const fs::path dir = dylib.parent_path();
     const PartiesHostApi api{
         .abi = PARTIES_HOST_ABI,
         .size = sizeof(PartiesHostApi),
@@ -187,7 +208,56 @@ int run_fake_launcher(const fs::path& dylib, int argc, const char* argv[]) {
         .argv = argv + 1,
         .exit_process = &door::exit_process,
     };
-    return payload->entry(&api);
+    return payload.entry(&api);
+}
+
+// The digest the committed state pins for a build's launcher. A launcher runs
+// only from the good or the previous good build.
+std::optional<parties::update::Sha256> pinned_launcher(const fs::path& install_root, const std::string& build) {
+    std::ifstream in(install_root / "state" / "boot-contract.json");
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const auto contract = parties::update::boot::parse_boot_contract(text);
+    if (!contract) return std::nullopt;
+    if (contract->good.dir == build) return contract->good.sha256;
+    if (contract->previous_good && contract->previous_good->dir == build) return contract->previous_good->sha256;
+    return std::nullopt;
+}
+
+// --role=launcher (process-contract.md, "Launcher argv"): verify the launcher
+// dylib, load it and run it. Exit 70 when it cannot be used.
+int run_launcher_role(const Args& args, int argc, const char* argv[]) {
+    const fs::path bundle = NSBundle.mainBundle.bundlePath.fileSystemRepresentation;
+    fs::path dir;
+    std::optional<parties::update::Sha256> expected;
+    std::error_code ec;
+    if (args.install_seed) {
+        // Only this bundle's own seed, which the bundle's signature covers.
+        if (!fs::equivalent(*args.install_seed, bundle, ec)) return kLauncherUnusable;
+        dir = bundle / "Contents" / "Frameworks";
+    } else {
+        if (!parties::update::boot::is_build_dir(args.build)) return kLauncherUnusable;
+        dir = layout::build_path(args.install_root, args.build);
+        expected = pinned_launcher(args.install_root, args.build);
+        if (!expected) {
+            std::fprintf(stderr, "[host] the committed state pins no launcher for %s\n", args.build.c_str());
+            return kLauncherUnusable;
+        }
+    }
+    const fs::path file = dir / kMacClient.launcher_file;
+    if (!parties::host::meets_requirement(file)) return kLauncherUnusable;
+    const auto payload = parties::host::load(file, expected, kLauncherEntry);
+    if (!payload) return kLauncherUnusable;
+    return run_launcher_payload(*payload, dir, argc, argv);
+}
+
+#ifdef PARTIES_UPDATE_TESTING
+// The front-door e2e test's launcher: a dylib that a host process runs the way
+// the real launcher will run, without LaunchServices ever starting it.
+int run_fake_launcher(const fs::path& dylib, int argc, const char* argv[]) {
+    constexpr parties::host::Entry entry{"parties_fake_launcher_min_host_abi", "parties_fake_launcher_main"};
+    const auto payload = parties::host::load(dylib, std::nullopt, entry);
+    if (!payload) return 1;
+    return run_launcher_payload(*payload, dylib.parent_path(), argc, argv);
 }
 #endif
 
@@ -198,12 +268,14 @@ int main(int argc, const char* argv[]) {
         const Args args = parse_args(argc, argv);
 #ifdef PARTIES_UPDATE_TESTING
         if (args.log_dir) {
-            std::freopen((*args.log_dir / ("front-" + std::to_string(getpid()) + ".log")).c_str(), "a", stderr);
+            const std::string role = args.launcher ? "launcher-" : "front-";
+            std::freopen((*args.log_dir / (role + std::to_string(getpid()) + ".log")).c_str(), "a", stderr);
             std::setvbuf(stderr, nullptr, _IONBF, 0);
         }
         if (args.self_test) return parties::host::load(*args.self_test, std::nullopt, kClientEntry) ? 0 : 1;
         if (args.fake_launcher) return run_fake_launcher(*args.fake_launcher, argc, argv);
 #endif
+        if (args.launcher) return run_launcher_role(args, argc, argv);
         run_front(args);
     }
 }
